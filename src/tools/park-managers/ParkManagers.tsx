@@ -83,12 +83,13 @@ function Stepper(props: {
     setDraft(null)
     set(value + delta)
   }
+  // Buttons are skipped by Tab (tabIndex -1) so Tab moves straight between fields.
   const button =
     'size-8 rounded-full text-xl leading-none text-nord-8 hover:bg-nord-2 active:bg-nord-3'
   return (
     <div className="flex items-center gap-2">
       <label htmlFor={id} className="w-24 text-nord-4">{label}</label>
-      <button type="button" aria-label={`Decrease ${label}`} className={button}
+      <button type="button" tabIndex={-1} aria-label={`Decrease ${label}`} className={button}
         onClick={() => stepBy(-step)}>
         −
       </button>
@@ -103,11 +104,12 @@ function Stepper(props: {
           if (Number.isFinite(e.target.valueAsNumber)) set(e.target.valueAsNumber)
         }}
         onBlur={() => setDraft(null)}
+        onDoubleClick={(e) => e.currentTarget.select()}
         className="w-20 rounded-lg border border-nord-3 bg-nord-0 px-2 py-1.5 text-center
           text-nord-6 [appearance:textfield] focus:border-nord-8 focus:outline-none
           [&::-webkit-inner-spin-button]:appearance-none"
       />
-      <button type="button" aria-label={`Increase ${label}`} className={button}
+      <button type="button" tabIndex={-1} aria-label={`Increase ${label}`} className={button}
         onClick={() => stepBy(step)}>
         +
       </button>

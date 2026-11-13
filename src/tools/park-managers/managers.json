@@ -1,0 +1,124 @@
+{
+  "attractions": [
+    "Roller Coaster", "Top Spin", "Drop Tower", "Special Guest", "Photo Booth",
+    "Haunted House", "Observatory", "Swing Boat", "Bumper Cars", "Tagada",
+    "Merry-Go-Round", "Hot Dog Stand", "Water Slide", "Ferris Wheel", "Swing Ride",
+    "Fireworks"
+  ],
+  "managers": [
+    {"name": "Luke", "base": 64, "interval": 4, "effects": [
+      {"bonus": 200, "partner": "Lucas", "attraction": "Special Guest"},
+      {"bonus": 70, "attraction": "Photo Booth"},
+      {"bonus": 70, "stat": "comfort", "min": 100}
+    ]},
+    {"name": "Beryl", "base": 80, "interval": 5, "effects": [
+      {"bonus": 100, "attraction": "Tagada"},
+      {"bonus": 100, "attraction": "Water Slide"},
+      {"bonus": 70, "stat": "thrill", "min": 100}
+    ]},
+    {"name": "Sereniel", "base": 115, "interval": 5, "effects": [
+      {"bonus": 200, "partner": "Narja", "attraction": "Drop Tower"},
+      {"bonus": 250, "partner": "Heidemarie"}
+    ]},
+    {"name": "Haru", "base": 180, "interval": 6, "effects": [
+      {"bonus": 200, "partner": "Rei"},
+      {"bonus": 100, "stat": "thrill", "min": 200}
+    ]},
+    {"name": "Narja", "base": 120, "interval": 4, "effects": [
+      {"bonus": 100, "partner": "Sereniel"},
+      {"bonus": 50, "partner": "Sereniel", "attraction": "Photo Booth"},
+      {"bonus": 50, "stat": "happiness", "min": 200}
+    ]},
+    {"name": "Tiphera", "base": 238, "interval": 7, "effects": [
+      {"bonus": 200, "partner": "Nine", "attraction": "Hot Dog Stand"},
+      {"bonus": 70, "attraction": "Hot Dog Stand"},
+      {"bonus": 70, "attraction": "Roller Coaster"}
+    ]},
+    {"name": "Nine", "base": 204, "interval": 6, "effects": [
+      {"bonus": 100, "attraction": "Water Slide"},
+      {"bonus": 200, "partner": "Tiphera"}
+    ]},
+    {"name": "Mika", "base": 60, "interval": 5, "effects": [
+      {"bonus": 70, "attraction": "Merry-Go-Round"},
+      {"bonus": 180, "partner": "Renoa"},
+      {"bonus": 200, "stat": "comfort", "min": 300}
+    ]},
+    {"name": "Rei", "base": 72, "interval": 6, "effects": [
+      {"bonus": 80, "attraction": "Hot Dog Stand"},
+      {"bonus": 200, "partner": "Renoa"},
+      {"bonus": 300, "stat": "thrill", "min": 300}
+    ]},
+    {"name": "Owen", "base": 48, "interval": 4, "effects": [
+      {"bonus": 60, "attraction": "Swing Ride"},
+      {"bonus": 150, "partner": "Renoa"},
+      {"bonus": 150, "stat": "happiness", "min": 300}
+    ]},
+    {"name": "Lucas", "base": 96, "interval": 6, "effects": [
+      {"bonus": 300, "partner": "Luke", "attraction": "Swing Boat"},
+      {"bonus": 50, "attraction": "Swing Ride"},
+      {"bonus": 50, "stat": "happiness", "min": 100}
+    ]},
+    {"name": "Cassius", "base": 69, "interval": 3, "effects": [
+      {"bonus": 50, "attraction": "Top Spin"},
+      {"bonus": 100, "partner": "Heidemarie", "attraction": "Top Spin"},
+      {"bonus": 100, "partner": "Olga"}
+    ]},
+    {"name": "Maribell", "base": 92, "interval": 4, "effects": [
+      {"bonus": 200, "partner": "Nine", "attraction": "Ferris Wheel"},
+      {"bonus": 100, "partner": "Beryl"},
+      {"bonus": 100, "attraction": "Ferris Wheel"}
+    ]},
+    {"name": "Yuki", "base": 150, "interval": 5, "effects": [
+      {"bonus": 200, "partner": "Fei", "attraction": "Tagada"},
+      {"bonus": 100, "partner": "Haru", "attraction": "Water Slide"},
+      {"bonus": 50, "stat": "comfort", "min": 200}
+    ]},
+    {"name": "Fei", "base": 136, "interval": 4,
+     "avatar": "1779109620556-f5443d078d2bdc65c35eee8d596759cf.webp", "effects": [
+      {"bonus": 200, "partner": "Hilde"},
+      {"bonus": 100, "stat": "thrill", "min": 300}
+    ]},
+    {"name": "Tenebria", "base": 200, "interval": 5, "effects": [
+      {"bonus": 150, "partner": "Heidemarie"},
+      {"bonus": 50, "attraction": "Observatory"},
+      {"bonus": 50, "attraction": "Roller Coaster"}
+    ]},
+    {"name": "Heidemarie", "base": 120, "interval": 3, "effects": [
+      {"bonus": 100, "partner": "Tenebria"},
+      {"bonus": 100, "partner": "Tiphera", "attraction": "Haunted House"}
+    ]},
+    {"name": "Renoa", "base": 168, "interval": 4, "unlock_rank": 26, "effects": [
+      {"bonus": 80, "partner": "Rossweisse", "attraction": "Roller Coaster"},
+      {"bonus": 50, "attraction": "Haunted House"},
+      {"bonus": 80, "partner": "Orlea", "attraction": "Bumper Cars"}
+    ]},
+    {"name": "Rossweisse", "base": 210, "interval": 5, "unlock_rank": 26, "effects": [
+      {"bonus": 70, "attraction": "Photo Booth"},
+      {"bonus": 100, "stat": "happiness", "min": 500},
+      {"bonus": 70, "attraction": "Hot Dog Stand"}
+    ]},
+    {"name": "Blazebell", "base": 252, "interval": 6, "unlock_rank": 26, "effects": [
+      {"bonus": 60, "attraction": "Merry-Go-Round"},
+      {"bonus": 100, "partner": "Rossweisse"}
+    ]},
+    {"name": "Orlea", "base": 168, "interval": 4, "unlock_rank": 26, "effects": [
+      {"bonus": 120, "partner": "Fei", "attraction": "Bumper Cars"},
+      {"bonus": 30, "attraction": "Merry-Go-Round"},
+      {"bonus": 50, "stat": "comfort", "min": 500}
+    ]},
+    {"name": "Hilde", "base": 336, "interval": 7, "unlock_rank": 28, "effects": [
+      {"bonus": 200, "partner": "Arabella"},
+      {"bonus": 200, "partner": "Olga", "attraction": "Swing Boat"}
+    ]},
+    {"name": "Arabella", "base": 240, "interval": 5, "unlock_rank": 28, "effects": [
+      {"bonus": 88, "stat": "thrill", "min": 600},
+      {"bonus": 88, "stat": "happiness", "min": 600},
+      {"bonus": 88, "stat": "comfort", "min": 600}
+    ]},
+    {"name": "Olga", "base": 288, "interval": 6, "unlock_rank": 28, "effects": [
+      {"bonus": 200, "partner": "Hilde"},
+      {"bonus": 50, "attraction": "Swing Ride"},
+      {"bonus": 50, "attraction": "Special Guest"}
+    ]}
+  ]
+}

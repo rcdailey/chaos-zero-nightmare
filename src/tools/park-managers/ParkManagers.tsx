@@ -44,6 +44,46 @@ function loadPark(): Park {
   }
 }
 
+const HISTORY_KEY = 'czn-manager-optimizer:history'
+const HISTORY_LIMIT = 30
+// Typing "361" passes through 3 and 36; waiting for input to settle records only the net change.
+const SETTLE_MS = 800
+
+type Change = { at: number; added: string[]; removed: string[] }
+/** Roster changes, newest first, relative to `roster`, the last recorded recommendation. */
+type History = { roster: string[]; changes: Change[] }
+
+function loadHistory(current: string[]): History {
+  const names = (v: unknown) =>
+    Array.isArray(v) ? v.filter((n) => MANAGERS.some((m) => m.name === n)) : []
+  try {
+    const saved = JSON.parse(localStorage.getItem(HISTORY_KEY) ?? 'null')
+    if (!Array.isArray(saved?.roster)) return { roster: current, changes: [] }
+    const changes = Array.isArray(saved.changes) ? saved.changes : []
+    return {
+      roster: names(saved.roster),
+      changes: changes
+        .filter((c: Partial<Change>) => typeof c?.at === 'number')
+        .map((c: Change) => ({ at: c.at, added: names(c.added), removed: names(c.removed) }))
+        .slice(0, HISTORY_LIMIT),
+    }
+  } catch {
+    return { roster: current, changes: [] }
+  }
+}
+
+function record(history: History, roster: string[]): History {
+  const added = roster.filter((n) => !history.roster.includes(n))
+  const removed = history.roster.filter((n) => !roster.includes(n))
+  if (!added.length && !removed.length) return history
+  return {
+    roster,
+    changes: [{ at: Date.now(), added, removed }, ...history.changes].slice(0, HISTORY_LIMIT),
+  }
+}
+
+const byName = new Map(MANAGERS.map((m) => [m.name, m]))
+
 function describe(e: Effect): string {
   const stat = e.stat ? `${e.stat[0].toUpperCase()}${e.stat.slice(1)} ${e.min}+` : undefined
   return [e.partner, e.attraction, stat].filter(Boolean).join(' + ')
@@ -52,7 +92,9 @@ function describe(e: Effect): string {
 function Avatar({ manager, size, dim }: { manager: Manager; size: number; dim?: boolean }) {
   return (
     <div
-      className={`shrink-0 rounded-full bg-nord-2 ring-3 ring-nord-8/50 shadow-lg ${
+      className={`shrink-0 rounded-full bg-nord-2 ring-nord-8/50 shadow-lg ${
+        size < 50 ? 'ring-2' : 'ring-3'
+      } ${
         dim ? 'grayscale brightness-50' : ''
       }`}
       style={{
@@ -126,8 +168,8 @@ function ParkPanel({ park, setPark }: { park: Park; setPark: (p: Park) => void }
         : [...park.attractions, name],
     })
   return (
-    <section className="flex w-full shrink-0 flex-col gap-3 rounded-2xl border border-nord-3
-      bg-nord-1 p-5 lg:w-80">
+    <section className="flex shrink-0 flex-col gap-3 rounded-2xl border border-nord-3
+      bg-nord-1 p-5">
       <h2 className="text-xl font-bold text-nord-6">Park</h2>
       <Stepper label="Rank" value={park.rank} step={1} min={1}
         onChange={(rank) => setPark({ ...park, rank })} />
@@ -188,20 +230,73 @@ function RosterCard({ manager, deployed, park }: {
   )
 }
 
+function HistoryPanel({ history, onClear }: { history: History; onClear: () => void }) {
+  const chip = (name: string, sign: '+' | '-') => (
+    <span key={sign + name} className={`flex items-center gap-1.5 rounded-full py-0.5 pr-2.5
+      pl-0.5 text-sm font-medium ${
+      sign === '+' ? 'bg-nord-14/20 text-nord-14' : 'bg-nord-11/20 text-nord-11'
+    }`}>
+      <Avatar manager={byName.get(name)!} size={44} />
+      {sign} {name}
+    </span>
+  )
+  return (
+    <section className="flex min-h-0 flex-1 flex-col gap-2 rounded-2xl border border-nord-3
+      bg-nord-1 p-4">
+      <div className="flex items-baseline gap-3">
+        <h2 className="text-lg font-bold text-nord-6">Changes</h2>
+        {history.changes.length > 0 && (
+          <button type="button" onClick={onClear}
+            className="text-xs text-nord-4/60 hover:text-nord-8">
+            Clear
+          </button>
+        )}
+      </div>
+      {history.changes.length === 0 && (
+        <p className="text-sm text-nord-4/60">
+          Roster changes appear here when your park changes the recommendation.
+        </p>
+      )}
+      <ol className="-mr-2 flex min-h-0 flex-col gap-1.5 overflow-y-auto pr-2">
+        {history.changes.map((c, i) => (
+          <li key={c.at} className={`flex flex-wrap items-center gap-1.5 rounded-lg border p-2
+            ${i === 0 ? 'border-nord-8/60 bg-nord-0' : 'border-nord-2 opacity-70'}`}>
+            <time className="w-full text-xs text-nord-4/60">
+              {new Date(c.at).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}
+            </time>
+            {c.removed.map((n) => chip(n, '-'))}
+            {c.added.map((n) => chip(n, '+'))}
+          </li>
+        ))}
+      </ol>
+    </section>
+  )
+}
+
 export default function ParkManagers() {
   const [park, setPark] = useState(loadPark)
   useEffect(() => localStorage.setItem(STORAGE_KEY, JSON.stringify(park)), [park])
 
   const roster = useMemo(() => bestRoster(park), [park])
+  const [history, setHistory] = useState(() => loadHistory(roster))
+  useEffect(() => {
+    const timer = setTimeout(() => setHistory((h) => record(h, roster)), SETTLE_MS)
+    return () => clearTimeout(timer)
+  }, [roster])
+  useEffect(() => localStorage.setItem(HISTORY_KEY, JSON.stringify(history)), [history])
   const deployed = new Set(roster)
-  const byName = new Map(MANAGERS.map((m) => [m.name, m]))
   const rate = (m: Manager) => points(m, deployed, park) / m.interval
   const cards = roster.map((n) => byName.get(n)!).sort((a, b) => rate(b) - rate(a))
   const total = cards.reduce((sum, m) => sum + rate(m), 0)
 
   return (
     <div className="flex flex-col items-start gap-6 lg:flex-row">
-      <ParkPanel park={park} setPark={setPark} />
+      <div className="flex w-full shrink-0 flex-col gap-4 lg:sticky lg:top-6 lg:h-[calc(100vh-3rem)]
+        lg:w-80">
+        <ParkPanel park={park} setPark={setPark} />
+        <HistoryPanel history={history}
+          onClear={() => setHistory({ roster, changes: [] })} />
+      </div>
       <div className="flex w-full flex-col gap-4">
         <header className="flex items-baseline gap-3">
           <span className="text-5xl font-bold text-nord-13">{total.toFixed(1)}</span>

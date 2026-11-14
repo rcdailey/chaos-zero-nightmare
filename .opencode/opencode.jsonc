@@ -4,4 +4,13 @@
     { "action": "shell", "resource": "*git push*", "effect": "allow" },
     { "action": "subagent", "resource": "acceptance", "effect": "deny" },
   ],
+  "mcp": {
+    "servers": {
+      "czn-data": {
+        "type": "remote",
+        "url": "https://czn.dailey.app/mcp",
+        "oauth": { "client_id": "czn-mcp" }
+      }
+    }
+  },
 }

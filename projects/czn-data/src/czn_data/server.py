@@ -74,7 +74,12 @@ async def _query(sql: str, params: dict | None = None) -> list[dict]:
 
 
 def _jsonable(row: dict) -> dict:
-    return {k: v.isoformat() if hasattr(v, "isoformat") else v for k, v in row.items()}
+    """Drop null and empty fields to save model tokens; keep 0 and False, which carry meaning."""
+    return {
+        k: v.isoformat() if hasattr(v, "isoformat") else v
+        for k, v in row.items()
+        if v is not None and v != "" and v != [] and v != {}
+    }
 
 
 def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> MCPServer:

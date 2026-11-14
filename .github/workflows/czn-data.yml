@@ -40,9 +40,16 @@ jobs:
           working_directory: projects/czn-data
       - run: uv sync --locked
       - run: mise run lint
+      # A service container cannot take arguments, and VictoriaMetrics needs the cluster's
+      # OTLP naming flag for the metric name tests.
+      - run: >-
+          docker run -d -p 8428:8428 victoriametrics/victoria-metrics:latest
+          -opentelemetry.usePrometheusNaming -search.latencyOffset=0s
+          && until curl -sf localhost:8428/health; do sleep 1; done
       - run: uv run pytest
         env:
           TEST_DATABASE_URL: postgresql://postgres:test@localhost:5432/postgres
+          TEST_VM_URL: http://localhost:8428
 
   image:
     needs: check

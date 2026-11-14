@@ -32,14 +32,20 @@ fetching the site. If Prydwen really removed content, run `czn-data reparse --al
 If Cloudflare challenges the scraper, the run stops at once, because every later request would be
 blocked too.
 
-The scraper exits non-zero on any failure, pushes metrics at the end of each run, and writes JSON
-logs (`time`, `level`, `msg`, plus fields such as `url` and `error`) that vlagent maps to
-VictoriaLogs fields. Alert rules for vmalert are in [deploy/alerts.yaml](deploy/alerts.yaml).
+The scraper exits non-zero on any failure, including a failed metrics export. It writes JSON logs
+(`time`, `level`, `msg`, plus fields such as `url` and `error`) that vlagent maps to VictoriaLogs
+fields. Alert rules for vmalert are in [deploy/alerts.yaml](deploy/alerts.yaml).
 
-Metrics:
+At the end of each run the scraper sends its metrics once over OTLP/HTTP and waits for the
+receiver to accept them before it exits. The names below are the ones VictoriaMetrics stores
+with `-opentelemetry.usePrometheusNaming` (the OTLP names use dots, such as `czn.scrape.pages`).
+Every series also carries the OTLP resource attributes as labels, such as `service_name`,
+`service_instance_id`, and whatever the collector adds.
 
 - `czn_scrape_success`: 1 when the run had no failures.
-- `czn_scrape_last_success_timestamp_seconds`: pushed only by fully successful runs.
+- `czn_scrape_last_success_timestamp_seconds`: sent only by fully successful runs.
+- `czn_scrape_last_run_timestamp_seconds`, `czn_scrape_duration_seconds`: end and length of the
+  run.
 - `czn_scrape_blocked`, `czn_scrape_discovery_failed`: 1 when the run stopped early.
 - `czn_scrape_pages{result}`: pages per result (`ok`, `fetch_error`, `parse_error`).
 - `czn_scrape_validation_failures{kind,field}`: page kind and field that stopped parsing.
@@ -50,7 +56,12 @@ Metrics:
 Environment variables:
 
 - `DATABASE_URL` (both): Postgres URL. The scraper creates tables; the server needs `SELECT` only.
-- `METRICS_PUSH_URL` (scrape): Pushgateway-format endpoint (see below). Unset skips the push.
+- `OTEL_EXPORTER_OTLP_ENDPOINT` or `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` (scrape): OTLP/HTTP
+  receiver, such as `http://otel-gateway-collector.observability:4318`. With neither set, no
+  metrics are sent. The other standard variables also apply: `OTEL_SERVICE_NAME`,
+  `OTEL_RESOURCE_ATTRIBUTES`, `OTEL_EXPORTER_OTLP_HEADERS`, `OTEL_EXPORTER_OTLP_TIMEOUT`, and
+  `OTEL_SDK_DISABLED` or `OTEL_METRICS_EXPORTER=none` to turn the export off. Only the
+  `http/protobuf` protocol is supported.
 - `MCP_PUBLIC_URL` (serve): public URL of the MCP endpoint, such as
   `https://czn.example.com/mcp`.
 - `OIDC_ISSUER` (serve): issuer URL of the OIDC provider that issues access tokens.
@@ -59,8 +70,6 @@ Environment variables:
 - `MCP_ALLOW_UNAUTHENTICATED` (serve): `true` runs without auth, for local use.
 - `LOG_LEVEL` (both): defaults to `INFO`.
 
-For VictoriaMetrics, set `METRICS_PUSH_URL` to
-`http://<vmsingle>:8428/api/v1/import/prometheus`; the scraper appends `/metrics/job/czn-scrape`.
 The server refuses to start unless `OIDC_ISSUER` or `MCP_ALLOW_UNAUTHENTICATED=true` is set.
 
 The scraper creates the schema itself, including the `pg_trgm` extension. `pg_trgm` is a trusted

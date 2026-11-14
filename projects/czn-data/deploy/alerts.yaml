@@ -1,10 +1,16 @@
 # vmalert rule group for the scraper. Load it as a vmalert rule file, or paste `groups` into a
 # VMRule (spec.groups).
 #
-# The scraper pushes its series once per run, and a pushed sample goes stale minutes later, so
-# every query reads the last sample within a window. The 26h windows assume a daily CronJob;
-# keep them at the schedule interval plus slack. Only series pushed on every run are used for
-# firing conditions, so an alert resolves as soon as a later run succeeds.
+# The scraper exports its series over OTLP once per run, and each sample goes stale minutes
+# later, so every query reads samples within a window. The 26h windows assume a daily CronJob;
+# keep them at the schedule interval plus slack. Names are those VictoriaMetrics stores with
+# -opentelemetry.usePrometheusNaming.
+#
+# Each run is a new process with a new service.instance.id, so every run writes new series. A
+# plain max(last_over_time(...)) would still see an earlier bad run's series and never resolve.
+# The run-state rules therefore keep only the series with the newest sample (the latest run):
+#   last_over_time(m[26h]) and tlast_over_time(m[26h]) == scalar(max(tlast_over_time(m[26h])))
+# Only series sent on every run are used, so an alert resolves as soon as a later run succeeds.
 groups:
   - name: czn-data
     rules:
@@ -19,7 +25,12 @@ groups:
           description: Check the CronJob and the other czn-data alerts for the cause.
 
       - alert: CznScrapeBlocked
-        expr: max(last_over_time(czn_scrape_blocked[26h])) == 1
+        expr: >-
+          max(
+            last_over_time(czn_scrape_blocked[26h])
+            and tlast_over_time(czn_scrape_blocked[26h])
+              == scalar(max(tlast_over_time(czn_scrape_blocked[26h])))
+          ) == 1
         labels:
           severity: warning
         annotations:
@@ -29,14 +40,24 @@ groups:
             its impersonation target. The database keeps the previous data.
 
       - alert: CznScrapeDiscoveryFailed
-        expr: max(last_over_time(czn_scrape_discovery_failed[26h])) == 1
+        expr: >-
+          max(
+            last_over_time(czn_scrape_discovery_failed[26h])
+            and tlast_over_time(czn_scrape_discovery_failed[26h])
+              == scalar(max(tlast_over_time(czn_scrape_discovery_failed[26h])))
+          ) == 1
         labels:
           severity: warning
         annotations:
           summary: czn-data could not list Prydwen pages from robots.txt and the sitemaps
 
       - alert: CznScrapeLayoutChanged
-        expr: max(last_over_time(czn_scrape_pages{result="parse_error"}[26h])) > 0
+        expr: >-
+          max(
+            last_over_time(czn_scrape_pages{result="parse_error"}[26h])
+            and tlast_over_time(czn_scrape_pages{result="parse_error"}[26h])
+              == scalar(max(tlast_over_time(czn_scrape_pages{result="parse_error"}[26h])))
+          ) > 0
         labels:
           severity: warning
         annotations:
@@ -49,7 +70,12 @@ groups:
             really removed them, run `czn-data reparse --allow-shrink`.
 
       - alert: CznScrapeFetchErrors
-        expr: max(last_over_time(czn_scrape_pages{result="fetch_error"}[26h])) > 0
+        expr: >-
+          max(
+            last_over_time(czn_scrape_pages{result="fetch_error"}[26h])
+            and tlast_over_time(czn_scrape_pages{result="fetch_error"}[26h])
+              == scalar(max(tlast_over_time(czn_scrape_pages{result="fetch_error"}[26h])))
+          ) > 0
         labels:
           severity: warning
         annotations:

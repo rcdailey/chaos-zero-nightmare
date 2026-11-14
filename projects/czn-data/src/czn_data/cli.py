@@ -70,7 +70,7 @@ def main() -> None:
 
 def _run_job(command: str, allow_shrink: bool) -> int:
     from .fetch import Fetcher
-    from .scrape import push_metrics, reparse, scrape
+    from .scrape import export_metrics, reparse, scrape
 
     log = logging.getLogger("czn_data")
     started = time.time()
@@ -94,8 +94,10 @@ def _run_job(command: str, allow_shrink: bool) -> int:
         )
         if command == "scrape":
             try:
-                push_metrics(conn, result, started)
+                exported = export_metrics(conn, result, started)
             except Exception:
-                log.exception("metrics push failed")
+                log.exception("metrics export failed")
+                exported = False
+            if not exported:
                 return 1
     return 0 if result.ok else 1

@@ -48,7 +48,6 @@ class RunResult:
 
 def scrape(conn: psycopg.Connection, get: Callable[[str], str], allow_shrink: bool) -> RunResult:
     result = RunResult()
-    store.apply_schema(conn)
     try:
         urls = sitemap_urls(get)
     except Blocked as error:
@@ -93,7 +92,6 @@ def scrape(conn: psycopg.Connection, get: Callable[[str], str], allow_shrink: bo
 def reparse(conn: psycopg.Connection, allow_shrink: bool) -> RunResult:
     """Parse the stored HTML again, for example after fixing a parser. Fetches nothing."""
     result = RunResult()
-    store.apply_schema(conn)
     pages = conn.execute("SELECT url, html, fetched_at FROM page ORDER BY url").fetchall()
     for url, html, fetched_at in pages:
         _process(conn, url, html, fetched_at, allow_shrink, result)

@@ -30,8 +30,11 @@ log = logging.getLogger(__name__)
 INSTRUCTIONS = """\
 Chaos Zero Nightmare (CZN) game data from prydwen.gg: characters, their cards and Epiphany
 variants with Prydwen's ratings, potentials, Manifest Ego levels, neutral cards, equipment, memory
-fragment sets, partners, keyword/effect definitions, and full-text search over every guide page.
-Start with `lookup` for any name seen on screen, then use the specific tools. Cite `url` and
+fragment sets, partners, keyword/effect definitions, Prydwen's per-character guides (teams,
+decks, equipment, fragment and partner rankings, synergies), and full-text search over every
+guide page. Start with `lookup` for any name seen on screen and `match_card_text` for card text
+seen on screen, then use the specific tools; `get_character` returns one section at a time.
+Fields that are empty are left out. Ratings are Prydwen's stars, 1 to 5. Cite `url` and
 `data_fetched_at` when the answer depends on the data. Player state (owned characters, current
 run) is not stored here; read it from the user's screenshots.
 """
@@ -61,6 +64,69 @@ LIMIT %(limit)s
 # "Flicker Blade I"). Shared by every tool that resolves a name typed from a screenshot.
 NAME_MATCH = "(name ILIKE '%%' || %(name)s || '%%' OR %(name)s <%% name)"
 LOOKUP_SQL = LOOKUP_SQL.format(match=NAME_MATCH)
+
+# get_character section name -> query for that part of one character's data (%(slug)s).
+CHARACTER_SECTIONS = {
+    # Reviews are left out to keep this small; get_card returns them for one card.
+    "cards": "SELECT category, name, variant, alias, cost, type, tags, text, rating, target_neutral"
+    " FROM card WHERE character_slug = %(slug)s ORDER BY category, base_name, variant",
+    "potentials": "SELECT position, name, text FROM potential WHERE character_slug = %(slug)s",
+    "manifest_egos": "SELECT level, name, text, performance, review FROM manifest_ego"
+    " WHERE character_slug = %(slug)s ORDER BY level",
+    "teams": "SELECT name, tier, members FROM team WHERE character_slug = %(slug)s",
+    "decks": "SELECT name, partner, equipment, fragments, cards, notes FROM deck"
+    " WHERE character_slug = %(slug)s",
+    "equipment": "SELECT tab, best, slots, notes FROM character_equipment"
+    " WHERE character_slug = %(slug)s",
+    "seasonal_powers": "SELECT season, best, text FROM seasonal_power"
+    " WHERE character_slug = %(slug)s",
+    "fragments": "SELECT build, position, sets, performance, notes FROM fragment_rank"
+    " WHERE character_slug = %(slug)s ORDER BY build, position",
+    "partners": "SELECT position, partner, dupes, performance, notes FROM partner_rank"
+    " WHERE character_slug = %(slug)s ORDER BY position",
+    "synergies": "SELECT name, points FROM synergy WHERE character_slug = %(slug)s",
+}
+_SECTION_COUNTS_SQL = "SELECT " + ", ".join(
+    f"(SELECT count(*) FROM ({sql}) s) AS {name}" for name, sql in CHARACTER_SECTIONS.items()
+)
+
+# Where guides recommend an item: the best-matching equipment, fragment set, or partner name
+# (fuzzy), then every deck, equipment tab, and ranking row that lists it.
+RECOMMENDED_BY_SQL = """
+WITH item AS (
+    SELECT name FROM (
+        SELECT name FROM equipment UNION SELECT name FROM fragment_set
+        UNION SELECT name FROM partner
+    ) names
+    WHERE {match}
+    ORDER BY word_similarity(%(name)s, name) DESC, similarity(name, %(name)s) DESC
+    LIMIT 1
+)
+SELECT item.name AS item, c.name AS character,
+       array_agg(DISTINCT r.place || ': ' || r.detail) AS places, c.url
+FROM item, LATERAL (
+    SELECT character_slug, 'deck' AS place, name AS detail FROM deck
+    WHERE item.name = ANY (equipment) OR item.name = ANY (fragments) OR partner = item.name
+    UNION ALL
+    SELECT character_slug, 'equipment tab', tab FROM character_equipment
+    WHERE EXISTS (
+        SELECT FROM jsonb_each(slots) slot, jsonb_array_elements_text(slot.value) listed
+        WHERE listed = item.name
+    )
+    UNION ALL
+    SELECT character_slug, 'fragment ranking',
+           concat_ws(' ', build, '#' || position, performance) FROM fragment_rank
+    WHERE item.name = ANY (sets)
+    UNION ALL
+    SELECT character_slug, 'partner ranking',
+           concat_ws(' ', '#' || position, dupes, performance) FROM partner_rank
+    WHERE partner = item.name
+) r
+JOIN character c ON c.slug = r.character_slug
+GROUP BY item.name, c.name, c.url
+ORDER BY count(*) DESC, c.name
+"""
+RECOMMENDED_BY_SQL = RECOMMENDED_BY_SQL.format(match=NAME_MATCH)
 
 
 def _database_url() -> str:
@@ -106,7 +172,9 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
     @mcp.tool()
     async def get_card(name: str) -> list[dict]:
         """Every version of the best-matching card: the base card and its Epiphany variants
-        (I-V), each with full text, cost, tags, Prydwen's star rating and Epiphany review."""
+        (I-V), each with full text, cost, tags, Prydwen's star rating and its own review. The
+        base card also carries the overall review, the recommended Neutral Epiphany
+        (target_neutral) and Prydwen's Neutral and Divine advice."""
         return await _query(
             """
             WITH best AS (
@@ -126,10 +194,80 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
         )
 
     @mcp.tool()
-    async def get_character(name: str) -> dict | None:
-        """Full profile of the best-matching character: rarity, element, class, every card and
-        Epiphany variant, potentials, Manifest Ego levels with reviews, and Prydwen's written
-        guide sections (pros, cons, decks, teams, partners, fragments, equipment)."""
+    async def get_character(name: str, section: str | None = None) -> dict | None:
+        """Profile of the best-matching character. Without section: rarity, element, class and
+        the list of available sections. With section, that part of Prydwen's guide: cards
+        (without reviews; use get_card), potentials, manifest_egos, teams, decks, equipment
+        (per season tab), seasonal_powers, fragments, partners, synergies, or a prose section
+        by title (Pros, Cons, Introduction, Key Mechanics, Stats, Potential Priority, ...)."""
+        character = await _find_character(name)
+        if character is None:
+            return None
+        prose = character.pop("sections", [])
+        slug = {"slug": character["slug"]}
+        if section is None:
+            counts = await _query(_SECTION_COUNTS_SQL, slug)
+            available = [s for s, n in counts[0].items() if n] if counts else []
+            return character | {"sections": available + [s["title"] for s in prose]}
+        key = section.strip().lower()
+        if key in CHARACTER_SECTIONS:
+            return character | {key: await _query(CHARACTER_SECTIONS[key], slug)}
+        matches = [s for s in prose if key in s["title"].lower()]
+        return character | {"sections": matches}
+
+    @mcp.tool()
+    async def match_card_text(
+        text: str, character: str | None = None, limit: int = 5
+    ) -> list[dict]:
+        """Find the card and Epiphany variant whose effect text best matches text read from the
+        screen (the game shows Epiphany choices as text, without variant numbers). character
+        narrows the search to one character's cards (name or slug)."""
+        return await _query(
+            """
+            SELECT card.name, card.base_name, card.variant, card.alias, card.cost, card.type,
+                   card.text, card.rating, character.name AS character, card.url,
+                   round(word_similarity(%(text)s, card.text)::numeric, 2) AS match
+            FROM card LEFT JOIN character ON character.slug = card.character_slug
+            WHERE (%(character)s::text IS NULL OR character.slug = %(character)s
+                   OR character.name ILIKE %(character)s)
+            ORDER BY word_similarity(%(text)s, card.text) DESC, card.name
+            LIMIT %(limit)s
+            """,
+            {"text": text, "character": character, "limit": min(limit, 20)},
+        )
+
+    @mcp.tool()
+    async def find_teams(character: str) -> list[dict]:
+        """Every team in Prydwen's guides that includes the best-matching character, with the
+        team name, tier, members, and the characters whose pages list it."""
+        return await _query(
+            """
+            WITH member AS (
+                SELECT name FROM (SELECT DISTINCT unnest(members) AS name FROM team) members
+                WHERE """
+            + NAME_MATCH
+            + """
+                ORDER BY word_similarity(%(name)s, name) DESC, similarity(name, %(name)s) DESC
+                LIMIT 1
+            )
+            SELECT team.name, team.tier, team.members,
+                   array_agg(owner.name ORDER BY owner.name) AS listed_for
+            FROM member, team JOIN character owner ON owner.slug = team.character_slug
+            WHERE member.name = ANY (team.members)
+            GROUP BY team.name, team.tier, team.members
+            ORDER BY team.tier NULLS LAST, team.name
+            """,
+            {"name": character},
+        )
+
+    @mcp.tool()
+    async def recommended_by(name: str) -> list[dict]:
+        """Which characters' guides recommend the best-matching equipment item, memory
+        fragment set, or partner, and where: deck, equipment tab, fragment or partner
+        ranking. Use it for "who uses X" questions."""
+        return await _query(RECOMMENDED_BY_SQL, {"name": name})
+
+    async def _find_character(name: str) -> dict | None:
         found = await _query(
             """
             SELECT character.*, page.data_fetched_at FROM character JOIN page USING (url)
@@ -142,24 +280,7 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
             """,
             {"name": name},
         )
-        if not found:
-            return None
-        character = found[0]
-        slug = {"slug": character["slug"]}
-        character["cards"] = await _query(
-            "SELECT * FROM card WHERE character_slug = %(slug)s ORDER BY category, base_name,"
-            " variant",
-            slug,
-        )
-        character["potentials"] = await _query(
-            "SELECT position, name, text FROM potential WHERE character_slug = %(slug)s", slug
-        )
-        character["manifest_egos"] = await _query(
-            "SELECT level, name, text, performance, review FROM manifest_ego"
-            " WHERE character_slug = %(slug)s ORDER BY level",
-            slug,
-        )
-        return character
+        return found[0] if found else None
 
     @mcp.tool()
     async def list_cards(

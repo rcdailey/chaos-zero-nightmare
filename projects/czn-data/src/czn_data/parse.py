@@ -230,8 +230,11 @@ def parse_character(root: Tag, url: str) -> dict[str, list[dict]]:
     ego_section = _section(root, "Manifest Ego (dupes)")
     egos = _manifest_egos(root, ego_section) if ego_section else []
 
-    for record in (*cards, *potentials, *egos):
-        record["character_slug"] = slug
+    sections, guide = _guide(root, name)
+    records = {"card": cards, "potential": potentials, "manifest_ego": egos, **guide}
+    for rows in records.values():
+        for record in rows:
+            record["character_slug"] = slug
     character = {
         "slug": slug,
         "name": name,
@@ -240,14 +243,9 @@ def parse_character(root: Tag, url: str) -> dict[str, list[dict]]:
         "class": _chip(root, "character-class", "character.class"),
         "updated_text": text_of(root.select_one(".freshness strong")) or None,
         "image_url": _image(root.select_one(".czn-character-page") or root),
-        "sections": _guide_sections(root),
+        "sections": sections,
     }
-    return {
-        "character": [character],
-        "card": cards,
-        "potential": potentials,
-        "manifest_ego": egos,
-    }
+    return {"character": [character], **records}
 
 
 def _epiphany_variants(root: Tag, base_cards: list[dict]) -> list[dict]:
@@ -266,10 +264,11 @@ def _epiphany_variants(root: Tag, base_cards: list[dict]) -> list[dict]:
             continue
         heading = _required_text(article.select_one(".build-table-title h3"), "epiphany.base")
         base_name = _strip_variant(heading)[0]
-        comment = text_of(article.select_one(".czn-card-group-comment")) or None
         singles = review.select(".single-card")
         if len(singles) < 2:
             raise ParseError("epiphany.variant", f"{heading}: no variants parsed")
+        base = by_name.get(base_name, {})
+        group = []
         for position, single in enumerate(singles):
             el = single.select_one(".chaos-card-inside")
             if el is None:
@@ -277,15 +276,13 @@ def _epiphany_variants(root: Tag, base_cards: list[dict]) -> list[dict]:
             card = _card(el, "epiphany.variant")
             rating = single.select_one(".rating").get_text().count("★") or None
             if position == 0:
-                if base_name in by_name:
-                    by_name[base_name].update(epiphany_review=comment, rating=rating)
+                base["rating"] = rating
                 continue
             # Most variants are numbered ("Flametouch IV"); some are named ("Hew (Extreme)").
             stem, suffix = _strip_variant(card["name"])
             if stem != base_name:
                 suffix = card["name"].removeprefix(base_name).strip() or card["name"]
-            base = by_name.get(base_name, {})
-            variants.append(
+            group.append(
                 card
                 | {
                     "category": base.get("category", "unique"),
@@ -294,7 +291,87 @@ def _epiphany_variants(root: Tag, base_cards: list[dict]) -> list[dict]:
                     "rating": rating,
                 }
             )
+        comment = article.select_one(".czn-card-group-comment")
+        if comment:
+            _split_review(comment, base, group)
+        variants.extend(group)
     return variants
+
+
+_NUMERAL_LABEL = re.compile(r"\b(I|II|III|IV|V)\s*(?:\(([^)]+)\))?$")
+
+
+def _split_review(comment: Tag, base: dict, variants: list[dict]) -> None:
+    """Spread one card's Epiphany review over the rows it talks about.
+
+    Prydwen writes the review as paragraphs, most starting with a bold or bracketed label:
+    "Flicker Blade I (Amped):" for a variant (the parenthesized part is the game's name for
+    it, given on only a few pages), "Neutral:" or "[Target Neutral Epiphany: 2 Morale]" for
+    Neutral Epiphanies, "Divine:" or "[Special Divines]" for Divine ones, and "[General Role]"
+    style headings for the overview. A paragraph without a label continues the previous one.
+    The overview, neutral and divine text go to the base card; each variant gets its own.
+    """
+    by_name = {v["name"]: v for v in variants}
+    by_numeral = {v["variant"]: v for v in variants}
+    collected: list[tuple[dict, str, list[str]]] = []
+
+    def add(row: dict, key: str, text: str) -> None:
+        if not text:
+            return
+        for collected_row, collected_key, parts in collected:
+            if collected_row is row and collected_key == key:
+                parts.append(text)
+                return
+        collected.append((row, key, [text]))
+
+    current = (base, "epiphany_review")
+    for paragraph in comment.find_all("p"):
+        text = text_of(paragraph)
+        if not text:
+            continue
+        label, rest = _review_label(paragraph, text)
+        clean = label.strip("[]").rstrip(":").strip()
+        lower = clean.lower()
+        target_neutral = re.match(r"target neutral epiphany:\s*(.+)", clean, re.IGNORECASE)
+        numeral = _NUMERAL_LABEL.search(clean)
+        named = by_name.get(clean) or by_name.get(re.sub(r"\s*\([^)]*\)$", "", clean))
+        if target_neutral:
+            base["target_neutral"] = target_neutral.group(1)
+            current = (base, "neutral_review")
+        elif lower == "neutral":
+            current = (base, "neutral_review")
+        elif lower in ("divine", "special divines"):
+            current = (base, "divine_review")
+        elif named or (numeral and numeral.group(1) in by_numeral):
+            row = named or by_numeral[numeral.group(1)]
+            if numeral and numeral.group(2):
+                row["alias"] = numeral.group(2)
+            current = (row, "epiphany_review")
+        elif label.startswith("["):
+            current, rest = (base, "epiphany_review"), text
+        else:
+            rest = text
+        add(*current, rest)
+    for row, key, parts in collected:
+        row[key] = "\n".join(parts)
+    # Other pages lead the Neutral paragraph with the pick: "Target Neutral Epiphany: Draw 1."
+    # Longer leads are sentences, not a pick, and stay only in the review.
+    inline = re.match(
+        r"Target Neutral Epiphany:\s*([^.\n]{1,30})\.", base.get("neutral_review", "")
+    )
+    if inline and "target_neutral" not in base:
+        base["target_neutral"] = inline.group(1).strip()
+
+
+def _review_label(paragraph: Tag, text: str) -> tuple[str, str]:
+    """(label, text after it) when the paragraph starts with a bold or bracketed label."""
+    if re.fullmatch(r"\[[^\]]+\]", text):
+        return text, ""
+    strong = paragraph.find(["strong", "b"])
+    label = text_of(strong) if strong else ""
+    if label and text.startswith(label):
+        return label, text[len(label) :].lstrip(" :")
+    return "", text
 
 
 def _strip_variant(name: str) -> tuple[str, str]:
@@ -329,20 +406,186 @@ def _manifest_egos(root: Tag, section: Tag) -> list[dict]:
     return egos
 
 
-def _guide_sections(root: Tag) -> list[dict]:
-    """Prydwen's written review: pros, cons, intro, teams, partners, gear advice, and so on."""
-    sections = []
+def _guide(root: Tag, character_name: str) -> tuple[list[dict], dict[str, list[dict]]]:
+    """Prydwen's written guide (Review, Decks & Teams and Build tabs).
+
+    Sections with repeated markup become rows of their own table; every other section is kept
+    as prose under its title, without the character name ("Mei Lin Teams" -> "Teams"). Dupes
+    are skipped here because ``_manifest_egos`` already merges them into the Ego levels.
+    """
+    prose = []
+    records: dict[str, list[dict]] = {table: [] for table, _ in _STRUCTURED_SECTIONS.values()}
     for el in root.select("article.pros, article.cons, .review-source-panel, .build-table-card"):
         if el.select_one(".pw-card-epi-review"):
             continue
         heading = el.select_one("h3")
-        title = text_of(heading).replace("\n", " ") if heading else ""
+        full_title = text_of(heading).replace("\n", " ") if heading else ""
+        title = full_title.removeprefix(character_name).strip() or full_title
+        if title == "Dupes":
+            continue
+        if title in _STRUCTURED_SECTIONS:
+            table, parser = _STRUCTURED_SECTIONS[title]
+            rows = parser(el)
+            if not rows and not el.select_one(".info-box"):
+                raise ParseError(table, "section present but no entries parsed")
+            records[table].extend(rows)
+            continue
+        # The title block can hold a label line ("Main Stats") above the heading; drop both.
+        header = text_of(el.select_one(".build-table-title")) or full_title
         body = text_of(el)
-        if title and body.startswith(title):
-            body = body[len(title) :].strip()
+        if header and body.startswith(header):
+            body = body[len(header) :].strip()
         if body:
-            sections.append({"title": title, "text": body})
-    return sections
+            prose.append({"title": title, "text": body})
+    return prose, records
+
+
+def _texts(el: Tag, selector: str) -> list[str]:
+    return [t for t in (text_of(found) for found in el.select(selector)) if t]
+
+
+def _teams(section: Tag) -> list[dict]:
+    teams = []
+    for tile in section.select(".czn-team-tile"):
+        teams.append(
+            {
+                "name": _required_text(tile.select_one(".czn-team-name"), "team.name"),
+                "tier": text_of(tile.select_one(".czn-team-rating")) or None,
+                "members": _texts(tile, ".czn-team-members .emp-name"),
+            }
+        )
+    return teams
+
+
+def _decks(section: Tag) -> list[dict]:
+    """Recommended decks. Tab buttons name the decks; panels hold them in the same order."""
+    names = _texts(section, ".czn-deck-tabs-list button")
+    panels = section.select(".czn-deck-tabs-panel") or section.select(".chaos-deck-display")
+    decks = []
+    for position, panel in enumerate(panels):
+        partner = panel.select_one(".partner-preview img")
+        cards = []
+        for item in panel.select(".preview-card-item"):
+            count = re.search(r"\d+", text_of(item.select_one(".pw-card-count-badge-preview")))
+            cards.append(
+                {
+                    "name": _required_text(item.select_one(".name"), "deck.card"),
+                    "count": int(count.group()) if count else 1,
+                }
+            )
+        decks.append(
+            {
+                "name": names[position] if position < len(names) else None,
+                "partner": partner.get("alt") if partner else None,
+                "equipment": _texts(panel, ".equipment-slot h4"),
+                "fragments": _texts(panel, ".fragment-preview-item .inline-name"),
+                "cards": cards,
+                "notes": text_of(panel.select_one(".review-source-body")) or None,
+            }
+        )
+    return decks
+
+
+def _vertical_tabs(section: Tag) -> list[tuple[str, bool, Tag]]:
+    """(tab title, marked BEST, panel) for a section whose tabs are listed beside one panel
+    each, in the same order."""
+    buttons = section.select(".czn-vertical-tab-list button")
+    panels = section.select(".czn-vertical-tab-panel")
+    if len(buttons) != len(panels):
+        raise ParseError("tabs", f"{len(buttons)} tabs but {len(panels)} panels")
+    return [
+        (
+            _required_text(button.select_one(".czn-vertical-tab-title"), "tabs.title"),
+            text_of(button.select_one(".czn-vertical-tab-eyebrow")).upper() == "BEST",
+            panel,
+        )
+        for button, panel in zip(buttons, panels, strict=True)
+    ]
+
+
+def _equipment_picks(section: Tag) -> list[dict]:
+    picks = []
+    for tab, best, panel in _vertical_tabs(section):
+        slots = {
+            _required_text(column.select_one("h6"), "character_equipment.slot"): _texts(
+                column, ".inline-name"
+            )
+            for column in panel.select(".czn-equipment-column")
+        }
+        notes = " ".join(text_of(rte) for rte in panel.select(".czn-rte")).strip()
+        picks.append({"tab": tab, "best": best, "slots": slots, "notes": notes or None})
+    return picks
+
+
+def _seasonal_powers(section: Tag) -> list[dict]:
+    return [
+        {"season": tab, "best": best, "text": text_of(panel)}
+        for tab, best, panel in _vertical_tabs(section)
+        if text_of(panel)
+    ]
+
+
+def _rank_rows(container: Tag) -> list[tuple[int, Tag, str | None, str | None]]:
+    """(position, row, performance, notes) for each row of a ``build-rank-table``."""
+    rows = []
+    for position, row in enumerate(container.select(".build-rank-row"), 1):
+        notes = text_of(row.select_one(".cell-notes .czn-rte"))
+        performance = text_of(row.select_one(".cell-performance .czn-partner-value"))
+        rows.append((position, row, performance or None, None if notes in ("", "-") else notes))
+    return rows
+
+
+def _fragment_ranks(section: Tag) -> list[dict]:
+    groups = section.select(".czn-fragment-group") or [section]
+    ranks = []
+    for group in groups:
+        build = text_of(group.select_one("h5")) or None
+        for position, row, performance, notes in _rank_rows(group):
+            ranks.append(
+                {
+                    "build": build,
+                    "position": position,
+                    "sets": _texts(row, ".cell-set .inline-name"),
+                    "performance": performance,
+                    "notes": notes,
+                }
+            )
+    return ranks
+
+
+def _partner_ranks(section: Tag) -> list[dict]:
+    return [
+        {
+            "position": position,
+            "partner": _required_text(row.select_one(".cell-partner .inline-name"), "partner"),
+            "dupes": text_of(row.select_one(".czn-partner-dupes")) or None,
+            "performance": performance,
+            "notes": notes,
+        }
+        for position, row, performance, notes in _rank_rows(section)
+    ]
+
+
+def _synergies(section: Tag) -> list[dict]:
+    return [
+        {
+            "name": _required_text(card.select_one(".emp-name"), "synergy.name"),
+            "points": _texts(card, "li"),
+        }
+        for card in section.select("article.synergy-card")
+    ]
+
+
+# Guide section title -> (table, parser) for sections that become rows of their own.
+_STRUCTURED_SECTIONS = {
+    "Teams": ("team", _teams),
+    "Decks": ("deck", _decks),
+    "Equipment": ("character_equipment", _equipment_picks),
+    "Seasonal Powers": ("seasonal_power", _seasonal_powers),
+    "Fragment Ranking": ("fragment_rank", _fragment_ranks),
+    "Best Partners": ("partner_rank", _partner_ranks),
+    "Synergies": ("synergy", _synergies),
+}
 
 
 def parse_neutral_cards(root: Tag, url: str) -> dict[str, list[dict]]:

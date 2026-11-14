@@ -44,9 +44,6 @@ def test_character_page_yields_profile_cards_variants_potentials_and_egos():
         "image_url": "https://cdn.prydwen.gg/images/chaos/characters/mei-lin_full.webp",
         "sections": None,
     }
-    assert {"title": "Pros", "text": "Incredible self-buffing capabilities."} in (
-        character["sections"]
-    )
 
     cards = {(c["base_name"], c["variant"]): c for c in page.records["card"]}
     assert set(cards) == {("Strike", ""), ("Rising Dragon Spire", ""), ("Rising Dragon Spire", "V")}
@@ -55,7 +52,6 @@ def test_character_page_yields_profile_cards_variants_potentials_and_egos():
     base = cards[("Rising Dragon Spire", "")]
     assert base["tags"] == ["Unique"]
     assert base["text"] == "100% Damage.\n2 Ember."
-    assert base["epiphany_review"] == "Rising Dragon Spire V: The best option."
     variant = cards[("Rising Dragon Spire", "V")]
     assert variant["rating"] == 5
     assert variant["category"] == "unique"
@@ -74,6 +70,107 @@ def test_character_page_yields_profile_cards_variants_potentials_and_egos():
     assert ego["performance"] == "100.00%"
     assert ego["review"] == "Not a terrible first node."
     assert "Veronica" in page.body
+
+
+def test_epiphany_review_is_split_over_the_cards_it_describes():
+    cards = {
+        (c["base_name"], c["variant"]): c
+        for c in parse_page(CHARACTER_URL, CHARACTER_HTML).records["card"]
+    }
+    base, variant = cards[("Rising Dragon Spire", "")], cards[("Rising Dragon Spire", "V")]
+    assert base["epiphany_review"] == "Spire is her main damage card."
+    assert base["neutral_review"] == "Target Neutral Epiphany: Draw 1. Rarely worth it."
+    assert base["target_neutral"] == "Draw 1"
+    assert base["divine_review"] == "Take Cost Reduction."
+    assert variant["epiphany_review"] == "The best option.\nIt scales with every Passion card."
+    assert variant["alias"] == "Ascended"
+
+
+def test_bracketed_target_neutral_label():
+    # Seen on the Anika page: the pick is its own paragraph.
+    html = CHARACTER_HTML.replace(
+        "<p><strong>Neutral:</strong> Target Neutral Epiphany: Draw 1. Rarely worth it.</p>",
+        "<p>[Target Neutral Epiphany: 3 Morale]</p><p>Neutrals beat specific Epiphanies.</p>",
+    )
+    base = next(
+        c
+        for c in parse_page(CHARACTER_URL, html).records["card"]
+        if c["name"] == "Rising Dragon Spire"
+    )
+    assert base["target_neutral"] == "3 Morale"
+    assert base["neutral_review"] == "Neutrals beat specific Epiphanies."
+
+
+def test_character_guide_sections_become_records():
+    page = parse_page(CHARACTER_URL, CHARACTER_HTML)
+    records = page.records
+    for rows in records.values():
+        for row in rows:
+            row.pop("character_slug", None)
+
+    assert records["team"] == [
+        {"name": "Spire Fire", "tier": "T1", "members": ["Mei Lin", "Veronica", "Tiphera"]}
+    ]
+    assert records["deck"] == [
+        {
+            "name": "Standard Dragon Spire",
+            "partner": "Scarlet",
+            "equipment": ["Criticism of Discord"],
+            "fragments": ["Executioner's Tool"],
+            "cards": [{"name": "Strike", "count": 2}],
+            "notes": "Buff Spire, then Ravage.",
+        }
+    ]
+    assert records["character_equipment"] == [
+        {
+            "tab": "Swamp",
+            "best": True,
+            "slots": {"Weapons": ["Criticism of Discord"]},
+            "notes": None,
+        },
+        {
+            "tab": "Season 1: Lab Zero",
+            "best": False,
+            "slots": {"Armor": ["Wings of Freedom"]},
+            "notes": "Only for Lab Zero.",
+        },
+    ]
+    assert records["seasonal_power"] == [
+        {"season": "Season 5", "best": True, "text": "Memory cards add hits."}
+    ]
+    assert records["fragment_rank"] == [
+        {
+            "build": "Default",
+            "position": 1,
+            "sets": ["Executioner's Tool", "Black Wing"],
+            "performance": "100.00%",
+            "notes": "Consistent damage.",
+        }
+    ]
+    assert records["partner_rank"] == [
+        {
+            "position": 1,
+            "partner": "Scarlet",
+            "dupes": "E4",
+            "performance": "135.16%",
+            "notes": None,
+        }
+    ]
+    assert records["synergy"] == [{"name": "Veronica", "points": ["Doubles as a draw unit."]}]
+
+    # Structured sections are not repeated as prose; the rest keep short titles.
+    sections = page.records["character"][0]["sections"]
+    assert sections == [
+        {"title": "Pros", "text": "Incredible self-buffing capabilities."},
+        {"title": "Stats", "text": "CRIT Rate > CRIT DMG"},
+    ]
+
+
+def test_structured_guide_section_that_no_longer_parses_fails():
+    html = CHARACTER_HTML.replace("czn-team-tile", "team-tile-v2")
+    with pytest.raises(ParseError) as failure:
+        parse_page(CHARACTER_URL, html)
+    assert failure.value.field == "team"
 
 
 def test_epiphany_base_card_mislabeled_with_a_numeral():

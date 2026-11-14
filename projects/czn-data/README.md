@@ -8,13 +8,19 @@ One container image (`ghcr.io/rcdailey/czn-data`) runs both workloads:
 - `czn-data scrape`: run on a schedule (a daily Kubernetes CronJob). A run takes about 20 minutes
   because it waits 10 seconds between requests, as Prydwen's robots.txt asks.
 - `czn-data serve`: the MCP server (a Deployment), listening on port 8000.
+- `czn-data migrate`: upgrades the database schema, then exits. `scrape` and `reparse` run it
+  first on their own. Run it as an init container of the server Deployment, with the scraper's
+  database credentials, so a new image never serves an old schema.
 
 ## What gets stored
 
 The scraper finds every page through robots.txt and the sitemaps, saves its HTML, and parses it:
 
 - Character pages: rarity, element, class, cards and their Epiphany variants (I to V) with
-  Prydwen's star ratings, potentials, Manifest Ego levels (E1 to E6), and the written review.
+  Prydwen's star ratings and per-variant reviews, Neutral and Divine advice, potentials,
+  Manifest Ego levels (E1 to E6), and the guide: teams, decks, equipment and seasonal powers per
+  season tab, fragment and partner rankings, synergies, and the prose sections (pros, cons,
+  introduction, stats, and so on).
 - `neutral-cards`, `equipment` (stats per level, drop source), `memory-fragments`, `partners`
   (passive only), and `guides/effects-dictionary` (keyword and status definitions).
 - Every page's full text, for search.
@@ -58,7 +64,8 @@ Every series also carries the OTLP resource attributes as labels, such as `servi
 
 Environment variables:
 
-- `DATABASE_URL` (both): Postgres URL. The scraper creates tables; the server needs `SELECT` only.
+- `DATABASE_URL` (all): Postgres URL. `migrate` and `scrape` need the database owner; the server
+  needs `SELECT` only.
 - `OTEL_EXPORTER_OTLP_ENDPOINT` or `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` (scrape): OTLP/HTTP
   receiver, such as `http://otel-gateway-collector.observability:4318`. With neither set, no
   metrics are sent. The other standard variables also apply: `OTEL_SERVICE_NAME`,
@@ -75,9 +82,11 @@ Environment variables:
 
 The server refuses to start unless `OIDC_ISSUER` or `MCP_ALLOW_UNAUTHENTICATED=true` is set.
 
-The scraper creates the schema itself, including the `pg_trgm` extension. `pg_trgm` is a trusted
+Migrations create the schema, including the `pg_trgm` extension. `pg_trgm` is a trusted
 extension, so the database owner that CloudNativePG creates can install it without superuser
-rights.
+rights. A Postgres advisory lock lets only one process migrate at a time, so the CronJob and the
+server's init container can start together. When a migration changes the tables built from page
+HTML, `migrate` parses the stored HTML again in the same transaction; it fetches nothing.
 
 ## Connecting claude.ai
 
@@ -94,5 +103,13 @@ in the connector's advanced settings. Its access tokens must be JWTs whose `aud`
 
 ```sh
 mise run lint
-mise run test   # starts a throwaway Postgres container
+mise run test   # starts throwaway Postgres and VictoriaMetrics containers
+mise run db     # starts the development Postgres from docker-compose.yml
 ```
+
+The development database keeps its data in the `czn-data-dev` volume across
+`docker compose down`, so a scraped copy stays available for testing migrations and lookups.
+`docker compose down -v` deletes it.
+
+Migrations are hand-written SQL in `src/czn_data/migrations/versions`, one file per revision,
+forward only. A migration that changes tables built from page HTML calls `request_rebuild()`.

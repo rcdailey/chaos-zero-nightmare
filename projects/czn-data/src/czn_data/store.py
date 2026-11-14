@@ -6,7 +6,6 @@ with ``czn-data reparse``) and the previous rows stay in place.
 """
 
 from datetime import datetime
-from importlib.resources import files
 
 import psycopg
 from psycopg.types.json import Jsonb
@@ -22,15 +21,18 @@ DERIVED_TABLES = (
     "fragment_set",
     "partner",
     "effect",
+    "team",
+    "deck",
+    "character_equipment",
+    "seasonal_power",
+    "fragment_rank",
+    "partner_rank",
+    "synergy",
 )
-JSON_COLUMNS = {"sections", "stats", "bonuses"}
+JSON_COLUMNS = {"sections", "stats", "bonuses", "cards", "slots"}
 
 # A page that suddenly yields this much fewer rows of a kind than before is treated as broken.
 SHRINK_LIMIT = 0.2
-
-
-def apply_schema(conn: psycopg.Connection) -> None:
-    conn.execute(files(__package__).joinpath("schema.sql").read_text())
 
 
 def check_shrink(conn: psycopg.Connection, url: str, parsed: ParsedPage) -> None:

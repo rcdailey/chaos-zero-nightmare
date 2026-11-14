@@ -65,7 +65,6 @@ LABELS = {"result", "kind", "field", "table"}
 
 
 def test_every_metric_arrives_under_the_documented_names(conn, vm):
-    store.apply_schema(conn)
     result = RunResult(pages=Counter({"ok": 1, "parse_error": 1}))
     result.validation_failures[("character", "card.count")] = 1
     assert export_metrics(conn, result, started=0)
@@ -104,7 +103,6 @@ def test_every_metric_arrives_under_the_documented_names(conn, vm):
     ],
 )
 def test_alert_fires_on_bad_run_and_resolves_after_good_run(conn, vm, monkeypatch, alert, bad_run):
-    store.apply_schema(conn)
     export_run(conn, monkeypatch, **bad_run)
     assert query(vm, ALERT_EXPRS[alert]), f"{alert} did not fire"
 
@@ -115,12 +113,10 @@ def test_alert_fires_on_bad_run_and_resolves_after_good_run(conn, vm, monkeypatc
 def test_no_endpoint_configured_exports_nothing_without_error(conn, monkeypatch):
     for name in ("OTEL_EXPORTER_OTLP_ENDPOINT", "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT"):
         monkeypatch.delenv(name, raising=False)
-    store.apply_schema(conn)
     assert export_metrics(conn, RunResult(), started=0)
 
 
 def test_unreachable_endpoint_reports_failure(conn, monkeypatch):
     monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://127.0.0.1:9")
     monkeypatch.setenv("OTEL_EXPORTER_OTLP_TIMEOUT", "2")
-    store.apply_schema(conn)
     assert not export_metrics(conn, RunResult(), started=0)

@@ -46,6 +46,7 @@ def main() -> None:
             action="store_true",
             help="accept pages that lose many rows (Prydwen really removed content)",
         )
+    commands.add_parser("migrate", help="upgrade the database schema, then exit")
     serve_command = commands.add_parser("serve", help="run the MCP server")
     serve_command.add_argument(
         "--stdio", action="store_true", help="serve a local client over stdin/stdout"
@@ -64,6 +65,11 @@ def main() -> None:
             serve_stdio()
         else:
             serve()
+        return
+    from .migrate import migrate
+
+    migrate(os.environ["DATABASE_URL"])
+    if args.command == "migrate":
         return
     sys.exit(_run_job(args.command, args.allow_shrink))
 

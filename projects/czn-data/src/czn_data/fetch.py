@@ -66,12 +66,16 @@ class Fetcher:
 
 def sitemap_urls(get) -> list[str]:
     """Every Chaos Zero Nightmare page URL listed in the sitemaps named by robots.txt."""
+    log.info("reading robots.txt")
     robots = get(f"{SITE}/robots.txt")
     sitemaps = re.findall(r"(?im)^sitemap:\s*(\S+)", robots)
     if not sitemaps:
         raise FetchFailed("robots.txt lists no sitemaps")
     urls = set()
-    for sitemap in sitemaps:
+    for number, sitemap in enumerate(sitemaps, 1):
+        log.info(
+            "reading sitemap", extra={"url": sitemap, "number": number, "total": len(sitemaps)}
+        )
         for url in re.findall(r"<loc>\s*([^<\s]+)\s*</loc>", get(sitemap)):
             if url.rstrip("/").startswith(f"{SITE}/chaos-zero-nightmare"):
                 urls.add(url.rstrip("/"))

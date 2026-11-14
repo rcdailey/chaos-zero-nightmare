@@ -24,6 +24,10 @@ from .parse import ParseError, page_kind, parse_page
 
 log = logging.getLogger(__name__)
 
+# With the 10 s crawl delay this is about one progress line per six pages, so a stalled run
+# goes quiet for no more than a minute or two plus one page's retries.
+PROGRESS_INTERVAL_SECONDS = 60
+
 
 @dataclass
 class RunResult:
@@ -57,7 +61,20 @@ def scrape(conn: psycopg.Connection, get: Callable[[str], str], allow_shrink: bo
         return result
     log.info("discovered pages", extra={"count": len(urls)})
 
-    for url in urls:
+    last_progress = time.monotonic()
+    for done, url in enumerate(urls):
+        if time.monotonic() - last_progress >= PROGRESS_INTERVAL_SECONDS:
+            last_progress = time.monotonic()
+            log.info(
+                "fetch progress",
+                extra={
+                    "done": done,
+                    "total": len(urls),
+                    "ok": result.pages["ok"],
+                    "fetch_error": result.pages["fetch_error"],
+                    "parse_error": result.pages["parse_error"],
+                },
+            )
         try:
             html = get(url)
         except Blocked as error:
@@ -158,6 +175,7 @@ def export_metrics(conn: psycopg.Connection, result: RunResult, started: float) 
     if outcome is not MetricExportResult.SUCCESS:
         log.error("OTLP metrics export failed")
         return False
+    log.info("metrics exported")
     return True
 
 

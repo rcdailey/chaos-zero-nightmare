@@ -74,6 +74,7 @@ def _run_job(command: str, allow_shrink: bool) -> int:
 
     log = logging.getLogger("czn_data")
     started = time.time()
+    log.info("run started", extra={"command": command})
     with psycopg.connect(os.environ["DATABASE_URL"], autocommit=True) as conn:
         if command == "scrape":
             result = scrape(conn, Fetcher().get, allow_shrink)

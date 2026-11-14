@@ -34,7 +34,10 @@ blocked too.
 
 The scraper exits non-zero on any failure, including a failed metrics export. It writes JSON logs
 (`time`, `level`, `msg`, plus fields such as `url` and `error`) that vlagent maps to VictoriaLogs
-fields. Alert rules for vmalert are in [deploy/alerts.yaml](deploy/alerts.yaml).
+fields. A scrape logs `run started` first, then `reading robots.txt` and each `reading sitemap`,
+then a `fetch progress` line about once a minute (`done`, `total`, `ok`, `fetch_error`,
+`parse_error`), and finally `run finished` and the metrics export outcome. Successful pages get
+no line of their own. Alert rules for vmalert are in [deploy/alerts.yaml](deploy/alerts.yaml).
 
 At the end of each run the scraper sends its metrics once over OTLP/HTTP and waits for the
 receiver to accept them before it exits. The names below are the ones VictoriaMetrics stores

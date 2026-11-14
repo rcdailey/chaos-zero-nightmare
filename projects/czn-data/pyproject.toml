@@ -1,0 +1,40 @@
+[project]
+name = "czn-data"
+version = "0.1.0"
+description = "Scrapes Chaos Zero Nightmare data from prydwen.gg and serves it over MCP"
+readme = "README.md"
+authors = [
+    { name = "Robert Dailey", email = "git@rdailey.me" }
+]
+requires-python = ">=3.14"
+dependencies = [
+    "beautifulsoup4>=4.15",
+    "curl-cffi>=0.17",
+    "lxml>=6.1",
+    "mcp>=2.3",
+    "prometheus-client>=0.26",
+    "psycopg[binary]>=3.3",
+    "pyjwt[crypto]>=2.15",
+]
+
+[project.scripts]
+czn-data = "czn_data.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.13.8,<0.14.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.2",
+    "ruff>=0.17",
+]
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+extend-select = ["I", "UP", "B", "SIM"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

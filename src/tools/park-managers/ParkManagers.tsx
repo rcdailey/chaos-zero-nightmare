@@ -48,6 +48,7 @@ const HISTORY_KEY = 'czn-manager-optimizer:history'
 const HISTORY_LIMIT = 30
 // Typing "361" passes through 3 and 36; waiting for input to settle records only the net change.
 const SETTLE_MS = 800
+const MERGE_MS = 60_000
 
 type Change = { at: number; added: string[]; removed: string[] }
 /** Roster changes, newest first, relative to `roster`, the last recorded recommendation. */
@@ -72,14 +73,29 @@ function loadHistory(current: string[]): History {
   }
 }
 
+/**
+ * Folds a roster change into the newest entry when that entry was updated within MERGE_MS,
+ * keeping only the net change; an entry that nets to nothing is dropped.
+ */
 function record(history: History, roster: string[]): History {
-  const added = roster.filter((n) => !history.roster.includes(n))
-  const removed = history.roster.filter((n) => !roster.includes(n))
-  if (!added.length && !removed.length) return history
-  return {
-    roster,
-    changes: [{ at: Date.now(), added, removed }, ...history.changes].slice(0, HISTORY_LIMIT),
+  const diff = (from: string[]) => ({
+    added: roster.filter((n) => !from.includes(n)),
+    removed: from.filter((n) => !roster.includes(n)),
+  })
+  const change = diff(history.roster)
+  if (!change.added.length && !change.removed.length) return history
+  const at = Date.now()
+  const [latest, ...older] = history.changes
+  if (!latest || at - latest.at > MERGE_MS) {
+    return { roster, changes: [{ at, ...change }, ...history.changes].slice(0, HISTORY_LIMIT) }
   }
+  const rosterBeforeLatest = [
+    ...history.roster.filter((n) => !latest.added.includes(n)),
+    ...latest.removed,
+  ]
+  const merged = diff(rosterBeforeLatest)
+  if (!merged.added.length && !merged.removed.length) return { roster, changes: older }
+  return { roster, changes: [{ at, ...merged }, ...older] }
 }
 
 const byName = new Map(MANAGERS.map((m) => [m.name, m]))
@@ -190,10 +206,10 @@ function ParkPanel({ park, setPark }: { park: Park; setPark: (p: Park) => void }
             <button key={name} type="button" aria-pressed={owned} onClick={() => toggle(name)}
               className={`rounded-full border px-2.5 py-0.5 text-sm transition ${
                 owned
-                  ? 'border-nord-8 bg-nord-8 font-medium text-nord-0'
+                  ? 'border-nord-8 bg-nord-8 text-nord-0'
                   : 'border-nord-3 text-nord-4/60 hover:border-nord-8'
               }`}>
-              {owned && '✓ '}
+              <span aria-hidden className={owned ? undefined : 'invisible'}>✓ </span>
               {name}
             </button>
           )

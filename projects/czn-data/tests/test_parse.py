@@ -41,7 +41,7 @@ def test_character_page_yields_profile_cards_variants_potentials_and_egos():
         "element": "Passion",
         "class": "Striker",
         "updated_text": "25/March/2026",
-        "image_url": "https://cdn.prydwen.gg/images/chaos/characters/mei-lin_full.webp",
+        "image_url": "https://cdn.prydwen.gg/images/chaos/characters/mei-lin_card.webp",
         "sections": None,
     }
 

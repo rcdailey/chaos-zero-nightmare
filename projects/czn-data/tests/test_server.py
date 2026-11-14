@@ -41,9 +41,13 @@ def call(conn, database_url, monkeypatch):
     return call
 
 
-def test_get_character_lists_sections_and_returns_one_at_a_time(call):
+def test_get_character_lists_sections_and_returns_one_at_a_time(call, conn):
+    conn.execute(
+        "INSERT INTO portrait_gender (image_url, gender, tagged_at) VALUES (%s, 'female', now())",
+        ("https://cdn.prydwen.gg/images/chaos/characters/mei-lin_card.webp",),
+    )
     summary = call("get_character", name="mei lin")
-    assert summary["name"] == "Mei Lin"
+    assert (summary["name"], summary["gender"]) == ("Mei Lin", "female")
     assert {"cards", "teams", "decks", "equipment", "Pros", "Stats"} <= set(summary["sections"])
     assert "potentials" in summary["sections"]
 
@@ -54,6 +58,36 @@ def test_get_character_lists_sections_and_returns_one_at_a_time(call):
 
     stats = call("get_character", name="mei lin", section="stats")["sections"]
     assert stats == [{"title": "Stats", "text": "CRIT Rate > CRIT DMG"}]
+
+
+def test_list_characters_filters_by_gender(call, conn):
+    assert call("list_characters", gender="female") == []
+    conn.execute(
+        "INSERT INTO portrait_gender (image_url, gender, tagged_at) VALUES (%s, 'female', now())",
+        ("https://cdn.prydwen.gg/images/chaos/characters/mei-lin_card.webp",),
+    )
+    assert call("list_characters", gender="Female") == [
+        {
+            "name": "Mei Lin",
+            "rarity": 5,
+            "element": "Passion",
+            "class": "Striker",
+            "gender": "female",
+        }
+    ]
+    assert call("list_characters", gender="male") == []
+
+
+def test_synergies_combine_synergy_lists_and_teams(call):
+    veronica, tiphera = call("synergies", character="mei lin")
+    assert veronica == {
+        "for": "Mei Lin",
+        "name": "Veronica",
+        "sources": ["own synergy list", "team"],
+        "teams": ["T1 Spire Fire"],
+        "reasons": ["Doubles as a draw unit."],
+    }
+    assert (tiphera["name"], tiphera["sources"]) == ("Tiphera", ["team"])
 
 
 def test_match_card_text_finds_the_variant_from_screen_text(call):

@@ -36,6 +36,12 @@ class Fetcher:
         self._last_request = 0.0
 
     def get(self, url: str) -> str:
+        return self._get(url).text
+
+    def get_bytes(self, url: str) -> bytes:
+        return self._get(url).content
+
+    def _get(self, url: str) -> requests.Response:
         for attempt in range(self.retries + 1):
             backoff = self.delay * 2**attempt
             self._wait(self.delay)
@@ -54,7 +60,7 @@ class Fetcher:
                 continue
             if response.status_code != 200:
                 raise FetchFailed(f"{url}: HTTP {response.status_code}")
-            return response.text
+            return response
         raise FetchFailed(f"{url}: gave up after {self.retries + 1} attempts")
 
     def _wait(self, seconds: float) -> None:

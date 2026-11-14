@@ -34,6 +34,7 @@ fragment sets, partners, keyword/effect definitions, Prydwen's per-character gui
 decks, equipment, fragment and partner rankings, synergies), and full-text search over every
 guide page. Start with `lookup` for any name seen on screen and `match_card_text` for card text
 seen on screen, then use the specific tools; `get_character` returns one section at a time.
+`list_characters` filters the roster; `synergies` answers who to use with a character.
 Fields that are empty are left out. Ratings are Prydwen's stars, 1 to 5. Cite `url` and
 `data_fetched_at` when the answer depends on the data. Player state (owned characters, current
 run) is not stored here; read it from the user's screenshots.
@@ -128,6 +129,51 @@ ORDER BY count(*) DESC, c.name
 """
 RECOMMENDED_BY_SQL = RECOMMENDED_BY_SQL.format(match=NAME_MATCH)
 
+LIST_CHARACTERS_SQL = """
+SELECT c.name, c.rarity, c.element, c.class, g.gender
+FROM character c LEFT JOIN portrait_gender g USING (image_url)
+WHERE (%(gender)s::text IS NULL OR g.gender = lower(%(gender)s))
+  AND (%(element)s::text IS NULL OR c.element ILIKE %(element)s)
+  AND (%(class)s::text IS NULL OR c.class ILIKE %(class)s)
+  AND (%(rarity)s::int IS NULL OR c.rarity = %(rarity)s)
+ORDER BY c.name
+"""
+
+# Characters the guides pair with one character, from three sources: that character's own
+# synergy list (with Prydwen's reasons), other characters' synergy lists that name it, and
+# recommended teams it is in. Teams are listed on several pages, so they are deduplicated.
+SYNERGIES_SQL = """
+WITH me AS (
+    SELECT slug, name FROM character
+    WHERE slug = %(name)s OR {match}
+    ORDER BY slug = %(name)s DESC, word_similarity(%(name)s, name) DESC,
+        similarity(name, %(name)s) DESC
+    LIMIT 1
+),
+teams AS (
+    SELECT DISTINCT t.name, t.tier, t.members FROM team t, me WHERE me.name = ANY (t.members)
+),
+mentions AS (
+    SELECT s.name AS partner, 'own synergy list' AS source, s.points, NULL AS team
+    FROM synergy s, me WHERE s.character_slug = me.slug
+    UNION ALL
+    SELECT c.name, 'their synergy list', s.points, NULL
+    FROM synergy s JOIN character c ON c.slug = s.character_slug, me WHERE s.name = me.name
+    UNION ALL
+    SELECT member, 'team', NULL, concat_ws(' ', teams.tier, teams.name)
+    FROM teams, me, unnest(teams.members) member WHERE member <> me.name
+)
+SELECT (SELECT name FROM me) AS "for", partner AS name,
+       array_agg(DISTINCT source) AS sources,
+       array_agg(DISTINCT team) FILTER (WHERE team IS NOT NULL) AS teams,
+       jsonb_agg(points) FILTER (WHERE source = 'own synergy list') -> 0 AS reasons,
+       jsonb_agg(points) FILTER (WHERE source = 'their synergy list') -> 0 AS their_reasons
+FROM mentions
+GROUP BY partner
+ORDER BY count(DISTINCT source) DESC, count(DISTINCT team) DESC, partner
+"""
+SYNERGIES_SQL = SYNERGIES_SQL.format(match=NAME_MATCH)
+
 
 def _database_url() -> str:
     return os.environ["DATABASE_URL"]
@@ -195,11 +241,13 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
 
     @mcp.tool()
     async def get_character(name: str, section: str | None = None) -> dict | None:
-        """Profile of the best-matching character. Without section: rarity, element, class and
-        the list of available sections. With section, that part of Prydwen's guide: cards
-        (without reviews; use get_card), potentials, manifest_egos, teams, decks, equipment
-        (per season tab), seasonal_powers, fragments, partners, synergies, or a prose section
-        by title (Pros, Cons, Introduction, Key Mechanics, Stats, Potential Priority, ...)."""
+        """Profile of the best-matching character. Without section: rarity, element, class,
+        gender (female or male, judged from the character's art by an image tagger; Prydwen
+        does not state it) and the list of available sections. With section, that part of
+        Prydwen's guide: cards (without reviews; use get_card), potentials, manifest_egos,
+        teams, decks, equipment (per season tab), seasonal_powers, fragments, partners,
+        synergies, or a prose section by title (Pros, Cons, Introduction, Key Mechanics, Stats,
+        Potential Priority, ...)."""
         character = await _find_character(name)
         if character is None:
             return None
@@ -261,6 +309,31 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
         )
 
     @mcp.tool()
+    async def list_characters(
+        gender: str | None = None,
+        element: str | None = None,
+        character_class: str | None = None,
+        rarity: int | None = None,
+    ) -> list[dict]:
+        """Every character, one short line each (name, rarity, element, class, gender),
+        optionally filtered: gender female or male, element (Passion, Justice, Order, Void,
+        Instinct), character_class (Striker, Vanguard, Ranger, Hunter, Controller, Psionic),
+        rarity 4 or 5."""
+        return await _query(
+            LIST_CHARACTERS_SQL,
+            {"gender": gender, "element": element, "class": character_class, "rarity": rarity},
+        )
+
+    @mcp.tool()
+    async def synergies(character: str) -> list[dict]:
+        """Characters Prydwen's guides recommend using with the best-matching character, best
+        supported first. sources says where each is named: the character's own synergy list
+        (reasons gives Prydwen's explanation), the other character's synergy list
+        (their_reasons), or recommended teams (teams, with tier). Use it for "who should I
+        use with X"."""
+        return await _query(SYNERGIES_SQL, {"name": character})
+
+    @mcp.tool()
     async def recommended_by(name: str) -> list[dict]:
         """Which characters' guides recommend the best-matching equipment item, memory
         fragment set, or partner, and where: deck, equipment tab, fragment or partner
@@ -270,7 +343,9 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
     async def _find_character(name: str) -> dict | None:
         found = await _query(
             """
-            SELECT character.*, page.data_fetched_at FROM character JOIN page USING (url)
+            SELECT character.*, portrait_gender.gender, page.data_fetched_at
+            FROM character JOIN page USING (url)
+            LEFT JOIN portrait_gender USING (image_url)
             WHERE slug = %(name)s OR """
             + NAME_MATCH
             + """

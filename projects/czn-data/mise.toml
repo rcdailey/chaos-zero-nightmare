@@ -4,6 +4,8 @@ uv = "0.13.8"
 [env]
 # Local development database started by `mise run db`.
 DATABASE_URL = "postgresql://postgres:dev@localhost:55432/postgres"
+# Where the portrait tagger downloads its model on first use.
+CZN_TAGGER_DIR = "{{env.HOME}}/.cache/czn-data/wd-tagger"
 
 [tasks.db]
 description = "Start the local development Postgres (data persists in the czn-data-dev volume)"

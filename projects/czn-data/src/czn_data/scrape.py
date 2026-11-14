@@ -20,6 +20,7 @@ from opentelemetry.sdk.resources import Resource
 
 from . import store
 from .fetch import Blocked, FetchFailed, sitemap_urls
+from .gender import TaggerUnavailable
 from .parse import ParseError, page_kind, parse_page
 
 log = logging.getLogger(__name__)
@@ -87,6 +88,51 @@ def scrape(conn: psycopg.Connection, get: Callable[[str], str], allow_shrink: bo
             continue
         _process(conn, url, html, datetime.now(UTC), allow_shrink, result)
     return result
+
+
+def tag_portraits(
+    conn: psycopg.Connection,
+    get_bytes: Callable[[str], bytes],
+    gender: Callable[[bytes], str],
+    result: RunResult,
+) -> None:
+    """Assign a gender to every character image that has none yet (see ``czn_data.gender``).
+
+    A portrait that cannot be fetched or tagged counts as a ``character``/``gender`` validation
+    failure and is tried again on the next run.
+    """
+    urls = [
+        url
+        for (url,) in conn.execute(
+            """
+            SELECT DISTINCT image_url FROM character
+            WHERE image_url IS NOT NULL
+              AND image_url NOT IN (SELECT image_url FROM portrait_gender)
+            ORDER BY image_url
+            """
+        )
+    ]
+    if urls:
+        log.info("tagging portraits", extra={"count": len(urls)})
+    for url in urls:
+        try:
+            assigned = gender(get_bytes(url))
+        except Blocked as error:
+            log.error("blocked by Cloudflare", extra={"url": url, "error": str(error)})
+            result.blocked = True
+            return
+        except TaggerUnavailable as error:
+            log.error("portrait tagger unavailable", extra={"error": str(error)})
+            result.validation_failures[("character", "gender")] += 1
+            return
+        except Exception as error:  # noqa: BLE001 - one bad portrait must not stop the rest
+            log.error("portrait tagging failed", extra={"url": url, "error": repr(error)})
+            result.validation_failures[("character", "gender")] += 1
+            continue
+        conn.execute(
+            "INSERT INTO portrait_gender (image_url, gender, tagged_at) VALUES (%s, %s, %s)",
+            (url, assigned, datetime.now(UTC)),
+        )
 
 
 def reparse(conn: psycopg.Connection, allow_shrink: bool) -> RunResult:

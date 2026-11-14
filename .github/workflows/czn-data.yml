@@ -46,7 +46,8 @@ jobs:
           docker run -d -p 8428:8428 victoriametrics/victoria-metrics:latest
           -opentelemetry.usePrometheusNaming -search.latencyOffset=0s
           && until curl -sf localhost:8428/health; do sleep 1; done
-      - run: uv run pytest
+      # mise exec sets CZN_TAGGER_DIR, so the tagger tests download the model.
+      - run: mise exec -- uv run pytest -rs
         env:
           TEST_DATABASE_URL: postgresql://postgres:test@localhost:5432/postgres
           TEST_VM_URL: http://localhost:8428

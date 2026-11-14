@@ -184,6 +184,14 @@ def _numbered_entries(section: Tag, field_prefix: str) -> list[dict]:
     return entries
 
 
+def _portrait(root: Tag) -> str | None:
+    """The character's card art, which Prydwen also uses as the page's share image. The splash
+    art in the page body is not used: some of its URLs return 404 on Prydwen's CDN."""
+    document = list(root.parents)[-1] if root.parent else root
+    meta = document.select_one('meta[property="og:image"]')
+    return meta.get("content") if meta else _image(root.select_one(".czn-character-page") or root)
+
+
 def _chip(root: Tag, selector: str, field_name: str) -> str:
     return _required_text(root.select_one(f".czn-character-page .chip.{selector}"), field_name)
 
@@ -242,7 +250,7 @@ def parse_character(root: Tag, url: str) -> dict[str, list[dict]]:
         "element": _chip(root, "character-element", "character.element"),
         "class": _chip(root, "character-class", "character.class"),
         "updated_text": text_of(root.select_one(".freshness strong")) or None,
-        "image_url": _image(root.select_one(".czn-character-page") or root),
+        "image_url": _portrait(root),
         "sections": sections,
     }
     return {"character": [character], **records}

@@ -21,6 +21,12 @@ The scraper finds every page through robots.txt and the sitemaps, saves its HTML
   Manifest Ego levels (E1 to E6), and the guide: teams, decks, equipment and seasonal powers per
   season tab, fragment and partner rankings, synergies, and the prose sections (pros, cons,
   introduction, stats, and so on).
+- Character gender, female or male. Prydwen does not state it, so the scraper runs the WD14 anime
+  image tagger (`SmilingWolf/wd-swinv2-tagger-v3`) on each new card art: a `1girl` score of at
+  least 0.5 is female, anything else male. Each image is tagged once. Only a scrape that finds
+  untagged art uses the model: it downloads the newest revision of the 467 MB model from Hugging
+  Face into `CZN_TAGGER_DIR` when the stored copy is missing or outdated, then loads it (about
+  1 GB of memory). If Hugging Face is unreachable, the stored copy is used.
 - `neutral-cards`, `equipment` (stats per level, drop source), `memory-fragments`, `partners`
   (passive only), and `guides/effects-dictionary` (keyword and status definitions).
 - Every page's full text, for search.
@@ -78,6 +84,9 @@ Environment variables:
 - `OIDC_AUDIENCE` (serve): expected `aud` claim. Defaults to `MCP_PUBLIC_URL`.
 - `OIDC_REQUIRED_SCOPES` (serve): space-separated scopes every token must carry. Defaults to none.
 - `MCP_ALLOW_UNAUTHENTICATED` (serve): `true` runs without auth, for local use.
+- `CZN_TAGGER_DIR` (scrape): writable directory, kept across runs (such as a PVC of at least
+  1 GB), where the portrait tagger stores its model. Without it, new characters get no gender
+  and the run fails.
 - `LOG_LEVEL` (both): defaults to `INFO`.
 
 The server refuses to start unless `OIDC_ISSUER` or `MCP_ALLOW_UNAUTHENTICATED=true` is set.

@@ -76,14 +76,18 @@ def main() -> None:
 
 def _run_job(command: str, allow_shrink: bool) -> int:
     from .fetch import Fetcher
-    from .scrape import export_metrics, reparse, scrape
+    from .gender import Tagger
+    from .scrape import export_metrics, reparse, scrape, tag_portraits
 
     log = logging.getLogger("czn_data")
     started = time.time()
     log.info("run started", extra={"command": command})
     with psycopg.connect(os.environ["DATABASE_URL"], autocommit=True) as conn:
         if command == "scrape":
-            result = scrape(conn, Fetcher().get, allow_shrink)
+            fetcher = Fetcher()
+            result = scrape(conn, fetcher.get, allow_shrink)
+            if not (result.blocked or result.discovery_failed):
+                tag_portraits(conn, fetcher.get_bytes, Tagger().gender, result)
         else:
             result = reparse(conn, allow_shrink)
         log.info(

@@ -7,17 +7,7 @@ DATABASE_URL = "postgresql://postgres:dev@localhost:55432/postgres"
 
 [tasks.db]
 description = "Start the local development Postgres (data persists in the czn-data-dev volume)"
-run = """
-#!/usr/bin/env bash
-set -euo pipefail
-name=czn-data-dev-pg
-if ! docker container inspect "$name" >/dev/null 2>&1; then
-  docker run -d --name "$name" --restart unless-stopped -e POSTGRES_PASSWORD=dev \
-    -p 55432:5432 -v czn-data-dev:/var/lib/postgresql postgres:18 >/dev/null
-fi
-docker start "$name" >/dev/null
-until docker exec "$name" pg_isready -q -h 127.0.0.1 -U postgres; do sleep 0.5; done
-"""
+run = "docker compose up -d --wait"
 
 [tasks.lint]
 run = ["uv run ruff check", "uv run ruff format --check"]

@@ -1,0 +1,22 @@
+# Local development Postgres. Data lives in the czn-data-dev volume and survives `down`, so a
+# scraped database stays available for migration tests and lookups. `down -v` deletes it.
+services:
+  postgres:
+    image: postgres:18
+    container_name: czn-data-dev-pg
+    restart: unless-stopped
+    environment:
+      POSTGRES_PASSWORD: dev
+    ports:
+      - 55432:5432
+    volumes:
+      - pgdata:/var/lib/postgresql
+    healthcheck:
+      # TCP, not the socket: during initdb the server accepts only socket connections.
+      test: [CMD, pg_isready, -q, -h, 127.0.0.1, -U, postgres]
+      interval: 2s
+      retries: 30
+
+volumes:
+  pgdata:
+    name: czn-data-dev

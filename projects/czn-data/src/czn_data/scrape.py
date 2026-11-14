@@ -5,7 +5,6 @@ shows up in the exported metrics, which back the alert rules in ``deploy/alerts.
 """
 
 import logging
-import os
 import time
 from collections import Counter
 from collections.abc import Callable
@@ -13,14 +12,10 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
 import psycopg
-from opentelemetry.exporter.otlp.proto.http.metric_exporter import OTLPMetricExporter
-from opentelemetry.sdk.metrics import MeterProvider
-from opentelemetry.sdk.metrics.export import InMemoryMetricReader, MetricExportResult
-from opentelemetry.sdk.resources import Resource
+from opentelemetry.metrics import Meter
 
-from . import store
+from . import metrics, store
 from .fetch import Blocked, FetchFailed, sitemap_urls
-from .gender import TaggerUnavailable
 from .parse import ParseError, page_kind, parse_page
 
 log = logging.getLogger(__name__)
@@ -90,16 +85,12 @@ def scrape(conn: psycopg.Connection, get: Callable[[str], str], allow_shrink: bo
     return result
 
 
-def tag_portraits(
-    conn: psycopg.Connection,
-    get_bytes: Callable[[str], bytes],
-    gender: Callable[[bytes], str],
-    result: RunResult,
+def fetch_portraits(
+    conn: psycopg.Connection, get_bytes: Callable[[str], bytes], result: RunResult
 ) -> None:
-    """Assign a gender to every character image that has none yet (see ``czn_data.gender``).
+    """Store every character image not stored yet, for post-processing (``czn_data.enrich``).
 
-    A portrait that cannot be fetched or tagged counts as a ``character``/``gender`` validation
-    failure and is tried again on the next run.
+    An image that fails to download counts as a ``fetch_error`` and is tried again next run.
     """
     urls = [
         url
@@ -107,31 +98,27 @@ def tag_portraits(
             """
             SELECT DISTINCT image_url FROM character
             WHERE image_url IS NOT NULL
-              AND image_url NOT IN (SELECT image_url FROM portrait_gender)
+              AND image_url NOT IN (SELECT image_url FROM portrait)
             ORDER BY image_url
             """
         )
     ]
     if urls:
-        log.info("tagging portraits", extra={"count": len(urls)})
+        log.info("fetching portraits", extra={"count": len(urls)})
     for url in urls:
         try:
-            assigned = gender(get_bytes(url))
+            image = get_bytes(url)
         except Blocked as error:
             log.error("blocked by Cloudflare", extra={"url": url, "error": str(error)})
             result.blocked = True
             return
-        except TaggerUnavailable as error:
-            log.error("portrait tagger unavailable", extra={"error": str(error)})
-            result.validation_failures[("character", "gender")] += 1
-            return
-        except Exception as error:  # noqa: BLE001 - one bad portrait must not stop the rest
-            log.error("portrait tagging failed", extra={"url": url, "error": repr(error)})
-            result.validation_failures[("character", "gender")] += 1
+        except FetchFailed as error:
+            log.error("fetch failed", extra={"url": url, "error": str(error)})
+            result.pages["fetch_error"] += 1
             continue
         conn.execute(
-            "INSERT INTO portrait_gender (image_url, gender, tagged_at) VALUES (%s, %s, %s)",
-            (url, assigned, datetime.now(UTC)),
+            "INSERT INTO portrait (image_url, image, fetched_at) VALUES (%s, %s, %s)",
+            (url, image, datetime.now(UTC)),
         )
 
 
@@ -166,69 +153,35 @@ def _process(conn, url, html, fetched_at, allow_shrink, result: RunResult) -> No
 
 
 def export_metrics(conn: psycopg.Connection, result: RunResult, started: float) -> bool:
-    """Send the run's metrics once over OTLP/HTTP; return False if the export failed.
+    """Send the run's metrics once (see ``czn_data.metrics``); False if the export failed."""
 
-    The job exits right after, so a periodic reader would race the exit. Instead every value is
-    recorded, collected once, and exported synchronously, and the export result is checked.
-    Configuration comes only from the standard OTEL_* variables (endpoint, headers, timeout,
-    OTEL_SERVICE_NAME, OTEL_RESOURCE_ATTRIBUTES). With no OTLP endpoint set, nothing is sent.
+    def record(meter: Meter) -> None:
+        now = time.time()
 
-    Names and units are chosen so VictoriaMetrics with -opentelemetry.usePrometheusNaming stores
-    the Prometheus names documented in the README (``czn.scrape.pages`` -> ``czn_scrape_pages``;
-    unit ``s`` adds ``_seconds``). Count gauges stay unitless: unit "1" would add ``_ratio``.
-    """
-    if not _otlp_metrics_configured():
-        log.info("no OTLP metrics endpoint configured, skipping metrics export")
-        return True
+        def gauge(name: str, description: str, unit: str = ""):
+            return meter.create_gauge(name, unit=unit, description=description)
 
-    reader = InMemoryMetricReader()
-    meter = MeterProvider(metric_readers=[reader], resource=Resource.create()).get_meter(
-        "czn_data.scrape"
-    )
-    now = time.time()
+        gauge("czn.scrape.success", "1 when the run had no failures").set(int(result.ok))
+        gauge("czn.scrape.blocked", "1 when Cloudflare blocked the run").set(int(result.blocked))
+        gauge("czn.scrape.discovery_failed", "1 when page discovery failed").set(
+            int(result.discovery_failed)
+        )
+        gauge("czn.scrape.last_run.timestamp", "End of the run", "s").set(now)
+        if result.ok:
+            gauge("czn.scrape.last_success.timestamp", "End of the last successful run", "s").set(
+                now
+            )
+        gauge("czn.scrape.duration", "Run duration", "s").set(now - started)
+        pages = gauge("czn.scrape.pages", "Pages by result")
+        for outcome in ("ok", "fetch_error", "parse_error"):
+            pages.set(result.pages[outcome], {"result": outcome})
+        failures = gauge(
+            "czn.scrape.validation_failures", "Pages that no longer parse, by page kind and field"
+        )
+        for (kind, field_name), count in result.validation_failures.items():
+            failures.set(count, {"kind": kind, "field": field_name})
+        rows = gauge("czn.data.rows", "Rows stored per table")
+        for table, count in store.row_counts(conn).items():
+            rows.set(count, {"table": table})
 
-    def gauge(name: str, description: str, unit: str = ""):
-        return meter.create_gauge(name, unit=unit, description=description)
-
-    gauge("czn.scrape.success", "1 when the run had no failures").set(int(result.ok))
-    gauge("czn.scrape.blocked", "1 when Cloudflare blocked the run").set(int(result.blocked))
-    gauge("czn.scrape.discovery_failed", "1 when page discovery failed").set(
-        int(result.discovery_failed)
-    )
-    gauge("czn.scrape.last_run.timestamp", "End of the run", "s").set(now)
-    if result.ok:
-        gauge("czn.scrape.last_success.timestamp", "End of the last successful run", "s").set(now)
-    gauge("czn.scrape.duration", "Run duration", "s").set(now - started)
-    pages = gauge("czn.scrape.pages", "Pages by result")
-    for outcome in ("ok", "fetch_error", "parse_error"):
-        pages.set(result.pages[outcome], {"result": outcome})
-    failures = gauge(
-        "czn.scrape.validation_failures", "Pages that no longer parse, by page kind and field"
-    )
-    for (kind, field_name), count in result.validation_failures.items():
-        failures.set(count, {"kind": kind, "field": field_name})
-    rows = gauge("czn.data.rows", "Rows stored per table")
-    for table, count in store.row_counts(conn).items():
-        rows.set(count, {"table": table})
-
-    exporter = OTLPMetricExporter()
-    try:
-        outcome = exporter.export(reader.get_metrics_data())
-    finally:
-        exporter.shutdown()
-    if outcome is not MetricExportResult.SUCCESS:
-        log.error("OTLP metrics export failed")
-        return False
-    log.info("metrics exported")
-    return True
-
-
-def _otlp_metrics_configured() -> bool:
-    if os.environ.get("OTEL_SDK_DISABLED", "").lower() == "true":
-        return False
-    if os.environ.get("OTEL_METRICS_EXPORTER", "otlp").lower() != "otlp":
-        return False
-    return any(
-        os.environ.get(name)
-        for name in ("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", "OTEL_EXPORTER_OTLP_ENDPOINT")
-    )
+    return metrics.export("czn_data.scrape", record)

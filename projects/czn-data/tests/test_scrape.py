@@ -7,8 +7,7 @@ network; the database is real Postgres.
 from pathlib import Path
 
 from czn_data.fetch import Blocked, FetchFailed
-from czn_data.gender import TaggerUnavailable
-from czn_data.scrape import RunResult, reparse, scrape, tag_portraits
+from czn_data.scrape import RunResult, fetch_portraits, reparse, scrape
 
 SITE = "https://www.prydwen.gg"
 CHARACTER_URL = f"{SITE}/chaos-zero-nightmare/characters/mei-lin"
@@ -120,25 +119,21 @@ def test_fetch_failure_skips_the_page_and_fails_the_run(conn):
 PORTRAIT = "https://cdn.prydwen.gg/images/chaos/characters/mei-lin_card.webp"
 
 
-def test_new_portraits_get_a_gender_once(conn):
+def test_new_portraits_are_stored_once(conn):
     scrape(conn, site({CHARACTER_URL: CHARACTER_HTML}), allow_shrink=False)
-    tagged = []
+    fetched = []
 
-    def gender(image: bytes) -> str:
-        tagged.append(image)
-        return "female"
+    def get_bytes(url: str) -> bytes:
+        fetched.append(url)
+        return b"art"
 
     result = RunResult()
-    tag_portraits(conn, {PORTRAIT: b"art"}.__getitem__, gender, result)
-    tag_portraits(conn, {PORTRAIT: b"art"}.__getitem__, gender, result)
+    fetch_portraits(conn, get_bytes, result)
+    fetch_portraits(conn, get_bytes, result)
 
     assert result.ok
-    assert tagged == [b"art"]
-    assert conn.execute("SELECT image_url, gender FROM portrait_gender").fetchall() == [
-        (PORTRAIT, "female")
-    ]
-    reparse(conn, allow_shrink=False)  # rebuilding characters keeps their genders
-    assert conn.execute("SELECT count(*) FROM portrait_gender").fetchone() == (1,)
+    assert fetched == [PORTRAIT]
+    assert conn.execute("SELECT image_url, image FROM portrait").fetchall() == [(PORTRAIT, b"art")]
 
 
 def test_portrait_that_fails_is_reported_and_retried_next_run(conn):
@@ -148,24 +143,24 @@ def test_portrait_that_fails_is_reported_and_retried_next_run(conn):
         raise FetchFailed("HTTP 404")
 
     failed = RunResult()
-    tag_portraits(conn, unreachable, lambda image: "female", failed)
-    assert failed.validation_failures == {("character", "gender"): 1}
+    fetch_portraits(conn, unreachable, failed)
+    assert failed.pages == {"fetch_error": 1}
 
     retried = RunResult()
-    tag_portraits(conn, {PORTRAIT: b"art"}.__getitem__, lambda image: "male", retried)
+    fetch_portraits(conn, {PORTRAIT: b"art"}.__getitem__, retried)
     assert retried.ok
-    assert conn.execute("SELECT gender FROM portrait_gender").fetchone() == ("male",)
+    assert conn.execute("SELECT count(*) FROM portrait").fetchone() == (1,)
 
 
-def test_unavailable_tagger_is_reported_once(conn):
+def test_blocked_portrait_fetch_stops_the_run(conn):
     scrape(conn, site({CHARACTER_URL: CHARACTER_HTML}), allow_shrink=False)
 
-    def unavailable(image: bytes) -> str:
-        raise TaggerUnavailable("model download failed")
+    def blocked(url: str) -> bytes:
+        raise Blocked("challenge")
 
     result = RunResult()
-    tag_portraits(conn, {PORTRAIT: b"art"}.__getitem__, unavailable, result)
-    assert result.validation_failures == {("character", "gender"): 1}
+    fetch_portraits(conn, blocked, result)
+    assert result.blocked
 
 
 def test_discovery_failure_fails_the_run(conn):

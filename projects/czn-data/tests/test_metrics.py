@@ -1,5 +1,5 @@
-"""Contract: a scrape run's metrics reach VictoriaMetrics over OTLP under the names the alert
-rules query, and each alert fires on a bad run and resolves after the next good one.
+"""Contract: a scrape or enrich run's metrics reach VictoriaMetrics over OTLP under the names the
+alert rules query, and each alert fires on a bad run and resolves after the next good one.
 
 Runs against real VictoriaMetrics started with -opentelemetry.usePrometheusNaming, the flag
 the cluster uses, so the stored names come from VictoriaMetrics' own OTLP translation.
@@ -17,7 +17,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from czn_data import store
+from czn_data import enrich, store
 from czn_data.scrape import RunResult, export_metrics
 
 ALERTS = yaml.safe_load((Path(__file__).parents[1] / "deploy" / "alerts.yaml").read_text())
@@ -115,6 +115,39 @@ def test_stale_alert_waits_for_the_first_run_on_a_fresh_install(conn, vm, monkey
 
     export_run(conn, monkeypatch, blocked=True)
     assert query(vm, ALERT_EXPRS["CznScrapeStale"]), "CznScrapeStale did not fire"
+
+
+def export_enrich_run(monkeypatch, **failures) -> None:
+    monkeypatch.setenv("OTEL_RESOURCE_ATTRIBUTES", f"service.instance.id={uuid.uuid4()}")
+    assert enrich.export_metrics(enrich.EnrichResult(Counter(failures)), started=0)
+
+
+def test_enrich_metrics_arrive_under_the_documented_names(vm, monkeypatch):
+    export_enrich_run(monkeypatch, gender=2)
+
+    query(vm, "czn_enrich_failures")
+    stored = {
+        (s["metric"]["__name__"], tuple(sorted(k for k in s["metric"] if k == "step")))
+        for s in query(vm, '{__name__=~"czn_.*"}')
+    }
+    assert stored == {
+        ("czn_enrich_success", ()),
+        ("czn_enrich_last_run_timestamp_seconds", ()),
+        ("czn_enrich_duration_seconds", ()),
+        ("czn_enrich_failures", ("step",)),
+    }
+    assert query(vm, 'czn_enrich_failures{step="gender"}')[0]["value"][1] == "2"
+
+
+@pytest.mark.parametrize("alert", ["CznEnrichStale", "CznEnrichFailed"])
+def test_enrich_alert_fires_on_bad_run_and_resolves_after_good_run(vm, monkeypatch, alert):
+    assert not query(vm, ALERT_EXPRS[alert], expect_result=False)
+
+    export_enrich_run(monkeypatch, gender=1)
+    assert query(vm, ALERT_EXPRS[alert]), f"{alert} did not fire"
+
+    export_enrich_run(monkeypatch)
+    assert not query(vm, ALERT_EXPRS[alert], expect_result=False), f"{alert} did not resolve"
 
 
 def test_no_endpoint_configured_exports_nothing_without_error(conn, monkeypatch):

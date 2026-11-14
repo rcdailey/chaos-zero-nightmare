@@ -7,10 +7,13 @@ One container image (`ghcr.io/rcdailey/czn-data`) runs both workloads:
 
 - `czn-data scrape`: run on a schedule (a daily Kubernetes CronJob). A run takes about 20 minutes
   because it waits 10 seconds between requests, as Prydwen's robots.txt asks.
+- `czn-data enrich`: derives data from what the scrape stored (character gender), without
+  contacting Prydwen. Run it on its own schedule (a second CronJob), such as an hour after the
+  scrape. A run that finds nothing new exits in seconds.
 - `czn-data serve`: the MCP server (a Deployment), listening on port 8000.
-- `czn-data migrate`: upgrades the database schema, then exits. `scrape` and `reparse` run it
-  first on their own. Run it as an init container of the server Deployment, with the scraper's
-  database credentials, so a new image never serves an old schema.
+- `czn-data migrate`: upgrades the database schema, then exits. `scrape`, `reparse`, and
+  `enrich` run it first on their own. Run it as an init container of the server Deployment,
+  with the scraper's database credentials, so a new image never serves an old schema.
 
 ## What gets stored
 
@@ -21,12 +24,13 @@ The scraper finds every page through robots.txt and the sitemaps, saves its HTML
   Manifest Ego levels (E1 to E6), and the guide: teams, decks, equipment and seasonal powers per
   season tab, fragment and partner rankings, synergies, and the prose sections (pros, cons,
   introduction, stats, and so on).
-- Character gender, female or male. Prydwen does not state it, so the scraper runs the WD14 anime
-  image tagger (`SmilingWolf/wd-swinv2-tagger-v3`) on each new card art: a `1girl` score of at
-  least 0.5 is female, anything else male. Each image is tagged once. Only a scrape that finds
-  untagged art uses the model: it downloads the newest revision of the 467 MB model from Hugging
-  Face into `CZN_TAGGER_DIR` when the stored copy is missing or outdated, then loads it (about
-  1 GB of memory). If Hugging Face is unreachable, the stored copy is used.
+- Each character's card art (about 30 KB per image), fetched once per image URL.
+- Character gender, female or male, set by `enrich`. Prydwen does not state it, so `enrich` runs
+  the WD14 anime image tagger (`SmilingWolf/wd-swinv2-tagger-v3`) on each stored card art: a
+  `1girl` score of at least 0.5 is female, anything else male. Each image is tagged once. Only a
+  run that finds untagged art uses the model: it downloads the newest revision of the 467 MB
+  model from Hugging Face into `CZN_TAGGER_DIR` when the stored copy is missing or outdated,
+  then loads it (about 1 GB of memory). If Hugging Face is unreachable, the stored copy is used.
 - `neutral-cards`, `equipment` (stats per level, drop source), `memory-fragments`, `partners`
   (passive only), and `guides/effects-dictionary` (keyword and status definitions).
 - Every page's full text, for search.
@@ -62,17 +66,25 @@ Every series also carries the OTLP resource attributes as labels, such as `servi
 - `czn_scrape_last_run_timestamp_seconds`, `czn_scrape_duration_seconds`: end and length of the
   run.
 - `czn_scrape_blocked`, `czn_scrape_discovery_failed`: 1 when the run stopped early.
-- `czn_scrape_pages{result}`: pages per result (`ok`, `fetch_error`, `parse_error`).
+- `czn_scrape_pages{result}`: pages per result (`ok`, `fetch_error`, `parse_error`). Card
+  images that fail to download also count as `fetch_error`.
 - `czn_scrape_validation_failures{kind,field}`: page kind and field that stopped parsing.
 - `czn_data_rows{table}`: rows per table after the run.
+
+The enrich job sends its own series the same way. It exits non-zero when any row fails, and the
+failed rows are tried again on the next run:
+
+- `czn_enrich_success`, `czn_enrich_last_success_timestamp_seconds`,
+  `czn_enrich_last_run_timestamp_seconds`, `czn_enrich_duration_seconds`: as for the scrape.
+- `czn_enrich_failures{step}`: rows that failed per step (`gender`).
 
 ## Configuration
 
 Environment variables:
 
-- `DATABASE_URL` (all): Postgres URL. `migrate` and `scrape` need the database owner; the server
-  needs `SELECT` only.
-- `OTEL_EXPORTER_OTLP_ENDPOINT` or `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` (scrape): OTLP/HTTP
+- `DATABASE_URL` (all): Postgres URL. `migrate`, `scrape`, and `enrich` need the database owner;
+  the server needs `SELECT` only.
+- `OTEL_EXPORTER_OTLP_ENDPOINT` or `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` (scrape, enrich): OTLP/HTTP
   receiver, such as `http://otel-gateway-collector.observability:4318`. With neither set, no
   metrics are sent. The other standard variables also apply: `OTEL_SERVICE_NAME`,
   `OTEL_RESOURCE_ATTRIBUTES`, `OTEL_EXPORTER_OTLP_HEADERS`, `OTEL_EXPORTER_OTLP_TIMEOUT`, and
@@ -84,10 +96,10 @@ Environment variables:
 - `OIDC_AUDIENCE` (serve): expected `aud` claim. Defaults to `MCP_PUBLIC_URL`.
 - `OIDC_REQUIRED_SCOPES` (serve): space-separated scopes every token must carry. Defaults to none.
 - `MCP_ALLOW_UNAUTHENTICATED` (serve): `true` runs without auth, for local use.
-- `CZN_TAGGER_DIR` (scrape): writable directory, kept across runs (such as a PVC of at least
+- `CZN_TAGGER_DIR` (enrich): writable directory, kept across runs (such as a PVC of at least
   1 GB), where the portrait tagger stores its model. Without it, new characters get no gender
-  and the run fails.
-- `LOG_LEVEL` (both): defaults to `INFO`.
+  and the run fails. The scrape job does not need it.
+- `LOG_LEVEL` (all): defaults to `INFO`.
 
 The server refuses to start unless `OIDC_ISSUER` or `MCP_ALLOW_UNAUTHENTICATED=true` is set.
 

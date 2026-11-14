@@ -1,4 +1,4 @@
-"""Command line entry point: ``czn-data scrape | reparse | serve``.
+"""Command line entry point: ``czn-data scrape | reparse | enrich | migrate | serve``.
 
 Configuration comes from environment variables, documented in the project README.
 """
@@ -46,6 +46,9 @@ def main() -> None:
             action="store_true",
             help="accept pages that lose many rows (Prydwen really removed content)",
         )
+    commands.add_parser(
+        "enrich", help="derive data (character gender) from the stored scrape, without fetching"
+    )
     commands.add_parser("migrate", help="upgrade the database schema, then exit")
     serve_command = commands.add_parser("serve", help="run the MCP server")
     serve_command.add_argument(
@@ -71,13 +74,36 @@ def main() -> None:
     migrate(os.environ["DATABASE_URL"])
     if args.command == "migrate":
         return
+    if args.command == "enrich":
+        sys.exit(_run_enrich())
     sys.exit(_run_job(args.command, args.allow_shrink))
+
+
+def _run_enrich() -> int:
+    from .enrich import EnrichResult, export_metrics, tag_genders
+    from .gender import Tagger
+
+    log = logging.getLogger("czn_data")
+    started = time.time()
+    log.info("run started", extra={"command": "enrich"})
+    result = EnrichResult()
+    with psycopg.connect(os.environ["DATABASE_URL"], autocommit=True) as conn:
+        tag_genders(conn, Tagger().gender, result)
+    log.info(
+        "run finished",
+        extra={"command": "enrich", "ok": result.ok, "failures": dict(result.failures)},
+    )
+    try:
+        exported = export_metrics(result, started)
+    except Exception:
+        log.exception("metrics export failed")
+        exported = False
+    return 0 if result.ok and exported else 1
 
 
 def _run_job(command: str, allow_shrink: bool) -> int:
     from .fetch import Fetcher
-    from .gender import Tagger
-    from .scrape import export_metrics, reparse, scrape, tag_portraits
+    from .scrape import export_metrics, fetch_portraits, reparse, scrape
 
     log = logging.getLogger("czn_data")
     started = time.time()
@@ -87,7 +113,7 @@ def _run_job(command: str, allow_shrink: bool) -> int:
             fetcher = Fetcher()
             result = scrape(conn, fetcher.get, allow_shrink)
             if not (result.blocked or result.discovery_failed):
-                tag_portraits(conn, fetcher.get_bytes, Tagger().gender, result)
+                fetch_portraits(conn, fetcher.get_bytes, result)
         else:
             result = reparse(conn, allow_shrink)
         log.info(

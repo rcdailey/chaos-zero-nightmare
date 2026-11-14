@@ -110,6 +110,13 @@ def test_alert_fires_on_bad_run_and_resolves_after_good_run(conn, vm, monkeypatc
     assert not query(vm, ALERT_EXPRS[alert], expect_result=False), f"{alert} did not resolve"
 
 
+def test_stale_alert_waits_for_the_first_run_on_a_fresh_install(conn, vm, monkeypatch):
+    assert not query(vm, ALERT_EXPRS["CznScrapeStale"], expect_result=False)
+
+    export_run(conn, monkeypatch, blocked=True)
+    assert query(vm, ALERT_EXPRS["CznScrapeStale"]), "CznScrapeStale did not fire"
+
+
 def test_no_endpoint_configured_exports_nothing_without_error(conn, monkeypatch):
     for name in ("OTEL_EXPORTER_OTLP_ENDPOINT", "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT"):
         monkeypatch.delenv(name, raising=False)

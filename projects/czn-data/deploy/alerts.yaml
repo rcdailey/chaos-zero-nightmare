@@ -17,7 +17,10 @@ groups:
       - alert: CznScrapeStale
         expr: >-
           time() - max(last_over_time(czn_scrape_last_success_timestamp_seconds[7d])) > 36 * 3600
-          or absent_over_time(czn_scrape_last_success_timestamp_seconds[7d])
+          or (
+            absent_over_time(czn_scrape_last_success_timestamp_seconds[7d])
+            and on () count(last_over_time(czn_scrape_last_run_timestamp_seconds[7d]))
+          )
         labels:
           severity: warning
         annotations:

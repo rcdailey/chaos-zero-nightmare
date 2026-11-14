@@ -104,6 +104,53 @@ def test_find_teams_by_member(call):
     assert (team["name"], team["listed_for"]) == ("Spire Fire", ["Mei Lin"])
 
 
+EFFECTS_URL = "https://www.prydwen.gg/chaos-zero-nightmare/guides/effects-dictionary"
+PARTNERS_URL = "https://www.prydwen.gg/chaos-zero-nightmare/partners"
+
+
+@pytest.fixture
+def effects(conn):
+    rows = [
+        {"name": "Exhaust", "type": "Tag", "description": "When used, move to Exhaust pile."},
+        {"name": "Equilux", "type": "Unique effect", "description": "Polarizes the card."},
+    ]
+    page = ParsedPage("Effects", "", {"effect": rows})
+    store.save_page(conn, EFFECTS_URL, "effects", "", datetime.now(UTC), page, None)
+
+
+def test_lookup_accepts_keyword_as_effect_and_rejects_unknown_kinds(call, effects):
+    (found,) = call("lookup", name="exhaust", kind="keyword")
+    assert (found["kind"], found["name"]) == ("effect", "Exhaust")
+    with pytest.raises(Exception, match="kind"):
+        call("lookup", name="exhaust", kind="spell")
+
+
+def test_lookup_finds_terms_defined_inside_other_effects(call, effects):
+    (found,) = call("lookup", name="Polarization", kind="effect")
+    assert found["name"] == "Equilux"
+
+
+def test_get_partner_returns_ego_skill(call, conn):
+    sig = {
+        "name": "Sig",
+        "rarity": 5,
+        "class": "Striker",
+        "passive_text": "Crit up.",
+        "ego_name": "Frail Dominion of Kyrken",
+        "ego_cost": 3,
+        "ego_text": "2 Dominion Shard.",
+    }
+    page = ParsedPage("Partners", "", {"partner": [sig]})
+    store.save_page(conn, PARTNERS_URL, "partners", "", datetime.now(UTC), page, None)
+    found = call("get_partner", name="sig")
+    assert (found["ego_name"], found["ego_cost"]) == ("Frail Dominion of Kyrken", 3)
+
+
+def test_list_cards_filters_by_color(call):
+    (white,) = call("list_cards", character="mei lin", color="white")
+    assert (white["name"], white["color"]) == ("Strike", "White")
+
+
 def test_recommended_by_lists_every_place_an_item_is_recommended(call, conn):
     fragments = ParsedPage(
         "Memory Fragments",

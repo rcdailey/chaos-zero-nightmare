@@ -11,6 +11,7 @@ yields nothing means the selectors no longer match.
 """
 
 import copy
+import json
 import re
 from dataclasses import dataclass, field
 from urllib.parse import urlparse
@@ -74,8 +75,9 @@ def parse_page(url: str, html: str) -> ParsedPage:
     if not page.body:
         raise ParseError("document.body", "page has no text content")
     kind = page_kind(url)
-    parser = _PARSERS.get(kind)
-    if parser:
+    if kind == "partners":
+        page.records = parse_partners(html)
+    elif parser := _PARSERS.get(kind):
         page.records = parser(root, url)
     return page
 
@@ -675,30 +677,53 @@ def parse_memory_fragments(root: Tag, url: str) -> dict[str, list[dict]]:
     return {"fragment_set": sets}
 
 
-def parse_partners(root: Tag, url: str) -> dict[str, list[dict]]:
-    # Only the active tab (Partner Passive) is rendered on the server; the EGO Skill and Stats
-    # tabs load with JavaScript, so they are not available without a browser.
+def _flight_data(html: str) -> str:
+    """The Next.js flight payload: the props the page was rendered from, which also hold data
+    the server-rendered HTML leaves out (such as tabs that render only in the browser). Next.js
+    streams it as JSON string chunks in ``self.__next_f.push([1, "..."])`` script calls."""
+    chunks = re.findall(r'self\.__next_f\.push\(\[1,("(?:[^"\\]|\\.)*")\]\)', html)
+    return "".join(json.loads(chunk) for chunk in chunks)
+
+
+def _html_text(fragment: str | None) -> str:
+    return text_of(BeautifulSoup(fragment or "", "lxml"))
+
+
+def parse_partners(html: str) -> dict[str, list[dict]]:
+    """Partners from the page's flight payload. The HTML renders only the Partner Passive tab;
+    the EGO Skill and Stats tabs exist only in the payload."""
+    flight = _flight_data(html)
+    start = flight.find('"partners":[')
+    if start < 0:
+        raise ParseError("partner", "no partner list in the flight payload")
+    try:
+        entries, _ = json.JSONDecoder().raw_decode(flight, start + len('"partners":'))
+    except json.JSONDecodeError as error:
+        raise ParseError("partner", f"partner list is not JSON: {error}") from error
     partners = []
-    for el in root.select(".single-partner"):
-        info = {
-            text_of(p).split(":", 1)[0]: text_of(p.find("strong"))
-            for p in el.select(".chaos-partner-info p")
-        }
-        rarity = re.match(r"\d", info.get("Rarity", ""))
+    for entry in entries:
+        passive = _html_text(entry.get("passiveEffect"))
+        if not passive:  # Listed before Prydwen publishes the kit (seen on Edelyn).
+            continue
+        rarity = re.match(r"\d", str(entry.get("rarity", "")))
         if not rarity:
-            raise ParseError("partner.rarity", f"not a number: {info.get('Rarity')!r}")
-        passive = el.select_one(".passive")
+            raise ParseError("partner.rarity", f"not a number: {entry.get('rarity')!r}")
+        ego_cost = str(entry.get("egoCost", "")).strip()
+        stats = entry.get("stats") or {}
         partners.append(
             {
-                "name": _required_text(el.select_one("h4"), "partner.name"),
+                "name": entry.get("name") or _missing("partner.name"),
                 "rarity": int(rarity.group()),
-                "class": info.get("Class") or _missing("partner.class"),
-                "passive_name": text_of(passive.select_one("h5") if passive else None) or None,
-                "passive_text": _required_text(
-                    passive.select_one(".skill-with-coloring") if passive else None,
-                    "partner.passive_text",
-                ),
-                "image_url": _image(el),
+                "class": entry.get("class") or _missing("partner.class"),
+                "passive_name": entry.get("passiveName") or None,
+                "passive_text": passive,
+                "ego_name": (entry.get("egoName") or "").strip() or None,
+                "ego_cost": int(ego_cost) if ego_cost.isdigit() else None,
+                "ego_text": _html_text(entry.get("egoDescription")) or None,
+                "hp": stats.get("hp_base"),
+                "attack": stats.get("atk_base"),
+                "defense": stats.get("def_base"),
+                "image_url": entry.get("fullImage") or None,
             }
         )
     if not partners:
@@ -730,6 +755,5 @@ _PARSERS = {
     "neutral_cards": parse_neutral_cards,
     "equipment": parse_equipment,
     "memory_fragments": parse_memory_fragments,
-    "partners": parse_partners,
     "effects": parse_effects,
 }

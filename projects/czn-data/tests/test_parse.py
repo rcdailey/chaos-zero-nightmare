@@ -1,5 +1,6 @@
 """Contract: Prydwen markup becomes complete records, and layout changes fail loudly."""
 
+import json
 from pathlib import Path
 
 import pytest
@@ -299,6 +300,66 @@ EFFECTS_HTML = """<html><body><div id="S:1"><h1>Effects Dictionary</h1><table>
 <strong class="type-text">Tag</strong></td>
 <td class="pw-col-desc">When used, this card moves to the Exhaust pile.</td></tr>
 </table></div></body></html>"""
+
+
+def _partners_html(partners: list[dict]) -> str:
+    """A partners page as Prydwen serves it: the HTML shows names with a "New!" badge, and the
+    full data sits in the Next.js flight payload, streamed in two string chunks."""
+    payload = json.dumps({"partners": partners}, separators=(",", ":"))
+    half = len(payload) // 2
+    pushes = "".join(
+        f"<script>self.__next_f.push([1,{json.dumps(chunk)}])</script>"
+        for chunk in (payload[:half], payload[half:])
+    )
+    return (
+        '<html><body><div id="S:1"><h1>Partners</h1><div class="single-partner">'
+        '<h4>Sig <span class="tag new">New!</span></h4></div></div>'
+        f"{pushes}</body></html>"
+    )
+
+
+SIG = {
+    "slug": "sig",
+    "name": "Sig",
+    "rarity": "5-star",
+    "class": "Striker",
+    "fullImage": "https://cdn.prydwen.gg/images/chaos/partners/sig_full.webp",
+    "passiveName": "Child of the Cycle",
+    "egoName": "Frail Dominion of Kyrken",
+    "egoCost": "3",
+    "passiveEffect": "<p>Increase Attack by <strong>16-24%</strong>.</p><p>Crit up.</p>",
+    "egoDescription": "<p><strong>2</strong> <u>Dominion Shard</u>.</p>",
+    "stats": {"hp_base": 144, "atk_base": 155, "def_base": 5},
+    "isNew": True,
+}
+
+
+def test_partners_page_includes_ego_skill_and_stats():
+    unpublished = {"name": "Edelyn", "rarity": "5-star", "class": "Vanguard", "passiveEffect": ""}
+    page = parse_page(f"{BASE}/partners", _partners_html([SIG, unpublished]))
+    assert page.records["partner"] == [
+        {
+            "name": "Sig",
+            "rarity": 5,
+            "class": "Striker",
+            "passive_name": "Child of the Cycle",
+            "passive_text": "Increase Attack by 16-24%.\nCrit up.",
+            "ego_name": "Frail Dominion of Kyrken",
+            "ego_cost": 3,
+            "ego_text": "2 Dominion Shard.",
+            "hp": 144,
+            "attack": 155,
+            "defense": 5,
+            "image_url": "https://cdn.prydwen.gg/images/chaos/partners/sig_full.webp",
+        }
+    ]
+
+
+def test_partners_page_without_payload_fails():
+    html = _partners_html([SIG]).replace("__next_f", "__other")
+    with pytest.raises(ParseError) as failure:
+        parse_page(f"{BASE}/partners", html)
+    assert failure.value.field == "partner"
 
 
 def test_effects_dictionary_page():

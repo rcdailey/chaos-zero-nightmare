@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import urllib.request
+from typing import Literal
 
 import anyio
 import jwt
@@ -35,6 +36,8 @@ decks, equipment, fragment and partner rankings, synergies), and full-text searc
 guide page. Start with `lookup` for any name seen on screen and `match_card_text` for card text
 seen on screen, then use the specific tools; `get_character` returns one section at a time.
 `list_characters` filters the roster; `synergies` answers who to use with a character.
+Players name cards by color ("her purple card"); `list_cards` filters by color. Prydwen does not
+list Epiphanies that a partner unlocks for its character's cards, so they are not here.
 Fields that are empty are left out. Ratings are Prydwen's stars, 1 to 5. Cite `url` and
 `data_fetched_at` when the answer depends on the data. Player state (owned characters, current
 run) is not stored here; read it from the user's screenshots.
@@ -45,21 +48,38 @@ SELECT entity.*, page.data_fetched_at FROM (
     SELECT 'character' AS kind, name, concat_ws(' ', rarity || '*', element, class) AS summary,
            url FROM character
     UNION ALL
-    SELECT 'card', name, concat_ws(' | ', type, 'cost ' || cost, text), url FROM card
+    SELECT 'card', name, concat_ws(' | ', color, type, 'cost ' || cost, text), url FROM card
     UNION ALL
     SELECT 'equipment', name, concat_ws(' | ', rarity, slot, text), url FROM equipment
     UNION ALL
     SELECT 'fragment_set', name, bonuses::text, url FROM fragment_set
     UNION ALL
-    SELECT 'partner', name, concat_ws(' | ', rarity || '*', class, passive_text), url FROM partner
+    SELECT 'partner', name, concat_ws(' | ', rarity || '*', class, passive_text,
+           'EGO ' || ego_name || ' (' || ego_cost || ' EP): ' || ego_text), url FROM partner
     UNION ALL
     SELECT 'effect', name, concat_ws(' | ', type, description), url FROM effect
 ) entity
 JOIN page USING (url)
-WHERE (%(kind)s::text IS NULL OR entity.kind = %(kind)s) AND {match}
-ORDER BY word_similarity(%(name)s, name) DESC, similarity(name, %(name)s) DESC, name
+WHERE (%(kind)s::text IS NULL OR entity.kind = %(kind)s)
+  AND ({match} OR entity.kind = 'effect'
+       AND to_tsvector('english', summary) @@ plainto_tsquery('english', %(name)s))
+ORDER BY {match} DESC, word_similarity(%(name)s, name) DESC, similarity(name, %(name)s) DESC,
+    name
 LIMIT %(limit)s
 """
+# Other words for effect: the dictionary holds keywords, statuses, and card tags.
+LOOKUP_KIND_ALIASES = {"keyword": "effect", "status": "effect", "tag": "effect"}
+LookupKind = Literal[
+    "character",
+    "card",
+    "equipment",
+    "fragment_set",
+    "partner",
+    "effect",
+    "keyword",
+    "status",
+    "tag",
+]
 
 # Fuzzy name match: substring, or pg_trgm word similarity ("flicker blad" finds
 # "Flicker Blade I"). Shared by every tool that resolves a name typed from a screenshot.
@@ -69,8 +89,8 @@ LOOKUP_SQL = LOOKUP_SQL.format(match=NAME_MATCH)
 # get_character section name -> query for that part of one character's data (%(slug)s).
 CHARACTER_SECTIONS = {
     # Reviews are left out to keep this small; get_card returns them for one card.
-    "cards": "SELECT category, name, variant, alias, cost, type, tags, text, rating, target_neutral"
-    " FROM card WHERE character_slug = %(slug)s ORDER BY category, base_name, variant",
+    "cards": "SELECT category, name, variant, alias, color, cost, type, tags, text, rating,"
+    " target_neutral FROM card WHERE character_slug = %(slug)s ORDER BY category, base_name, variant",
     "potentials": "SELECT position, name, text FROM potential WHERE character_slug = %(slug)s",
     "manifest_egos": "SELECT level, name, text, performance, review FROM manifest_ego"
     " WHERE character_slug = %(slug)s ORDER BY level",
@@ -207,13 +227,34 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
         return JSONResponse({"status": "ok"})
 
     @mcp.tool()
-    async def lookup(name: str, kind: str | None = None, limit: int = 10) -> list[dict]:
+    async def lookup(name: str, kind: LookupKind | None = None, limit: int = 10) -> list[dict]:
         """Fuzzy-find any named game entity, tolerant of typos and partial names.
 
         kind narrows the search: character, card, equipment, fragment_set, partner, effect.
-        Effects are keywords and statuses (for example Exhaust, Retain, Vulnerable).
+        Effects are keywords, statuses and card tags (for example Exhaust, Retain, Vulnerable);
+        a term without its own entry, such as Polarization, finds the effects whose description
+        uses it. Card summaries start with the card's color (its rarity in game: White, Blue,
+        Purple, Gold, Orange).
         """
+        kind = LOOKUP_KIND_ALIASES.get(kind, kind) if kind else None
         return await _query(LOOKUP_SQL, {"name": name, "kind": kind, "limit": min(limit, 50)})
+
+    @mcp.tool()
+    async def get_partner(name: str) -> dict | None:
+        """The best-matching partner: rarity, class, passive, EGO skill (name, EP cost, text)
+        and base stats. Use recommended_by for which characters' guides rank it."""
+        found = await _query(
+            """
+            SELECT partner.*, page.data_fetched_at FROM partner JOIN page USING (url)
+            WHERE """
+            + NAME_MATCH
+            + """
+            ORDER BY word_similarity(%(name)s, name) DESC, similarity(name, %(name)s) DESC
+            LIMIT 1
+            """,
+            {"name": name},
+        )
+        return found[0] if found else None
 
     @mcp.tool()
     async def get_card(name: str) -> list[dict]:
@@ -272,8 +313,8 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
         narrows the search to one character's cards (name or slug)."""
         return await _query(
             """
-            SELECT card.name, card.base_name, card.variant, card.alias, card.cost, card.type,
-                   card.text, card.rating, character.name AS character, card.url,
+            SELECT card.name, card.base_name, card.variant, card.alias, card.color, card.cost,
+                   card.type, card.text, card.rating, character.name AS character, card.url,
                    round(word_similarity(%(text)s, card.text)::numeric, 2) AS match
             FROM card LEFT JOIN character ON character.slug = card.character_slug
             WHERE (%(character)s::text IS NULL OR character.slug = %(character)s
@@ -363,21 +404,25 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
         category: str | None = None,
         type: str | None = None,
         tag: str | None = None,
+        color: str | None = None,
         base_only: bool = True,
     ) -> list[dict]:
         """List cards with optional filters. character is a name or slug; category is starting,
-        unique or neutral; type is Attack, Skill, Upgrade and so on; tag is a card tag such as
-        Exhaust. base_only skips Epiphany variants."""
+        unique, generated or neutral; type is Attack, Skill, Upgrade and so on; tag is a card
+        tag such as Exhaust; color is the card's rarity color (White, Blue, Purple, Gold,
+        Orange), which players use to name cards ("her purple card"). base_only skips Epiphany
+        variants."""
         return await _query(
             """
-            SELECT card.name, card.category, card.cost, card.type, card.tags, card.text,
-                   card.variant, card.rating, character.name AS character, card.url
+            SELECT card.name, card.category, card.color, card.cost, card.type, card.tags,
+                   card.text, card.variant, card.rating, character.name AS character, card.url
             FROM card LEFT JOIN character ON character.slug = card.character_slug
             WHERE (%(character)s::text IS NULL OR character.slug = %(character)s
                    OR character.name ILIKE %(character)s)
               AND (%(category)s::text IS NULL OR card.category = %(category)s)
               AND (%(type)s::text IS NULL OR card.type ILIKE %(type)s)
               AND (%(tag)s::text IS NULL OR %(tag)s ILIKE ANY (card.tags))
+              AND (%(color)s::text IS NULL OR card.color ILIKE %(color)s)
               AND (NOT %(base_only)s OR card.variant = '')
             ORDER BY character.name NULLS LAST, card.name
             LIMIT 300
@@ -387,6 +432,7 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
                 "category": category,
                 "type": type,
                 "tag": tag,
+                "color": color,
                 "base_only": base_only,
             },
         )

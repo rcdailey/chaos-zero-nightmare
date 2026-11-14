@@ -32,11 +32,13 @@ The scraper finds every page through robots.txt and the sitemaps, saves its HTML
   model from Hugging Face into `CZN_TAGGER_DIR` when the stored copy is missing or outdated,
   then loads it (about 1 GB of memory). If Hugging Face is unreachable, the stored copy is used.
 - `neutral-cards`, `equipment` (stats per level, drop source), `memory-fragments`, `partners`
-  (passive only), and `guides/effects-dictionary` (keyword and status definitions).
+  (passive, EGO skill, base stats), and `guides/effects-dictionary` (keyword and status
+  definitions).
 - Every page's full text, for search.
 
-Prydwen loads partner EGO skills and stats only in the browser, so they are missing. Fates,
-events, bosses, and shops are not on Prydwen at all.
+The partners page renders only the passive tab as HTML; the EGO skill and stats come from the
+Next.js flight payload embedded in the same page. Prydwen does not list Epiphanies that a partner
+unlocks for its character's cards. Fates, events, bosses, and shops are not on Prydwen at all.
 
 ## How failures are handled
 

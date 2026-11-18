@@ -1,7 +1,6 @@
 {
   "$schema": "https://opencode.ai/config.json",
   "permissions": [
-    { "action": "shell", "resource": "*git push*", "effect": "allow" },
     { "action": "subagent", "resource": "acceptance", "effect": "deny" },
   ],
   "mcp": {

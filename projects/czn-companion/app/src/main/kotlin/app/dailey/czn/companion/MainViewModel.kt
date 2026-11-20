@@ -7,6 +7,7 @@ import app.dailey.czn.companion.auth.AuthState
 import app.dailey.czn.companion.auth.CznDataAuth
 import app.dailey.czn.companion.auth.LoopbackSignIn
 import app.dailey.czn.companion.overlay.OverlaySettings
+import app.dailey.czn.companion.overlay.OverlayStatus
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -26,12 +27,14 @@ data class MainUiState(
     val anthropic: SignInUiState = SignInUiState(),
     val cznData: SignInUiState = SignInUiState(),
     val buttonVisible: Boolean = true,
+    val overlayRunning: Boolean = false,
 )
 
 class MainViewModel(
     private val anthropic: AnthropicAuth,
     private val cznData: CznDataAuth,
     private val overlay: OverlaySettings,
+    private val overlayStatus: OverlayStatus,
 ) : ViewModel() {
     private val anthropicUi = MutableStateFlow(SignInUiState())
     private val cznDataUi = MutableStateFlow(SignInUiState())
@@ -42,9 +45,9 @@ class MainViewModel(
             anthropicUi,
             cznData.state,
             cznDataUi,
-            overlay.buttonVisible,
-        ) { a, aUi, c, cUi, buttonVisible ->
-            MainUiState(aUi.copy(auth = a), cUi.copy(auth = c), buttonVisible)
+            combine(overlay.buttonVisible, overlayStatus.running, ::Pair),
+        ) { a, aUi, c, cUi, (buttonVisible, overlayRunning) ->
+            MainUiState(aUi.copy(auth = a), cUi.copy(auth = c), buttonVisible, overlayRunning)
         }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), MainUiState())
 
     fun showFloatingButton() = overlay.setButtonVisible(true)

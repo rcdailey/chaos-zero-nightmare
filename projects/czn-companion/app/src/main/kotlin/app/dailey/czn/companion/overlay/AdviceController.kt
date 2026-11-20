@@ -1,6 +1,9 @@
 package app.dailey.czn.companion.overlay
 
 import android.util.Log
+import androidx.compose.foundation.text.input.TextFieldState
+import androidx.compose.foundation.text.input.clearText
+import androidx.compose.foundation.text.input.setTextAndPlaceCursorAtEnd
 import app.dailey.czn.companion.claude.ClaudeConversation
 import app.dailey.czn.companion.claude.FailureKind
 import app.dailey.czn.companion.claude.ReplyEvent
@@ -61,6 +64,12 @@ class AdviceController(
 
     val busy get() = local.value.busy
 
+    /**
+     * The question being typed. It outlives the panel window, and a typed question that fails is
+     * put back so it can be sent again.
+     */
+    val draft = TextFieldState()
+
     /** Asks [question] about [screenshot]; ignored while a reply is in progress. */
     fun ask(
         question: String,
@@ -78,6 +87,7 @@ class AdviceController(
             }
         entryCountAtAsk = state.value.entries.size
         Log.d(TAG, "ask '$question', ${jpeg.size} B jpeg, $entryCountAtAsk saved entries")
+        if (question.isNotEmpty()) draft.clearText()
         local.update {
             it.copy(
                 pendingQuestion = question,
@@ -90,6 +100,9 @@ class AdviceController(
         }
         scope.launch {
             conversation.ask(question, jpeg).collect { event ->
+                if (event is ReplyEvent.Failed && draft.text.isEmpty()) {
+                    draft.setTextAndPlaceCursorAtEnd(question)
+                }
                 local.update { state ->
                     when (event) {
                         is ReplyEvent.TextDelta -> {

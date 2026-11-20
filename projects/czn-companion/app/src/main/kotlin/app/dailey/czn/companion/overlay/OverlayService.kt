@@ -2,7 +2,10 @@ package app.dailey.czn.companion.overlay
 
 import android.accessibilityservice.AccessibilityService
 import android.annotation.SuppressLint
+import android.content.ComponentName
 import android.content.pm.ApplicationInfo
+import android.content.pm.PackageManager
+import android.content.res.Configuration
 import android.graphics.PixelFormat
 import android.os.SystemClock
 import android.util.Log
@@ -22,6 +25,9 @@ import app.dailey.czn.companion.CompanionTheme
 import kotlinx.coroutines.MainScope
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 import java.io.File
 import kotlin.math.max
@@ -29,7 +35,8 @@ import kotlin.math.roundToInt
 
 /**
  * Accessibility service that owns the floating button, the side panel, and screenshots. It reads
- * no accessibility events: the game exposes none, so the screen image is the only input.
+ * only which app is in front, to show the button over the game alone. The game exposes no
+ * accessibility content, so the screen image is the only input about it.
  */
 class OverlayService : AccessibilityService() {
     private val owner = OverlayOwner()
@@ -48,24 +55,61 @@ class OverlayService : AccessibilityService() {
     private var panel: ComposeView? = null
 
     private val settings by lazy { (application as CompanionApp).overlaySettings }
+    private val status by lazy { (application as CompanionApp).overlayStatus }
 
     /** When an outside touch last closed the panel; a button tap right after it must not reopen. */
     private var panelClosedAt = 0L
 
+    /**
+     * Whether the game is the app in front. False until the first window change after the service
+     * starts: the service cannot read which app is already open.
+     */
+    private val gameInFront = MutableStateFlow(false)
+
     override fun onServiceConnected() {
         owner.start()
+        status.setRunning(true)
         scope.launch {
-            settings.buttonVisible.collect { visible ->
-                if (visible) showButton() else hideButton()
-            }
+            combine(settings.buttonVisible, gameInFront) { visible, inGame -> visible && inGame }
+                .distinctUntilChanged()
+                .collect { show -> if (show) showButton() else hideButton() }
         }
     }
 
-    override fun onAccessibilityEvent(event: AccessibilityEvent?) = Unit
+    /**
+     * Tracks which app is in front from window changes. Only an activity coming to the front
+     * counts: other windows (the keyboard, the notification shade, this app's overlay windows, a
+     * launcher redrawing on a screen size change) open over the game without leaving it.
+     */
+    override fun onAccessibilityEvent(event: AccessibilityEvent?) {
+        if (event?.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) return
+        val source = event.packageName?.toString() ?: return
+        val className = event.className?.toString() ?: return
+        val activity = isActivity(source, className)
+        Log.d(TAG, "window change: $source $className, activity=$activity")
+        if (activity) gameInFront.value = source.startsWith(GAME_PACKAGE_PREFIX)
+    }
+
+    private fun isActivity(
+        packageName: String,
+        className: String,
+    ) = try {
+        packageManager.getActivityInfo(ComponentName(packageName, className), 0)
+        true
+    } catch (_: PackageManager.NameNotFoundException) {
+        false
+    }
 
     override fun onInterrupt() = Unit
 
+    /** Keeps the button on screen when the screen size changes, for example on rotation. */
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        moveButton(0f, 0f)
+    }
+
     override fun onDestroy() {
+        status.setRunning(false)
         button?.let(windowManager::removeView)
         panel?.let(windowManager::removeView)
         owner.destroy()
@@ -156,6 +200,7 @@ class OverlayService : AccessibilityService() {
         closePanel()
         button?.let(windowManager::removeView)
         button = null
+        buttonParams = null
     }
 
     private fun moveButton(
@@ -189,7 +234,7 @@ class OverlayService : AccessibilityService() {
         val view =
             composeView {
                 val state by advice.state.collectAsStateWithLifecycle()
-                Panel(state, panelActions)
+                Panel(state, advice.draft, panelActions)
             }
         closeOnOutsideTouch(view)
         windowManager.addView(view, params)
@@ -272,6 +317,9 @@ class OverlayService : AccessibilityService() {
         const val PANEL_WIDTH_FRACTION = 0.4f
         const val PANEL_MAX_WIDTH_FRACTION = 0.85f
         const val TAP_AFTER_CLOSE_MILLIS = 400L
+
+        /** Prefix of the game's package; store builds differ in the suffix. */
+        const val GAME_PACKAGE_PREFIX = "com.smilegate.chaoszero"
 
         /** Time for the hidden button to leave the composited frame before the screenshot. */
         const val HIDE_SETTLE_MILLIS = 150L

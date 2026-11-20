@@ -18,6 +18,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.text.input.TextFieldState
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
@@ -99,6 +100,7 @@ class PanelActions(
 @Composable
 fun Panel(
     state: PanelState,
+    draft: TextFieldState,
     actions: PanelActions,
 ) {
     val visible = remember { MutableTransitionState(false).apply { targetState = true } }
@@ -131,7 +133,7 @@ fun Panel(
                 }
                 Conversation(state, Modifier.weight(1f))
                 state.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
-                AskRow(state, actions)
+                AskRow(state, draft, actions)
             }
         }
     }
@@ -269,16 +271,15 @@ private fun Question(text: String) {
 @Composable
 private fun AskRow(
     state: PanelState,
+    draft: TextFieldState,
     actions: PanelActions,
 ) {
-    var text by rememberSaveable { mutableStateOf("") }
     val focus = remember { FocusRequester() }
     LaunchedEffect(state.composing) { if (state.composing) focus.requestFocus() }
     Row(verticalAlignment = Alignment.CenterVertically) {
         Box(Modifier.weight(1f)) {
             OutlinedTextField(
-                value = text,
-                onValueChange = { text = it },
+                state = draft,
                 placeholder = { Text("Optional question") },
                 modifier = Modifier.fillMaxWidth().focusRequester(focus),
             )
@@ -287,13 +288,10 @@ private fun AskRow(
             }
         }
         Button(
-            onClick = {
-                actions.onSend(text.trim())
-                text = ""
-            },
+            onClick = { actions.onSend(draft.text.trim().toString()) },
             enabled = !state.busy,
             modifier = Modifier.padding(start = 8.dp),
-        ) { Text(if (text.isBlank()) "Read screen" else "Send") }
+        ) { Text(if (draft.text.isBlank()) "Read screen" else "Send") }
     }
 }
 
@@ -316,6 +314,7 @@ private fun PanelPreview() =
                 streaming = "<seen>Same offer.</seen>\n\nRadiant Sword Flow needs more Justice",
                 busy = true,
             ),
+            TextFieldState(),
             PanelActions(),
         )
     }

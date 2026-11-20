@@ -2,6 +2,7 @@ package app.dailey.czn.companion
 
 import android.content.Intent
 import android.os.Bundle
+import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -50,7 +51,12 @@ class MainActivity : ComponentActivity() {
         viewModelFactory {
             initializer {
                 val app = application as CompanionApp
-                MainViewModel(app.anthropicAuth, app.cznDataAuth, app.overlaySettings)
+                MainViewModel(
+                    app.anthropicAuth,
+                    app.cznDataAuth,
+                    app.overlaySettings,
+                    app.overlayStatus,
+                )
             }
         }
     }
@@ -95,6 +101,17 @@ class MainActivity : ComponentActivity() {
                     },
                     onCznDataSignOut = viewModel::signOutCznData,
                     onShowButton = viewModel::showFloatingButton,
+                    onOpenAccessibilitySettings = {
+                        startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+                    },
+                    onOpenAppInfo = {
+                        startActivity(
+                            Intent(
+                                Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                                "package:$packageName".toUri(),
+                            ),
+                        )
+                    },
                 )
             }
         }
@@ -166,6 +183,8 @@ fun MainScreen(
     onCznDataSignIn: () -> Unit,
     onCznDataSignOut: () -> Unit,
     onShowButton: () -> Unit,
+    onOpenAccessibilitySettings: () -> Unit,
+    onOpenAppInfo: () -> Unit,
 ) {
     Scaffold { padding ->
         Column(
@@ -193,11 +212,25 @@ fun MainScreen(
             Card(Modifier.fillMaxWidth().widthIn(max = 640.dp)) {
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     Text("Floating button", style = MaterialTheme.typography.titleMedium)
-                    if (state.buttonVisible) {
-                        Text("Shown over other apps. Hide it from its panel.")
+                    if (!state.overlayRunning) {
+                        Text(
+                            "Off. Turn on CZN Companion in Accessibility settings. If Android " +
+                                "blocks it, open App info, then the menu at the top, then " +
+                                "Allow restricted settings, and try again.",
+                        )
+                        Button(onClick = onOpenAccessibilitySettings) {
+                            Text("Open Accessibility settings")
+                        }
+                        TextButton(onClick = onOpenAppInfo) { Text("Open App info") }
                     } else {
-                        Text("Hidden.")
-                        Button(onClick = onShowButton) { Text("Show floating button") }
+                        Text(
+                            "Shown while the game is open. Tap it to open the panel, long-press " +
+                                "it to read the screen, and drag it to move it.",
+                        )
+                        if (!state.buttonVisible) {
+                            Text("Hidden from its panel.")
+                            Button(onClick = onShowButton) { Text("Show floating button") }
+                        }
                     }
                 }
             }
@@ -281,6 +314,8 @@ private fun MainScreenSignedOutPreview() =
             onCznDataSignIn = {},
             onCznDataSignOut = {},
             onShowButton = {},
+            onOpenAccessibilitySettings = {},
+            onOpenAppInfo = {},
         )
     }
 
@@ -297,5 +332,7 @@ private fun MainScreenSignedInPreview() =
             onCznDataSignIn = {},
             onCznDataSignOut = {},
             onShowButton = {},
+            onOpenAccessibilitySettings = {},
+            onOpenAppInfo = {},
         )
     }

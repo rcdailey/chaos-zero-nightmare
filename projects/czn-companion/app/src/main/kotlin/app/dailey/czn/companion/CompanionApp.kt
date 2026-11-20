@@ -8,6 +8,7 @@ import app.dailey.czn.companion.auth.CznDataAuth
 import app.dailey.czn.companion.auth.TokenStore
 import app.dailey.czn.companion.claude.ClaudeConversation
 import app.dailey.czn.companion.overlay.OverlaySettings
+import app.dailey.czn.companion.overlay.OverlayStatus
 import app.dailey.czn.companion.run.RunDatabase
 import app.dailey.czn.companion.run.RunRepository
 import io.ktor.client.HttpClient
@@ -36,6 +37,7 @@ class CompanionApp : Application() {
     val anthropicAuth by lazy { AnthropicAuth(http, tokenStore) }
     val cznDataAuth by lazy { CznDataAuth(http, tokenStore) }
     val overlaySettings by lazy { OverlaySettings(getSharedPreferences("overlay", MODE_PRIVATE)) }
+    val overlayStatus = OverlayStatus()
     private val runDatabase by lazy {
         Room
             .databaseBuilder<RunDatabase>(this, getDatabasePath("runs.db").absolutePath)

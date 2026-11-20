@@ -22,8 +22,6 @@ Sideloaded app for Android 16+ (Lenovo Legion Y700 Gen 5 on a China ROM, Nothing
   only input. Screenshot calls are rate-limited (`ERROR_TAKE_SCREENSHOT_INTERVAL_TIME_SHORT`).
 - Compose inside a service-owned window MUST have a `LifecycleOwner` and
   `SavedStateRegistryOwner` set on its view tree, or it crashes on attach.
-- OCR: ML Kit's bundled text model. The unbundled one downloads through Google Play services,
-  which China ROMs may lack.
 - Install with `adb install` (exempt from developer verification). Enabling the service needs
   Settings > Apps > the app > Allow restricted settings once. Android 17 Advanced Protection
   blocks non-accessibility-tool services; keep it off on test devices.

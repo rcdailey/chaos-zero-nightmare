@@ -28,3 +28,7 @@ directory.
 - Migrations are hand-written SQL under `src/czn_data/migrations/versions`, forward only. A
   migration that changes tables built from page HTML MUST call `request_rebuild()`; one that
   changes the merged tables in `public` MUST call `request_build()`.
+- After changing MCP tools or the data they serve, run an acceptance audit as a usability
+  test: give it 10+ real player questions to answer using only the tools against the local
+  database, and ask for findings on wrong or missing data, tool granularity and design,
+  result size, and name matching.

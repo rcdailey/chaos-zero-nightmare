@@ -31,4 +31,6 @@ directory.
 - After changing MCP tools or the data they serve, run an acceptance audit as a usability
   test: give it 10+ real player questions to answer using only the tools against the local
   database, and ask for findings on wrong or missing data, tool granularity and design,
-  result size, and name matching.
+  result size, and name matching. Ask it to report every problem it meets anywhere in the app,
+  including outside the changed area; being out of scope is no reason to leave a real problem
+  unfixed.

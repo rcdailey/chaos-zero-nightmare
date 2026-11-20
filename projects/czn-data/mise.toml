@@ -6,6 +6,8 @@ uv = "0.13.8"
 DATABASE_URL = "postgresql://postgres:dev@localhost:55432/postgres"
 # Where the portrait tagger downloads its model on first use.
 CZN_TAGGER_DIR = "{{env.HOME}}/.cache/czn-data/wd-tagger"
+# Where fastembed keeps the search embedding model (67 MB, downloaded on first use).
+FASTEMBED_CACHE_PATH = "{{env.HOME}}/.cache/czn-data/fastembed"
 
 [tasks.db]
 description = "Start the local development Postgres (data persists in the czn-data-dev volume)"

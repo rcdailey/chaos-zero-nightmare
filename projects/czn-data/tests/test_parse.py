@@ -1,6 +1,7 @@
 """Contract: Prydwen markup becomes complete records, and layout changes fail loudly."""
 
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -23,6 +24,7 @@ CHARACTER_HTML = (Path(__file__).parent / "fixtures" / "character.html").read_te
         ("/memory-fragments", "memory_fragments"),
         ("/partners", "partners"),
         ("/guides/effects-dictionary", "effects"),
+        ("/banners", "banners"),
         ("/guides/beginner-guide", "document"),
         ("", "document"),
     ],
@@ -118,8 +120,17 @@ def test_character_guide_sections_become_records():
             "partner": "Scarlet",
             "equipment": ["Criticism of Discord"],
             "fragments": ["Executioner's Tool"],
-            "cards": [{"name": "Strike", "count": 2}],
+            "cards": [
+                {"name": "Strike", "count": 2},
+                {
+                    "name": "Strike",
+                    "count": 1,
+                    "divine_epiphany": "Reduce the cost of this card by 1.",
+                },
+            ],
             "notes": "Buff Spire, then Ravage.",
+            "code": None,
+            "farming_zone": None,
         }
     ]
     assert records["character_equipment"] == [
@@ -165,6 +176,47 @@ def test_character_guide_sections_become_records():
         {"title": "Pros", "text": "Incredible self-buffing capabilities."},
         {"title": "Stats", "text": "CRIT Rate > CRIT DMG"},
     ]
+
+
+def _with_flight(html: str, payload: dict) -> str:
+    push = json.dumps(json.dumps(payload, separators=(",", ":")))
+    return html.replace("</body>", f"<script>self.__next_f.push([1,{push}])</script></body>")
+
+
+def test_deck_codes_and_farming_zones_come_from_the_flight_payload():
+    # Seen on character pages: a component prop also named "decks" comes after the guide's list.
+    deck = {
+        "name": "Standard Dragon Spire",
+        "notes": "$69",
+        "deck_code": "v6l8cOjiNrvdzwd5",
+        "deck_link": "mei-lin_Scarlet_1",
+        "farming_zone": "Celestial Bulwark (Season-5)",
+    }
+    html = _with_flight(CHARACTER_HTML, {"decks": [deck], "tabs": {"decks": [{"x": 1}]}})
+
+    (parsed,) = parse_page(CHARACTER_URL, html).records["deck"]
+
+    assert parsed["name"] == "Standard Dragon Spire"
+    assert parsed["code"] == "v6l8cOjiNrvdzwd5"
+    assert parsed["farming_zone"] == "Celestial Bulwark (Season-5)"
+
+
+def test_single_deck_without_tab_takes_its_name_from_the_payload():
+    html = _with_flight(
+        CHARACTER_HTML.replace('<button class="active">Standard Dragon Spire</button>', ""),
+        {"decks": [{"name": "Anchor God ", "deck_code": "", "farming_zone": ""}]},
+    )
+
+    (parsed,) = parse_page(CHARACTER_URL, html).records["deck"]
+
+    assert parsed == parsed | {"name": "Anchor God", "code": None, "farming_zone": None}
+
+
+def test_deck_count_differing_from_the_payload_fails():
+    html = _with_flight(CHARACTER_HTML, {"decks": [{"deck_code": "a"}, {"deck_code": "b"}]})
+    with pytest.raises(ParseError) as failure:
+        parse_page(CHARACTER_URL, html)
+    assert failure.value.field == "deck.code"
 
 
 def test_structured_guide_section_that_no_longer_parses_fails():
@@ -300,6 +352,63 @@ EFFECTS_HTML = """<html><body><div id="S:1"><h1>Effects Dictionary</h1><table>
 <strong class="type-text">Tag</strong></td>
 <td class="pw-col-desc">When used, this card moves to the Exhaust pile.</td></tr>
 </table></div></body></html>"""
+
+
+def banner_html(name="Blazebell", start="2026-11-11T05:00:00.000Z", end="2026-12-02T00:00:00.000Z"):
+    """A banner card trimmed from prydwen.gg/chaos-zero-nightmare/banners (2026-11-20)."""
+    return f"""<html><body><div id="S:1"><h1>Banners</h1>
+<article class="banner-card" data-category="character" data-section="current">
+<div class="banner-art"><span class="rarity">5-star</span><span class="banner-type">new</span>
+<p class="banner-name">{name}</p>
+<div class="art-timer" data-start-global="{start}" data-end-global="{end}"></div></div>
+<div class="banner-body"><div class="banner-phase-meta"><span>Season 5 Phase 2</span>
+<strong>Nov 11, 2026 - Dec 2, 2026</strong></div>
+<div class="banner-copy"><p>{name} is debuting in Phase 2 of Season 5.</p></div>
+<div class="featured-rate-ups"><span class="featured-rate-ups-label">Featured Rate Up</span>
+<span><a class="featured-rate-up" href="#">{name}</a></span></div>
+<div class="featured-rate-ups"><span class="featured-rate-ups-label">Secondary Rate Up</span>
+<span><a class="featured-rate-up" href="#">Lucas</a><a class="featured-rate-up" href="#">Maribell</a>
+</span></div></div></article>
+<article class="banner-card" data-category="weapon" data-section="current">
+<span class="rarity">5-star Partner</span><span class="banner-type">rerun</span>
+<p class="banner-name">Tiana</p>
+<div class="art-timer" data-start-global="{start}" data-end-global="{end}"></div>
+<div class="banner-phase-meta"><span>Season 5</span></div>
+<div class="featured-rate-ups"><span class="featured-rate-ups-label">Featured Rate Up</span>
+<span><span class="featured-rate-up">Tiana</span></span></div>
+<div class="featured-rate-ups"><span class="featured-rate-ups-label">Secondary Rate Up</span>
+<span><span class="featured-rate-up">Alyssa</span><span class="featured-rate-up">Rachel</span>
+</span></div></article>
+</div></body></html>"""
+
+
+def test_banners_page_yields_schedule_with_exact_times():
+    blazebell, tiana = parse_page(f"{BASE}/banners", banner_html()).records["banner"]
+
+    assert blazebell == {
+        "name": "Blazebell",
+        "kind": "character",
+        "rarity": 5,
+        "rerun": False,
+        "phase": "Season 5 Phase 2",
+        "starts_at": datetime(2026, 11, 11, 5, tzinfo=UTC),
+        "ends_at": datetime(2026, 12, 2, tzinfo=UTC),
+        "featured": ["Blazebell"],
+        "secondary": ["Lucas", "Maribell"],
+        "description": "Blazebell is debuting in Phase 2 of Season 5.",
+    }
+    assert (tiana["kind"], tiana["rerun"], tiana["featured"], tiana["secondary"]) == (
+        "partner",
+        True,
+        ["Tiana"],
+        ["Alyssa", "Rachel"],
+    )
+
+
+def test_banner_without_times_fails():
+    with pytest.raises(ParseError) as failure:
+        parse_page(f"{BASE}/banners", banner_html(start=""))
+    assert failure.value.field == "banner.starts_at"
 
 
 def _partners_html(partners: list[dict]) -> str:

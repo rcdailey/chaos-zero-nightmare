@@ -17,7 +17,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from czn_data import enrich, store
+from czn_data import enrich, store, stove
 from czn_data.scrape import RunResult, export_metrics
 
 ALERTS = yaml.safe_load((Path(__file__).parents[1] / "deploy" / "alerts.yaml").read_text())
@@ -147,6 +147,45 @@ def test_enrich_alert_fires_on_bad_run_and_resolves_after_good_run(vm, monkeypat
     assert query(vm, ALERT_EXPRS[alert]), f"{alert} did not fire"
 
     export_enrich_run(monkeypatch)
+    assert not query(vm, ALERT_EXPRS[alert], expect_result=False), f"{alert} did not resolve"
+
+
+def export_stove_run(monkeypatch, **failures) -> None:
+    monkeypatch.setenv("OTEL_RESOURCE_ATTRIBUTES", f"service.instance.id={uuid.uuid4()}")
+    result = stove.StoveResult(
+        requests=Counter({"ok": 3}), articles=Counter({"fetched": 2, "unchanged": 1})
+    )
+    result.validation_failures.update(failures)
+    assert stove.export_metrics(result, started=0)
+
+
+def test_stove_metrics_arrive_under_the_documented_names(vm, monkeypatch):
+    export_stove_run(monkeypatch, **{"list.count": 1})
+
+    query(vm, "czn_stove_validation_failures")
+    stored = {
+        (s["metric"]["__name__"], tuple(sorted(k for k in s["metric"] if k in LABELS)))
+        for s in query(vm, '{__name__=~"czn_.*"}')
+    }
+    assert stored == {
+        ("czn_stove_success", ()),
+        ("czn_stove_blocked", ()),
+        ("czn_stove_last_run_timestamp_seconds", ()),
+        ("czn_stove_duration_seconds", ()),
+        ("czn_stove_requests", ("result",)),
+        ("czn_stove_articles", ("result",)),
+        ("czn_stove_validation_failures", ("field",)),
+    }
+
+
+@pytest.mark.parametrize("alert", ["CznStoveStale", "CznStoveFailed"])
+def test_stove_alert_fires_on_bad_run_and_resolves_after_good_run(vm, monkeypatch, alert):
+    assert not query(vm, ALERT_EXPRS[alert], expect_result=False)
+
+    export_stove_run(monkeypatch, **{"list.count": 1})
+    assert query(vm, ALERT_EXPRS[alert]), f"{alert} did not fire"
+
+    export_stove_run(monkeypatch)
     assert not query(vm, ALERT_EXPRS[alert], expect_result=False), f"{alert} did not resolve"
 
 

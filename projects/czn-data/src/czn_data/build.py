@@ -1,4 +1,5 @@
-"""Merge the ``e7bot`` and ``prydwen`` schemas into the tables the MCP server reads.
+"""Merge the ``e7bot`` and ``prydwen`` schemas into the tables the MCP server reads, and split
+the ``stove`` schema's posts into searchable sections (``czn_data.posts``).
 
 Scrapes only collect: e7bot JSON as received, Prydwen HTML plus rows parsed from each page.
 This step turns both into one record per game entity. Game facts come from e7bot when it has
@@ -30,8 +31,10 @@ from opentelemetry.metrics import Meter
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
-from . import metrics
+from . import embed, metrics
 from .e7bot import SITE
+from .posts import split_post
+from .stove import BOARDS, POST_URL
 
 log = logging.getLogger(__name__)
 
@@ -128,6 +131,10 @@ COLUMNS = {
     "divine_epiphany": "id gods rarities text card_types cost_min cost_max url data_fetched_at",
     "leaderboard_entry": "season rank score",
     "leaderboard_deck": ("season rank team character_slug cards equipment url data_fetched_at"),
+    "post_section": (
+        "article_id board post_title posted_at position heading text starts_on ends_on url"
+        " data_fetched_at embedding"
+    ),
 }
 JSON_COLUMNS = {"sections", "stats", "bonuses", "rewards", "cards"}
 
@@ -227,6 +234,18 @@ class _Sources:
         self.genders = dict(
             conn.execute("SELECT image_url, gender FROM prydwen.portrait_gender").fetchall()
         )
+        self.articles = cursor.execute(
+            "SELECT article_id, board, title, content, created_at, fetched_at"
+            " FROM stove.article ORDER BY article_id"
+        ).fetchall()
+        # Embedding every section takes about a minute; unchanged sections keep their vector.
+        self.embeddings = {
+            embed.passage_text(title, heading, text): vector
+            for title, heading, text, vector in conn.execute(
+                "SELECT post_title, heading, text, embedding FROM post_section"
+                " WHERE embedding IS NOT NULL"
+            )
+        }
 
     def items(self, path: str) -> tuple[list, datetime | None]:
         body, fetched_at = self.documents.get(path, ([], None))
@@ -248,6 +267,7 @@ def _merge(sources: _Sources, result: BuildResult) -> dict[str, list[dict]]:
         "divine_epiphany": _divine_epiphanies(sources),
         "leaderboard_entry": entries,
         "leaderboard_deck": decks,
+        "post_section": _post_sections(sources),
         "character": characters,
         "card": cards,
         "potential": _potentials(sources, slugs),
@@ -281,6 +301,27 @@ def _merge(sources: _Sources, result: BuildResult) -> dict[str, list[dict]]:
             prydwen_link=False,
         ),
     }
+
+
+def _post_sections(sources: _Sources) -> list[dict]:
+    rows = []
+    for article in sources.articles:
+        post = {
+            "article_id": article["article_id"],
+            "board": BOARDS.get(article["board"], str(article["board"])),
+            "post_title": article["title"],
+            "posted_at": article["created_at"],
+            "url": POST_URL.format(article["article_id"]),
+            "data_fetched_at": article["fetched_at"],
+        }
+        for section in split_post(article["content"], article["created_at"]):
+            rows.append(post | vars(section))
+    texts = [embed.passage_text(r["post_title"], r["heading"], r["text"]) for r in rows]
+    missing = [text for text in dict.fromkeys(texts) if text not in sources.embeddings]
+    vectors = sources.embeddings | dict(zip(missing, embed.passages(missing), strict=True))
+    for row, text in zip(rows, texts, strict=True):
+        row["embedding"] = vectors[text]
+    return rows
 
 
 def _prydwen_rows(sources: _Sources, table: str) -> list[dict]:

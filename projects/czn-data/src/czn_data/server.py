@@ -16,6 +16,7 @@ import os
 import re
 import urllib.request
 from collections import Counter
+from datetime import UTC, date, datetime
 from typing import Literal
 
 import anyio
@@ -31,6 +32,8 @@ from psycopg.rows import dict_row
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
+from . import embed
+
 log = logging.getLogger(__name__)
 
 INSTRUCTIONS = """\
@@ -43,6 +46,10 @@ partner rankings, synergies), and full-text search over every guide page.
 Start with `lookup` for any name seen on screen and `match_card_text` for card text seen on
 screen, then use the specific tools; `get_character` returns one section at a time.
 `list_characters` filters the roster; `synergies` answers who to use with a character.
+`list_banners` gives the live and upcoming gacha banners with dates. `search_posts` searches
+the official posts: events (active_on today for what is on now), season restrictions and
+shops, patch changes. Guide decks
+(`get_character` section decks) carry deck codes players paste into the game's deck import.
 Players name cards by color ("her purple card"); `list_cards` filters by color.
 For a Chaos run: players build one character's deck per run, because copy events are too rare
 for two. `plan_deck` gives that character's target deck, Epiphanies, removals, and equipment;
@@ -88,7 +95,10 @@ SELECT entity.* FROM (
     SELECT 'divine_epiphany', text, {divine_summary}, 'e7bot', url, data_fetched_at
     FROM divine_epiphany
     UNION ALL
-    SELECT 'chaos', name, 'Chaos (run map)', 'e7bot', NULL, NULL FROM chaos
+    SELECT 'chaos', name,
+           'Chaos (run map); list_encounters, get_encounter, and list_equipment take this'
+           ' name as chaos',
+           'e7bot', NULL, NULL FROM chaos
 ) entity
 WHERE (%(kind)s::text IS NULL OR entity.kind = %(kind)s)
   AND ({match} OR entity.kind = 'effect'
@@ -150,8 +160,8 @@ CHARACTER_SECTIONS = {
     "manifest_egos": "SELECT level, name, text, performance, review FROM manifest_ego"
     " WHERE character_slug = %(slug)s ORDER BY level",
     "teams": "SELECT name, tier, members FROM team WHERE character_slug = %(slug)s",
-    "decks": "SELECT name, partner, equipment, fragments, cards, notes FROM deck"
-    " WHERE character_slug = %(slug)s",
+    "decks": "SELECT name, code, farming_zone, partner, equipment, fragments, cards, notes"
+    " FROM deck WHERE character_slug = %(slug)s",
     "equipment": "SELECT tab, best, slots, notes FROM character_equipment"
     " WHERE character_slug = %(slug)s",
     "seasonal_powers": "SELECT season, best, text FROM seasonal_power"
@@ -382,6 +392,31 @@ LIMIT 1
 """
 # Rows past LIST_LIMIT are cut; total says how many matched.
 LIST_LIMIT = 60
+
+# Sections closest in meaning that search_posts merges with its word matches.
+MEANING_CANDIDATES = 20
+# Weight of the newest-first ranking next to the two relevance rankings (each weight 1).
+RECENCY_WEIGHT = 0.5
+# Words players use that the official posts never do, mapped to the heading words the posts use
+# instead; sections with such a heading form a third ranking. The meaning search catches most
+# rewording; these are words it ranked too low (audit, 2026-11-20). Add one when an audit finds
+# another miss.
+POST_SYNONYMS = {
+    "ban": "season restrictions",
+    "banned": "season restrictions",
+    "bans": "season restrictions",
+    "shop": "supply store",
+    "shops": "supply store",
+}
+
+
+def _synonym_headings(query: str) -> str | None:
+    """A websearch query for headings naming what the query's player words mean."""
+    words = re.findall(r"\w+", query.lower())
+    phrases = dict.fromkeys(POST_SYNONYMS[w] for w in words if w in POST_SYNONYMS)
+    return " or ".join(f'"{phrase}"' for phrase in phrases) or None
+
+
 LIST_ENCOUNTERS_SQL = f"""
 SELECT e.name, e.pack, e.chaos, e.any_chaos, e.reward_classes,
        (SELECT jsonb_agg(jsonb_build_object('stage', o.stage, 'answer', o.text,
@@ -487,7 +522,9 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
         gender (from the game data; for characters only Prydwen has, judged from the art by an
         image tagger) and the list of available sections. With section, that part of
         Prydwen's guide: cards (without reviews; use get_card), potentials, manifest_egos,
-        teams, decks, equipment (per season tab), seasonal_powers, fragments, partners,
+        teams, decks (with the deck code players paste into the game's deck import, when
+        Prydwen gives one, and the Chaos it farms), equipment (per season tab),
+        seasonal_powers, fragments, partners,
         synergies, or a prose section by title (Pros, Cons, Introduction, Key Mechanics, Stats,
         Potential Priority, ...). A section reply names the character but repeats no profile.
         note explains missing data, such as a character neither source covers yet."""
@@ -703,12 +740,17 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
 
     @mcp.tool()
     async def list_equipment(
-        slot: str | None = None, rarity: str | None = None, name: str | None = None
+        slot: str | None = None,
+        rarity: str | None = None,
+        name: str | None = None,
+        chaos: str | None = None,
     ) -> dict:
         """List equipment, optionally by slot (Weapon, Armor, Trinket; plurals work), rarity
-        (Rare, Legendary, ...) or name (typos tolerated), with effect text and where it drops
-        (obtained_from); total counts every match, and note says when results shows only part
-        of them. Stats per level are included when name is given."""
+        (Rare, Legendary, ...), name (typos tolerated) or chaos (a Chaos zone such as
+        Celestial Bulwark, typos tolerated: only equipment that drops there), with effect text
+        and where it drops (obtained_from); total counts every match, and note says when
+        results shows only part of them. Stats per level are included when name is given. An
+        unknown Chaos name is an error that lists the known ones."""
         return await _listing(
             f"""
             SELECT name, rarity, slot, text, obtained_from,
@@ -719,11 +761,16 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
               AND (%(rarity)s::text IS NULL OR rarity ILIKE %(rarity)s)
               AND (%(name)s::text IS NULL OR {NAME_MATCH}
                    OR {_name_match("prydwen_name")})
+              AND (%(chaos)s::text IS NULL OR EXISTS (
+                  -- obtained_from lists places, some shortened ("Kaleidoscope" for "The
+                  -- Kaleidoscope Hatchery"), so a place matches when the zone name holds it.
+                  SELECT FROM unnest(string_to_array(obtained_from, ', ')) place
+                  WHERE %(chaos)s ILIKE '%%' || place || '%%'))
             ORDER BY CASE WHEN %(name)s::text IS NOT NULL THEN word_similarity(%(name)s, name)
                      END DESC NULLS LAST, name
             LIMIT {LIST_LIMIT * 2}
             """,
-            {"slot": slot, "rarity": rarity, "name": name},
+            {"slot": slot, "rarity": rarity, "name": name, "chaos": await _resolve_chaos(chaos)},
         )
 
     @mcp.tool()
@@ -744,6 +791,125 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
         )
 
     @mcp.tool()
+    async def list_banners() -> list[dict]:
+        """Gacha banners that are live or upcoming, from Prydwen's banner schedule (Global
+        server): name, kind (character or partner), rarity, rerun, season phase, start and end
+        times (UTC), featured rate-up characters, the 4-star secondary rate-ups, and status
+        (live or upcoming). Live banners first, each group ending soonest first."""
+        return await _query(
+            """
+            SELECT CASE WHEN starts_at <= now() THEN 'live' ELSE 'upcoming' END AS status,
+                   name, kind, rarity, rerun, phase, starts_at, ends_at, featured, secondary,
+                   url, data_fetched_at
+            FROM banner WHERE ends_at > now()
+            ORDER BY starts_at > now(), ends_at, starts_at, kind, name
+            """
+        )
+
+    @mcp.tool()
+    async def search_posts(
+        query: str | None = None, active_on: str | None = None, limit: int = 5, offset: int = 0
+    ) -> dict:
+        """Search the game's official Stove posts (update notices, news and event overviews,
+        current community events), split into sections. Use it for events, season content
+        (Season Restrictions, Supply Store, Environment Variables), rate-up periods and
+        rewards. query: a question or words; matches the posts' words, titles and headings
+        (typos tolerated), and sections close in meaning. active_on: a date (YYYY-MM-DD, or today) to get only sections whose period
+        covers it, which answers "what events are on now". Give either or both. Each result
+        has the post title, board, posted_at, the section heading ("■ Section > ◆
+        Subsection"), its full text, its period (starts_on, ends_on) when the post gives one,
+        and the post url. Images in posts (some calendars) are not included. total counts every
+        match; offset pages through them (at most 20 per call)."""
+        if query is None and active_on is None:
+            raise ToolError("Give query, active_on, or both.")
+        day = None
+        if active_on is not None:
+            text = active_on.strip().lower()
+            try:
+                day = datetime.now(UTC).date() if text == "today" else date.fromisoformat(text)
+            except ValueError as error:
+                raise ToolError(
+                    f"active_on must be YYYY-MM-DD or today, not {active_on!r}"
+                ) from error
+        vector = await anyio.to_thread.run_sync(embed.query, query) if query else None
+        # Two rankings merged by reciprocal rank fusion: sections matching the query's words
+        # (or, with typos, a title or heading), and the sections closest in meaning.
+        reply = await _listing(
+            f"""
+            WITH base AS (
+                SELECT * FROM post_section
+                WHERE %(day)s::date IS NULL OR %(day)s::date BETWEEN starts_on AND ends_on
+            ),
+            words AS (
+                SELECT article_id, position,
+                       row_number() OVER (ORDER BY ts_rank(search, q)
+                           + greatest(word_similarity(%(name)s, post_title),
+                                      word_similarity(%(name)s, coalesce(heading, '')))
+                           DESC) AS rank
+                -- Any query word matches (players' phrasing rarely uses every word a post
+                -- does); ranking puts sections with more of them first.
+                FROM base,
+                     CAST(replace(plainto_tsquery('english', %(words)s)::text, '&', '|')
+                          AS tsquery) q
+                WHERE %(words)s::text IS NOT NULL
+                  AND (search @@ q OR {_name_match("post_title")} OR {_name_match("heading")})
+            ),
+            meaning AS (
+                SELECT article_id, position, row_number() OVER (ORDER BY similarity DESC) AS rank
+                FROM base, LATERAL (
+                    SELECT sum(a * b) AS similarity
+                    FROM unnest(embedding, %(vector)s::real[]) AS pair(a, b)
+                ) s
+                WHERE %(vector)s::real[] IS NOT NULL
+                ORDER BY similarity DESC NULLS LAST
+                LIMIT {MEANING_CANDIDATES}
+            ),
+            synonyms AS (
+                SELECT article_id, position,
+                       row_number() OVER (ORDER BY posted_at DESC, position) AS rank
+                FROM base
+                WHERE to_tsvector('english', coalesce(heading, ''))
+                      @@ websearch_to_tsquery('english', %(synonyms)s)
+            ),
+            relevance AS (
+                SELECT article_id, position, sum(1.0 / (60 + rank)) AS score
+                FROM (SELECT * FROM words UNION ALL SELECT * FROM meaning
+                      UNION ALL SELECT * FROM synonyms) ranked
+                GROUP BY article_id, position
+            ),
+            -- Newer posts win close calls: players mostly ask about the current season.
+            fused AS (
+                SELECT article_id, position,
+                       score + {RECENCY_WEIGHT} / (60 + row_number() OVER (
+                           ORDER BY posted_at DESC, position)) AS score
+                FROM relevance JOIN base USING (article_id, position)
+            )
+            SELECT post_title, board, posted_at, heading, text, starts_on, ends_on, url,
+                   data_fetched_at, count(*) OVER () AS total
+            FROM base LEFT JOIN fused USING (article_id, position)
+            WHERE %(words)s::text IS NULL OR fused.score IS NOT NULL
+            ORDER BY fused.score DESC NULLS LAST, ends_on NULLS LAST, posted_at DESC, position
+            LIMIT %(limit)s OFFSET %(offset)s
+            """,
+            {
+                "words": query,
+                "synonyms": _synonym_headings(query) if query else None,
+                "name": query,
+                "vector": vector,
+                "day": day,
+                "limit": min(limit, 20),
+                "offset": max(offset, 0),
+            },
+        )
+        reply.pop("note", None)  # _listing's note does not know about offset
+        if reply["total"] > offset + len(reply["results"]):
+            reply["note"] = (
+                f"Showing {offset + 1}-{offset + len(reply['results'])} of {reply['total']};"
+                " raise offset for more, or add a query to narrow."
+            )
+        return reply
+
+    @mcp.tool()
     async def get_page(url: str) -> dict | None:
         """Full text of one scraped Prydwen page, by URL from search_guides or lookup."""
         rows = await _query(
@@ -757,8 +923,8 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
     async def data_status() -> dict:
         """Freshness of each source. prydwen: page counts, oldest and newest fetch times, and
         pages whose latest version failed to parse. e7bot: when the served game data was
-        fetched, and the last attempt with its error. Failed fetches never replace served
-        data."""
+        fetched, and the last attempt with its error. stove: official posts stored, the newest
+        fetch, and the last attempt with its error. Failed fetches never replace served data."""
         summary = await _query(
             """
             SELECT count(*) AS pages, min(data_fetched_at) AS oldest_data,
@@ -782,7 +948,19 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
             ) latest ON true
             """
         )
-        return {"prydwen": summary[0] | {"errors": errors}, "e7bot": e7bot[0]}
+        stove = await _query(
+            """
+            SELECT (SELECT count(*) FROM stove.article) AS posts,
+                   (SELECT max(fetched_at) FROM stove.article) AS data_fetched_at,
+                   latest.finished_at AS last_attempt, latest.ok AS last_attempt_ok,
+                   latest.error
+            FROM (SELECT 1) one
+            LEFT JOIN LATERAL (
+                SELECT * FROM stove.run ORDER BY started_at DESC LIMIT 1
+            ) latest ON true
+            """
+        )
+        return {"prydwen": summary[0] | {"errors": errors}, "e7bot": e7bot[0], "stove": stove[0]}
 
     @mcp.tool()
     async def plan_deck(character: str) -> dict | None:
@@ -794,7 +972,9 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
         Epiphanies. removals: up to 5 starting cards the decks drop (a deck can remove at most
         5), with the share of decks that drop each; the Ego skill is never one. equipment: each
         item with its slot, the share of leaderboard decks wearing it, and how many Prydwen
-        decks list it. Names are the game's; use get_card for card text."""
+        decks list it. prydwen_decks are Prydwen's decks, each with its deck code (to paste
+        into the game's deck import) when Prydwen gives one. Names are the game's; use
+        get_card for card text."""
         found = await _find_character(character)
         if found is None:
             return None
@@ -811,8 +991,8 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
         removals = await _query(PLAN_REMOVALS_SQL, params)
         equipment = await _query(PLAN_EQUIPMENT_SQL, params)
         decks = await _query(
-            "SELECT name, partner, equipment, fragments, cards, notes, url FROM deck"
-            " WHERE character_slug = %(slug)s",
+            "SELECT name, code, farming_zone, partner, equipment, fragments, cards, notes, url"
+            " FROM deck WHERE character_slug = %(slug)s",
             slug,
         )
         plan = {

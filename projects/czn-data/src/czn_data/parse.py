@@ -14,6 +14,7 @@ import copy
 import json
 import re
 from dataclasses import dataclass, field
+from datetime import datetime
 from urllib.parse import urlparse
 
 from bs4 import BeautifulSoup, Comment, Tag
@@ -63,6 +64,7 @@ def page_kind(url: str) -> str:
         "memory-fragments": "memory_fragments",
         "partners": "partners",
         "guides/effects-dictionary": "effects",
+        "banners": "banners",
     }.get(path, "document")
 
 
@@ -79,6 +81,8 @@ def parse_page(url: str, html: str) -> ParsedPage:
         page.records = parse_partners(html)
     elif parser := _PARSERS.get(kind):
         page.records = parser(root, url)
+    if kind == "character":
+        _add_deck_codes(page.records.get("deck", []), html)
     return page
 
 
@@ -484,12 +488,14 @@ def _decks(section: Tag) -> list[dict]:
         cards = []
         for item in panel.select(".preview-card-item"):
             count = re.search(r"\d+", text_of(item.select_one(".pw-card-count-badge-preview")))
-            cards.append(
-                {
-                    "name": _required_text(item.select_one(".name"), "deck.card"),
-                    "count": int(count.group()) if count else 1,
-                }
-            )
+            card = {
+                "name": _required_text(item.select_one(".name"), "deck.card"),
+                "count": int(count.group()) if count else 1,
+            }
+            # Tells apart copies of one card that differ only by an added Divine Epiphany.
+            if divine := text_of(item.select_one(".skill-with-coloring.divine")):
+                card["divine_epiphany"] = divine
+            cards.append(card)
         decks.append(
             {
                 "name": names[position] if position < len(names) else None,
@@ -692,6 +698,36 @@ def _flight_data(html: str) -> str:
     return "".join(json.loads(chunk) for chunk in chunks)
 
 
+def _add_deck_codes(decks: list[dict], html: str) -> None:
+    """Give each guide deck its deck code (the string players paste into the game's deck
+    import) and farming zone. Only the flight payload has them; the HTML shows a copy button.
+    The payload lists the decks in page order, and names the decks that the HTML leaves
+    unnamed (a page with one deck shows no tab)."""
+    entries = _guide_deck_entries(html)
+    if entries is not None and len(entries) != len(decks):
+        raise ParseError("deck.code", f"{len(entries)} decks in the payload, {len(decks)} shown")
+    for position, deck in enumerate(decks):
+        entry = entries[position] if entries else {}
+        deck["name"] = deck["name"] or (entry.get("name") or "").strip() or None
+        deck["code"] = entry.get("deck_code") or None
+        deck["farming_zone"] = entry.get("farming_zone") or None
+
+
+def _guide_deck_entries(html: str) -> list[dict] | None:
+    """The guide's deck list from the flight payload: the first ``"decks"`` list whose items
+    carry ``deck_code``. Other ``"decks"`` keys in the payload are component props."""
+    flight = _flight_data(html)
+    decoder = json.JSONDecoder()
+    for match in re.finditer(r'"decks":\[', flight):
+        try:
+            entries, _ = decoder.raw_decode(flight, match.end() - 1)
+        except json.JSONDecodeError:
+            continue
+        if entries and all(isinstance(e, dict) and "deck_code" in e for e in entries):
+            return entries
+    return None
+
+
 def _html_text(fragment: str | None) -> str:
     return text_of(BeautifulSoup(fragment or "", "lxml"))
 
@@ -753,6 +789,49 @@ def parse_effects(root: Tag, url: str) -> dict[str, list[dict]]:
     return {"effect": effects}
 
 
+def parse_banners(root: Tag, url: str) -> dict[str, list[dict]]:
+    """Current and upcoming banners (Global server times). Prydwen's countdown element carries
+    each banner's exact start and end; the visible date range is rounded to days."""
+    banners = []
+    for card in root.select("article.banner-card"):
+        timer = card.select_one(".art-timer")
+        if timer is None:
+            raise ParseError("banner.dates", "banner without countdown")
+        rate_ups = {
+            # Characters are links; partners, which have no Prydwen pages, are plain spans.
+            text_of(group.select_one(".featured-rate-ups-label")): _texts(
+                group, ".featured-rate-up"
+            )
+            for group in card.select(".featured-rate-ups")
+        }
+        rarity = re.match(r"\d", text_of(card.select_one(".rarity")))
+        banners.append(
+            {
+                "name": _required_text(card.select_one(".banner-name"), "banner.name"),
+                # Prydwen's markup calls partner banners "weapon".
+                "kind": "partner" if card.get("data-category") == "weapon" else "character",
+                "rarity": int(rarity.group()) if rarity else None,
+                "rerun": text_of(card.select_one(".banner-type")).lower() == "rerun",
+                "phase": text_of(card.select_one(".banner-phase-meta span")) or None,
+                "starts_at": _timestamp(timer.get("data-start-global"), "banner.starts_at"),
+                "ends_at": _timestamp(timer.get("data-end-global"), "banner.ends_at"),
+                "featured": rate_ups.get("Featured Rate Up", []),
+                "secondary": rate_ups.get("Secondary Rate Up", []),
+                "description": text_of(card.select_one(".banner-copy")) or None,
+            }
+        )
+    if not banners:
+        raise ParseError("banner", "no banners parsed")
+    return {"banner": banners}
+
+
+def _timestamp(value: str | None, field_name: str) -> datetime:
+    try:
+        return datetime.fromisoformat(value or "")
+    except ValueError as error:
+        raise ParseError(field_name, f"not a timestamp: {value!r}") from error
+
+
 def _missing(field_name: str):
     raise ParseError(field_name, "missing or empty")
 
@@ -763,4 +842,5 @@ _PARSERS = {
     "equipment": parse_equipment,
     "memory_fragments": parse_memory_fragments,
     "effects": parse_effects,
+    "banners": parse_banners,
 }

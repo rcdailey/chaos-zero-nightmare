@@ -6,12 +6,13 @@ merged tables first, as each scrape does.
 """
 
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import anyio
 import pytest
 from psycopg.types.json import Jsonb
+from test_parse import banner_html
 
 from czn_data import store
 from czn_data.build import build
@@ -21,6 +22,7 @@ from czn_data.server import build_server
 CHARACTER_URL = "https://www.prydwen.gg/chaos-zero-nightmare/characters/mei-lin"
 FRAGMENTS_URL = "https://www.prydwen.gg/chaos-zero-nightmare/memory-fragments"
 CHARACTER_HTML = (Path(__file__).parent / "fixtures" / "character.html").read_text()
+BANNERS_URL = "https://www.prydwen.gg/chaos-zero-nightmare/banners"
 
 
 @pytest.fixture
@@ -77,6 +79,135 @@ def test_get_character_lists_sections_and_returns_one_at_a_time(call, conn):
 
     stats = call("get_character", name="mei lin", section="stats")["sections"]
     assert stats == [{"title": "Stats", "text": "CRIT Rate > CRIT DMG"}]
+
+
+def test_guide_decks_carry_deck_code_and_farming_zone(call, conn):
+    entry = {"deck_code": "v6l8cOji", "farming_zone": "Celestial Bulwark (Season-5)"}
+    push = json.dumps(json.dumps({"decks": [entry]}, separators=(",", ":")))
+    html = CHARACTER_HTML.replace(
+        "</body>", f"<script>self.__next_f.push([1,{push}])</script></body>"
+    )
+    parsed = parse_page(CHARACTER_URL, html)
+    store.save_page(conn, CHARACTER_URL, "character", html, datetime.now(UTC), parsed, None)
+
+    (deck,) = call("get_character", name="mei lin", section="decks")["decks"]
+    (planned,) = call("plan_deck", character="mei lin")["prydwen_decks"]
+
+    expected = {"name": "Standard Dragon Spire"} | {
+        "code": "v6l8cOji",
+        "farming_zone": "Celestial Bulwark (Season-5)",
+    }
+    assert deck == deck | expected
+    assert planned == planned | expected
+
+
+def test_list_banners_shows_live_then_upcoming_and_hides_ended(call, conn):
+    now = datetime.now(UTC)
+
+    def save(url, name, start, end):
+        html = banner_html(name, start.isoformat(), end.isoformat())
+        store.save_page(conn, url, "banners", html, now, parse_page(BANNERS_URL, html), None)
+
+    day = timedelta(days=1)
+    save(BANNERS_URL, "Dahlia", now + day, now + 9 * day)
+    save(f"{BANNERS_URL}?live", "Blazebell", now - day, now + 2 * day)
+    save(f"{BANNERS_URL}?ended", "Tiphera", now - 9 * day, now - day)
+
+    banners = call("list_banners")
+
+    assert [(b["status"], b["name"]) for b in banners if b["kind"] == "character"] == [
+        ("live", "Blazebell"),
+        ("upcoming", "Dahlia"),
+    ]
+
+
+def add_post(conn, article_id: str, title: str, content: str):
+    conn.execute(
+        "INSERT INTO stove.article VALUES (%s, 142421, %s, %s, '2026-11-11', now(), now())",
+        (article_id, title, content),
+    )
+
+
+def test_search_posts_by_words_typo_title_and_active_date(call, conn):
+    add_post(
+        conn,
+        "1",
+        "11/11(Wed) Update Notice",
+        "<p>■ New Combatant [Blazebell] Rescue Rate-Up</p>"
+        "<p>◆ Rate-Up Period: 11/11/2026 after the maintenance – 12/02/2026 before the"
+        " maintenance</p><p>■ Season Restrictions</p><p>Cards: Acid Gas</p>",
+    )
+    add_post(conn, "2", "Teatime Event", "<p>◆ Event Period: 11/01/2026 – 11/05/2026</p>")
+
+    (restriction,) = [
+        r
+        for r in call("search_posts", query="season restrictions")["results"]
+        if "Acid" in r.get("text", "")
+    ]
+    assert restriction | {"url": None} == restriction | {
+        "post_title": "11/11(Wed) Update Notice",
+        "board": "Update Notice",
+        "heading": "■ Season Restrictions",
+        "url": None,
+    }
+    assert restriction["url"].endswith("/view/1")
+
+    typo = call("search_posts", query="Teatme Evnt")["results"]
+    assert typo[0]["post_title"] == "Teatime Event"
+
+    active = call("search_posts", active_on="2026-11-20")
+    assert [(r["heading"], r["starts_on"], r["ends_on"]) for r in active["results"]] == [
+        ("■ New Combatant [Blazebell] Rescue Rate-Up", "2026-11-11", "2026-12-02"),
+        (
+            (
+                "■ New Combatant [Blazebell] Rescue Rate-Up > ◆ Rate-Up Period: 11/11/2026 after"
+                " the maintenance – 12/02/2026 before the maintenance"
+            ),
+            "2026-11-11",
+            "2026-12-02",
+        ),
+    ]
+
+
+def test_search_posts_finds_sections_in_players_words(call, conn):
+    """Runs the real embedding model (downloaded into FASTEMBED_CACHE_PATH on first use)."""
+    add_post(
+        conn,
+        "1",
+        "10/21(Wed) Update Notice",
+        "<p>■ Celestial Bulwark Opens</p>"
+        "<p>◆ Season Restrictions</p><p>Cards: Acid Gas. Equipment: Lead-Colored Holy Water.</p>"
+        "<p>◆ Supply Store</p><p>Item | Limit</p><p>Aether | 5</p>"
+        "<p>■ Bug Fixes</p><p>Fixed Celestial Bulwark boss icons.</p>"
+        "<p>■ Spectral Cube Improvements</p><p>New products for Spectral Cubes.</p>",
+    )
+
+    def top(query: str) -> str:
+        return call("search_posts", query=query)["results"][0]["heading"]
+
+    assert top("what is banned in Celestial Bulwark?").endswith("Season Restrictions")
+    assert top("what's in the Celestial Bulwark shop?").endswith("Supply Store")
+
+
+def test_search_posts_pages_through_every_match(call, conn):
+    sections = "".join(f"<p>◆ Event {n} Period: 11/01/2026 – 11/30/2026</p>" for n in range(3))
+    add_post(conn, "1", "Events", sections)
+
+    first = call("search_posts", active_on="2026-11-20", limit=2)
+    rest = call("search_posts", active_on="2026-11-20", limit=2, offset=2)
+
+    assert (first["total"], len(first["results"])) == (3, 2)
+    assert "raise offset" in first["note"]
+    assert (len(rest["results"]), "note" in rest) == (1, False)
+    headings = {r["heading"] for r in first["results"] + rest["results"]}
+    assert len(headings) == 3
+
+
+def test_search_posts_needs_query_or_valid_date(call):
+    with pytest.raises(Exception, match="Give query"):
+        call("search_posts")
+    with pytest.raises(Exception, match="YYYY-MM-DD"):
+        call("search_posts", active_on="next week")
 
 
 def test_list_characters_filters_by_gender(call, conn):
@@ -328,6 +459,7 @@ def test_data_status_reports_both_sources(call, conn, game_data):
     assert status["prydwen"]["pages"] == 1
     assert status["e7bot"]["error"] == "czn/cards/list: HTTP 500"
     assert "data_fetched_at" in status["e7bot"]
+    assert status["stove"] == {"posts": 0}
 
 
 def test_plan_deck_ranks_epiphanies_and_caps_removals(call, game_data):
@@ -357,6 +489,19 @@ def test_list_encounters_filters_by_chaos_and_names_copy_answers(call, game_data
     assert [a["text"] for a in first["answers"]] == ["Step inside"]
     assert first["answers"][0]["leads_to"] == second["stage"] == 2
     assert second["answers"][0]["rewards"][0]["text"] == "Copy 1 card"
+
+
+def test_list_equipment_by_chaos_matches_listed_and_shortened_zone_names(call, conn, game_data):
+    url = "https://www.prydwen.gg/chaos-zero-nightmare/equipment"
+    item = {"rarity": "Rare", "slot": "Weapon", "text": "Hit.", "stats": {}}
+    places = {"Pot Blade": "Blue Pot", "Mist Blade": "City of Mist, The Blue Pot", "Shop": "Shop"}
+    rows = [item | {"name": name, "source": place} for name, place in places.items()]
+    parsed = ParsedPage("Equipment", "Equipment", {"equipment": rows})
+    store.save_page(conn, url, "equipment", "", datetime.now(UTC), parsed, None)
+
+    listing = call("list_equipment", chaos="blue pot")
+
+    assert [row["name"] for row in listing["results"]] == ["Mist Blade", "Pot Blade"]
 
 
 def test_unknown_chaos_is_an_error_naming_the_known_ones(call, game_data):

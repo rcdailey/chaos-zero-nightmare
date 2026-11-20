@@ -1,5 +1,5 @@
 """Command line entry point:
-``czn-data scrape | scrape-e7bot | reparse | build | enrich | migrate | serve``.
+``czn-data scrape | scrape-e7bot | scrape-stove | reparse | build | enrich | migrate | serve``.
 
 Configuration comes from environment variables, documented in the project README.
 """
@@ -40,6 +40,7 @@ def main() -> None:
     for name, help_text in (
         ("scrape", "fetch every Prydwen CZN page, then build the merged tables"),
         ("scrape-e7bot", "fetch e7bot's CZN game data, then build the merged tables"),
+        ("scrape-stove", "fetch the official Stove posts, then build the merged tables"),
         ("reparse", "parse the stored Prydwen HTML again without fetching, then build"),
     ):
         command = commands.add_parser(name, help=help_text)
@@ -83,6 +84,8 @@ def main() -> None:
         sys.exit(_run_build())
     if args.command == "scrape-e7bot":
         sys.exit(_run_e7bot(args.allow_shrink))
+    if args.command == "scrape-stove":
+        sys.exit(_run_stove(args.allow_shrink))
     sys.exit(_run_job(args.command, args.allow_shrink))
 
 
@@ -127,6 +130,33 @@ def _run_e7bot(allow_shrink: bool) -> int:
             },
         )
         exported = _export(lambda: e7bot.export_metrics(result, started))
+    exported = _export(lambda: build.export_metrics(built, started)) and exported
+    return 0 if result.ok and built is not None and exported else 1
+
+
+def _run_stove(allow_shrink: bool) -> int:
+    from . import build, stove
+    from .fetch import Fetcher
+
+    log = logging.getLogger("czn_data")
+    started = time.time()
+    log.info("run started", extra={"command": "scrape-stove"})
+    with psycopg.connect(os.environ["DATABASE_URL"], autocommit=True) as conn:
+        client = stove.Client(Fetcher(delay=stove.DELAY_SECONDS).get)
+        result = stove.scrape_stove(conn, client, allow_shrink)
+        built = _build(conn)
+    log.info(
+        "run finished",
+        extra={
+            "command": "scrape-stove",
+            "ok": result.ok,
+            "requests": dict(result.requests),
+            "articles": dict(result.articles),
+            "blocked": result.blocked,
+            "validation_failures": dict(result.validation_failures),
+        },
+    )
+    exported = _export(lambda: stove.export_metrics(result, started))
     exported = _export(lambda: build.export_metrics(built, started)) and exported
     return 0 if result.ok and built is not None and exported else 1
 

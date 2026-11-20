@@ -6,10 +6,13 @@ network; the database is real Postgres.
 
 from pathlib import Path
 
+from test_parse import banner_html
+
 from czn_data.fetch import Blocked, FetchFailed
 from czn_data.scrape import RunResult, fetch_portraits, reparse, scrape
 
 SITE = "https://www.prydwen.gg"
+BANNERS_URL = f"{SITE}/chaos-zero-nightmare/banners"
 CHARACTER_URL = f"{SITE}/chaos-zero-nightmare/characters/mei-lin"
 GUIDE_URL = f"{SITE}/chaos-zero-nightmare/guides/beginner-guide"
 CHARACTER_HTML = (Path(__file__).parent / "fixtures" / "character.html").read_text()
@@ -17,11 +20,13 @@ GUIDE_HTML = "<html><body><div id='S:1'><h1>Beginner Guide</h1><p>Pull Mei Lin.<
 
 
 def site(pages: dict[str, str | Exception]):
-    """robots.txt -> one sitemap listing ``pages`` (plus a non-CZN page) -> page contents."""
+    """robots.txt -> one sitemap listing ``pages`` (plus a non-CZN page) -> page contents. The
+    banners page, which the sitemaps leave out, is served too."""
     locs = "".join(f"<url><loc>{url}</loc></url>" for url in [*pages, f"{SITE}/nikke/tier-list"])
     content = {
         f"{SITE}/robots.txt": f"User-agent: *\nSitemap: {SITE}/sitemap/0.xml\n",
         f"{SITE}/sitemap/0.xml": f"<urlset>{locs}</urlset>",
+        BANNERS_URL: banner_html(),
         **pages,
     }
     requested = []
@@ -50,7 +55,9 @@ def test_clean_run_stores_every_game_page(conn):
     assert f"{SITE}/nikke/tier-list" not in get.requested
     assert card_names(conn) == {"Strike", "Rising Dragon Spire", "Rising Dragon Spire V"}
     titles = {row[0] for row in conn.execute("SELECT title FROM prydwen.document").fetchall()}
-    assert titles == {"Mei Lin", "Beginner Guide"}
+    assert titles == {"Mei Lin", "Beginner Guide", "Banners"}
+    banners = conn.execute("SELECT name FROM prydwen.banner ORDER BY name").fetchall()
+    assert banners == [("Blazebell",), ("Tiana",)]
 
 
 def test_layout_change_keeps_previous_rows_and_reports_the_field(conn):
@@ -63,7 +70,8 @@ def test_layout_change_keeps_previous_rows_and_reports_the_field(conn):
     assert result.validation_failures == {("character", "character.name"): 1}
     assert card_names(conn) == {"Strike", "Rising Dragon Spire", "Rising Dragon Spire V"}
     html, data_at, fetched_at, error = conn.execute(
-        "SELECT html, data_fetched_at, fetched_at, parse_error FROM prydwen.page"
+        "SELECT html, data_fetched_at, fetched_at, parse_error FROM prydwen.page WHERE url = %s",
+        (CHARACTER_URL,),
     ).fetchone()
     assert html == broken  # kept so `reparse` can apply a parser fix later
     assert data_at < fetched_at
@@ -113,7 +121,7 @@ def test_fetch_failure_skips_the_page_and_fails_the_run(conn):
     result = scrape(conn, get, allow_shrink=False)
 
     assert not result.ok
-    assert result.pages == {"fetch_error": 1, "ok": 1}
+    assert result.pages == {"fetch_error": 1, "ok": 2}  # the guide and the banners page
 
 
 PORTRAIT = "https://cdn.prydwen.gg/images/chaos/characters/mei-lin_card.webp"

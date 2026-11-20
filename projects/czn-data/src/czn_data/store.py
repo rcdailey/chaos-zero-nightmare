@@ -29,6 +29,7 @@ DERIVED_TABLES = (
     "fragment_rank",
     "partner_rank",
     "synergy",
+    "banner",
 )
 JSON_COLUMNS = {"sections", "stats", "bonuses", "cards", "slots"}
 

@@ -24,6 +24,9 @@ log = logging.getLogger(__name__)
 # goes quiet for no more than a minute or two plus one page's retries.
 PROGRESS_INTERVAL_SECONDS = 60
 
+# Pages the sitemaps leave out; robots.txt allows them.
+UNLISTED_PAGES = ("https://www.prydwen.gg/chaos-zero-nightmare/banners",)
+
 
 @dataclass
 class RunResult:
@@ -45,7 +48,7 @@ class RunResult:
 def scrape(conn: psycopg.Connection, get: Callable[[str], str], allow_shrink: bool) -> RunResult:
     result = RunResult()
     try:
-        urls = sitemap_urls(get)
+        urls = sorted({*sitemap_urls(get), *UNLISTED_PAGES})
     except Blocked as error:
         log.error("blocked by Cloudflare", extra={"error": str(error)})
         result.blocked = True

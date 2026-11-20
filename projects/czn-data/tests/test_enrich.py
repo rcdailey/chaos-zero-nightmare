@@ -16,14 +16,14 @@ PORTRAIT = "https://cdn.prydwen.gg/images/chaos/characters/mei-lin_card.webp"
 @pytest.fixture
 def stored(conn):
     conn.execute(
-        "INSERT INTO portrait (image_url, image, fetched_at) VALUES (%s, %s, %s)",
+        "INSERT INTO prydwen.portrait (image_url, image, fetched_at) VALUES (%s, %s, %s)",
         (PORTRAIT, b"art", datetime.now(UTC)),
     )
     return conn
 
 
 def genders(conn) -> list[tuple]:
-    return conn.execute("SELECT image_url, gender FROM portrait_gender").fetchall()
+    return conn.execute("SELECT image_url, gender FROM prydwen.portrait_gender").fetchall()
 
 
 def test_stored_portraits_get_a_gender_once(stored):
@@ -58,7 +58,7 @@ def test_portrait_that_fails_is_reported_and_retried_next_run(stored):
 
 def test_unavailable_tagger_is_reported_once(stored):
     stored.execute(
-        "INSERT INTO portrait (image_url, image, fetched_at) VALUES ('other', 'x', now())"
+        "INSERT INTO prydwen.portrait (image_url, image, fetched_at) VALUES ('other', 'x', now())"
     )
 
     def unavailable(image: bytes) -> str:

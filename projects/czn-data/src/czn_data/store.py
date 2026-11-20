@@ -1,8 +1,9 @@
-"""Write scraped pages to Postgres without ever replacing good data with broken data.
+"""Write scraped Prydwen pages to the ``prydwen`` schema without replacing good data with broken.
 
 Each page's rows are replaced only when its newest HTML parses cleanly and does not lose a large
 share of its previous rows. Otherwise the HTML is still saved (so a parser fix can reprocess it
-with ``czn-data reparse``) and the previous rows stay in place.
+with ``czn-data reparse``) and the previous rows stay in place. The MCP server does not read
+these tables directly; ``czn_data.build`` merges them with e7bot's data.
 """
 
 from datetime import datetime
@@ -37,7 +38,9 @@ SHRINK_LIMIT = 0.2
 
 def check_shrink(conn: psycopg.Connection, url: str, parsed: ParsedPage) -> None:
     for table in DERIVED_TABLES:
-        (old,) = conn.execute(f"SELECT count(*) FROM {table} WHERE url = %s", (url,)).fetchone()
+        (old,) = conn.execute(
+            f"SELECT count(*) FROM prydwen.{table} WHERE url = %s", (url,)
+        ).fetchone()
         new = len(parsed.records.get(table, []))
         if old and new < old * (1 - SHRINK_LIMIT):
             raise ParseError(f"{table}.count", f"dropped from {old} to {new} rows")
@@ -56,7 +59,7 @@ def save_page(
     with conn.transaction():
         conn.execute(
             """
-            INSERT INTO page (url, kind, html, fetched_at, parse_error)
+            INSERT INTO prydwen.page (url, kind, html, fetched_at, parse_error)
             VALUES (%s, %s, %s, %s, %s)
             ON CONFLICT (url) DO UPDATE SET kind = excluded.kind, html = excluded.html,
                 fetched_at = excluded.fetched_at, parse_error = excluded.parse_error
@@ -66,15 +69,15 @@ def save_page(
         if parsed is None:
             return
         for table in (*DERIVED_TABLES, "document"):
-            conn.execute(f"DELETE FROM {table} WHERE url = %s", (url,))
+            conn.execute(f"DELETE FROM prydwen.{table} WHERE url = %s", (url,))
         conn.execute(
-            "INSERT INTO document (url, title, body) VALUES (%s, %s, %s)",
+            "INSERT INTO prydwen.document (url, title, body) VALUES (%s, %s, %s)",
             (url, parsed.title, parsed.body),
         )
         for table, rows in parsed.records.items():
             for row in rows:
                 _insert(conn, table, {"url": url} | row)
-        conn.execute("UPDATE page SET data_fetched_at = fetched_at WHERE url = %s", (url,))
+        conn.execute("UPDATE prydwen.page SET data_fetched_at = fetched_at WHERE url = %s", (url,))
 
 
 def _insert(conn: psycopg.Connection, table: str, row: dict) -> None:
@@ -84,11 +87,11 @@ def _insert(conn: psycopg.Connection, table: str, row: dict) -> None:
     values = [Jsonb(row[c]) if c in JSON_COLUMNS else row[c] for c in columns]
     names = ", ".join(f'"{c}"' for c in columns)
     placeholders = ", ".join(["%s"] * len(columns))
-    conn.execute(f"INSERT INTO {table} ({names}) VALUES ({placeholders})", values)
+    conn.execute(f"INSERT INTO prydwen.{table} ({names}) VALUES ({placeholders})", values)
 
 
 def row_counts(conn: psycopg.Connection) -> dict[str, int]:
     return {
-        table: conn.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
+        table: conn.execute(f"SELECT count(*) FROM prydwen.{table}").fetchone()[0]
         for table in (*DERIVED_TABLES, "document")
     }

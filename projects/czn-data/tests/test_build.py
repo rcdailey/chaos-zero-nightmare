@@ -1,0 +1,129 @@
+"""Contract: the build reports Prydwen ratings it cannot attach, and an unmappable source value
+fails the build without touching the merged tables.
+
+Real Postgres holding one scraped Prydwen character page plus e7bot documents.
+"""
+
+from datetime import UTC, datetime
+from pathlib import Path
+
+import pytest
+from psycopg.types.json import Jsonb
+
+from czn_data import store
+from czn_data.build import BuildError, build
+from czn_data.parse import ParsedPage, page_kind, parse_page
+
+CHARACTER_URL = "https://www.prydwen.gg/chaos-zero-nightmare/characters/mei-lin"
+CHARACTER_HTML = (Path(__file__).parent / "fixtures" / "character.html").read_text()
+
+
+@pytest.fixture
+def prydwen(conn):
+    parsed = parse_page(CHARACTER_URL, CHARACTER_HTML)
+    kind = page_kind(CHARACTER_URL)
+    store.save_page(conn, CHARACTER_URL, kind, CHARACTER_HTML, datetime.now(UTC), parsed, None)
+
+
+def roster(ego: str) -> list[dict]:
+    return [
+        {
+            "id": "1027",
+            "name": "Mei Lin",
+            "char_type": "CHAR_COMBATANT",
+            "ego": ego,
+            "job": "striker",
+            "rarity": 5,
+            "gender_type": "GENDER_FEMALE",
+        }
+    ]
+
+
+def put(conn, path: str, body) -> None:
+    conn.execute(
+        "INSERT INTO e7bot.document (path, body, fetched_at) VALUES (%s, %s, now())"
+        " ON CONFLICT (path) DO UPDATE SET body = excluded.body",
+        (path, Jsonb(body)),
+    )
+
+
+def test_ratings_for_cards_e7bot_lacks_are_counted_and_still_served(conn, prydwen):
+    put(conn, "czn/characters/list", roster("love"))
+    put(conn, "czn/cards/list", [])  # e7bot knows Mei Lin but none of her cards
+
+    result = build(conn)
+
+    (rated,) = conn.execute(
+        "SELECT count(*) FROM prydwen.card WHERE rating IS NOT NULL OR epiphany_review IS NOT NULL"
+    ).fetchone()
+    assert rated > 0
+    assert result.unmatched["card"] == rated
+    sources = conn.execute("SELECT DISTINCT source FROM card").fetchall()
+    assert sources == [("prydwen",)]
+
+
+def e7_card(card_id: str, text: str, versions=()) -> dict:
+    return {
+        "id": card_id,
+        "name": "Chain Fire",
+        "cost": 1,
+        "card_category": "CARD_ATK",
+        "rarity": "RARITY_RARE",
+        "desc_display": text,
+        "r_spark_cards": list(versions),
+        "base_combatant": {"id": "1027"},
+        "sort": "SORT_START",
+        "talent": [],
+        "tooltips": [],
+    }
+
+
+def test_ratings_of_a_card_prydwen_renames_land_on_the_same_versions(conn):
+    """Prydwen calls the game's Chain Fire "Rapid Fire"; each rating must reach the game
+    version with that Epiphany numeral, never a neighbour."""
+    texts = {"": "50% Damage x 2", "I": "75% Damage x 2", "II": "30% Damage x 3"}
+    ratings = {"I": 4, "II": 5}
+    rows = [
+        {
+            "character_slug": "mei-lin",
+            "category": "starting",
+            "base_name": "Rapid Fire",
+            "variant": variant,
+            "name": f"Rapid Fire {variant}".strip(),
+            "cost": "1",
+            "type": "Attack",
+            "tags": [],
+            "text": text,
+            "rating": ratings.get(variant),
+        }
+        for variant, text in texts.items()
+    ]
+    page = ParsedPage("Mei Lin", "", {"card": rows})
+    store.save_page(conn, CHARACTER_URL, "character", "", datetime.now(UTC), page, None)
+    put(conn, "czn/characters/list", roster("love"))
+    versions = [e7_card(f"c_1027_srt1_rsp{n}", texts[v]) for n, v in ((1, "I"), (2, "II"))]
+    put(conn, "czn/cards/list", [e7_card("c_1027_srt1", texts[""], versions)])
+
+    build(conn)
+
+    merged = conn.execute(
+        "SELECT name, rating, prydwen_name, source FROM card ORDER BY name"
+    ).fetchall()
+    assert merged == [
+        ("Chain Fire", None, "Rapid Fire", "e7bot"),
+        ("Chain Fire I", 4, "Rapid Fire", "e7bot"),
+        ("Chain Fire II", 5, "Rapid Fire", "e7bot"),
+    ]
+
+
+def test_unknown_game_value_fails_the_build_and_keeps_merged_data(conn, prydwen):
+    put(conn, "czn/characters/list", roster("love"))
+    build(conn)
+    before = conn.execute("SELECT slug, element, source FROM character").fetchall()
+
+    put(conn, "czn/characters/list", roster("wonder"))
+    with pytest.raises(BuildError, match="wonder"):
+        build(conn)
+
+    assert conn.execute("SELECT slug, element, source FROM character").fetchall() == before
+    assert before == [("mei-lin", "Passion", "e7bot")]

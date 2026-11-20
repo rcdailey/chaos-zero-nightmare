@@ -1,16 +1,20 @@
 """Contract: MCP tools answer from the stored data in the shapes their descriptions promise.
 
 Tools are called in-process through the MCP server, against real Postgres holding one scraped
-character page.
+Prydwen character page; tests that need game data add e7bot documents. Every call rebuilds the
+merged tables first, as each scrape does.
 """
 
+import json
 from datetime import UTC, datetime
 from pathlib import Path
 
 import anyio
 import pytest
+from psycopg.types.json import Jsonb
 
 from czn_data import store
+from czn_data.build import build
 from czn_data.parse import ParsedPage, page_kind, parse_page
 from czn_data.server import build_server
 
@@ -35,17 +39,32 @@ def call(conn, database_url, monkeypatch):
     server = build_server(None, None)
 
     def call(tool: str, **arguments):
+        build(conn)
         result = anyio.run(server.call_tool, tool, arguments)
+        if result.structured_content is None:  # a plain dict result travels as JSON text
+            return json.loads(result.content[0].text)
         return result.structured_content["result"]
 
     return call
 
 
-def test_get_character_lists_sections_and_returns_one_at_a_time(call, conn):
+def tag_female(conn):
     conn.execute(
-        "INSERT INTO portrait_gender (image_url, gender, tagged_at) VALUES (%s, 'female', now())",
+        "INSERT INTO prydwen.portrait_gender (image_url, gender, tagged_at)"
+        " VALUES (%s, 'female', now())",
         ("https://cdn.prydwen.gg/images/chaos/characters/mei-lin_card.webp",),
     )
+
+
+def add_e7bot(conn, path: str, body):
+    conn.execute(
+        "INSERT INTO e7bot.document (path, body, fetched_at) VALUES (%s, %s, now())",
+        (path, Jsonb(body)),
+    )
+
+
+def test_get_character_lists_sections_and_returns_one_at_a_time(call, conn):
+    tag_female(conn)
     summary = call("get_character", name="mei lin")
     assert (summary["name"], summary["gender"]) == ("Mei Lin", "female")
     assert {"cards", "teams", "decks", "equipment", "Pros", "Stats"} <= set(summary["sections"])
@@ -62,10 +81,7 @@ def test_get_character_lists_sections_and_returns_one_at_a_time(call, conn):
 
 def test_list_characters_filters_by_gender(call, conn):
     assert call("list_characters", gender="female") == []
-    conn.execute(
-        "INSERT INTO portrait_gender (image_url, gender, tagged_at) VALUES (%s, 'female', now())",
-        ("https://cdn.prydwen.gg/images/chaos/characters/mei-lin_card.webp",),
-    )
+    tag_female(conn)
     assert call("list_characters", gender="Female") == [
         {
             "name": "Mei Lin",
@@ -84,7 +100,7 @@ def test_synergies_combine_synergy_lists_and_teams(call):
         "for": "Mei Lin",
         "name": "Veronica",
         "sources": ["own synergy list", "team"],
-        "teams": ["T1 Spire Fire"],
+        "teams": ["Spire Fire (T1)"],
         "reasons": ["Doubles as a draw unit."],
     }
     assert (tiphera["name"], tiphera["sources"]) == ("Tiphera", ["team"])
@@ -147,8 +163,9 @@ def test_get_partner_returns_ego_skill(call, conn):
 
 
 def test_list_cards_filters_by_color(call):
-    (white,) = call("list_cards", character="mei lin", color="white")
-    assert (white["name"], white["color"]) == ("Strike", "White")
+    listing = call("list_cards", character="meilin", color="white")
+    (white,) = listing["results"]
+    assert (listing["total"], white["name"], white["color"]) == (1, "Strike", "White")
 
 
 def test_recommended_by_lists_every_place_an_item_is_recommended(call, conn):
@@ -165,3 +182,183 @@ def test_recommended_by_lists_every_place_an_item_is_recommended(call, conn):
         "deck: Standard Dragon Spire",
         "fragment ranking: Default #1 100.00%",
     ]
+
+
+def card(card_id: str, name: str, cost: int, text: str, versions=(), sort="SORT_UNIQUE") -> dict:
+    return {
+        "id": card_id,
+        "name": name,
+        "cost": cost,
+        "card_category": "CARD_ATK",
+        "rarity": "RARITY_RARE",
+        "desc_display": text,
+        "r_spark_cards": list(versions),
+        "base_combatant": {"id": "1027"},
+        "sort": sort,
+        "talent": [],
+        "tooltips": [],
+    }
+
+
+@pytest.fixture
+def game_data(conn):
+    """e7bot's Mei Lin: one starting and one unique card with an Epiphany V, one Chaos event,
+    and one leaderboard team whose Save Data took Rising Dragon Spire V."""
+    add_e7bot(
+        conn,
+        "czn/characters/list",
+        [
+            {
+                "id": "1027",
+                "name": "Mei Lin",
+                "names": {"en": "Mei Lin"},
+                "char_type": "CHAR_COMBATANT",
+                "ego": "love",
+                "job": "striker",
+                "rarity": 5,
+                "gender_type": "GENDER_FEMALE",
+            }
+        ],
+    )
+    spire_v = card("c_1027_uni1_rsp5", "Rising Dragon Spire", 0, "<color_orange>9</> Hits")
+    add_e7bot(
+        conn,
+        "czn/cards/list",
+        [
+            card("c_1027_srt1", "Strike", 1, "100% Damage", sort="SORT_START"),
+            # Her Ego skill: no deck holds it, yet it is never a removal.
+            card("c_1027_eps", "Dragon Ascent", 4, "500% Damage", sort="SORT_START"),
+            card("c_1027_uni1", "Rising Dragon Spire", 3, "Game text<br>line two", [spire_v]),
+            spire_v,
+        ],
+    )
+    add_e7bot(
+        conn,
+        "czn/encounters/packs/list",
+        [{"id": "p", "name": "The Blue Pot", "pack_type": "PACK_PLANET"}],
+    )
+    add_e7bot(
+        conn,
+        "czn/encounters/list",
+        [
+            {
+                "id": stage,
+                "name": "Mirror Hall",
+                "link_encounter_set_id": "e1",
+                "link_encounter_pack_id": "p",
+            }
+            for stage in ("e1a", "e1b")
+        ],
+    )
+    add_e7bot(
+        conn,
+        "czn/encounters/e1a",
+        {
+            "options": [
+                {
+                    "id": "o0",
+                    "simple_flavor_text": "Step inside",
+                    "success_link_encounter_option_eff": {"next_encounter_id": "e1b"},
+                }
+            ]
+        },
+    )
+    copy = {"reward_type": "CARD_COPY_HAVE_SELECT", "desc_option": "Copy <cc>1</> card"}
+    add_e7bot(
+        conn,
+        "czn/encounters/e1b",
+        {
+            "options": [
+                {
+                    "id": "o1",
+                    "simple_flavor_text": "Look into the mirror",
+                    "select_link_nb_conditions": [],
+                    "success_link_encounter_option_eff": {"reward0_reward": copy},
+                },
+                {"id": "o2", "simple_flavor_text": "Walk away"},
+            ]
+        },
+    )
+    add_e7bot(
+        conn,
+        "czn/rankings/list",
+        [{"season_id": "s1", "score": 9, "t1_c1_id": 1027, "t1_c1_save_id": "77"}],
+    )
+    saved = {"res_id": "c_1027_uni1", "r_spark_category": "CATEGORY_UNIQUE"}
+    conn.execute(
+        "INSERT INTO e7bot.save (save_id, body, fetched_at) VALUES ('77', %s, now())",
+        (
+            Jsonb(
+                {
+                    "id": 77,
+                    "card_datas": [saved | {"r_spark_res_id": "rsp5_c_1027_uni1"}],
+                    "equip_datas": [{"res_id": "eq_1"}],
+                }
+            ),
+        ),
+    )
+
+
+def test_game_facts_come_from_e7bot_with_prydwen_ratings_attached(call, conn, game_data):
+    (rating,) = conn.execute(
+        "SELECT rating FROM prydwen.card WHERE name = 'Rising Dragon Spire V'"
+    ).fetchone()
+
+    # Empty fields are left out, so the base card has no variant.
+    versions = {c.get("variant", ""): c for c in call("get_card", name="Rising Dragon Spire")}
+
+    assert versions[""]["cost"] == "3"
+    assert versions[""]["text"] == "Game text\nline two"
+    assert versions["V"]["text"] == "9 Hits"
+    assert (versions["V"]["source"], versions["V"]["rating"]) == ("e7bot", rating)
+    assert versions["V"]["prydwen_url"] == CHARACTER_URL
+
+
+def test_character_e7bot_lacks_is_served_from_prydwen(call):
+    character = call("get_character", name="mei lin")
+    assert (character["source"], character["url"]) == ("prydwen", CHARACTER_URL)
+
+
+def test_data_status_reports_both_sources(call, conn, game_data):
+    conn.execute(
+        "INSERT INTO e7bot.run (started_at, finished_at, ok, error)"
+        " VALUES (now(), now(), false, 'czn/cards/list: HTTP 500')"
+    )
+    status = call("data_status")
+    assert status["prydwen"]["pages"] == 1
+    assert status["e7bot"]["error"] == "czn/cards/list: HTTP 500"
+    assert "data_fetched_at" in status["e7bot"]
+
+
+def test_plan_deck_ranks_epiphanies_and_caps_removals(call, game_data):
+    plan = call("plan_deck", character="mei lin")
+
+    assert (plan["season"], plan["leaderboard_decks"]) == ("s1", 1)
+    spire = next(c for c in plan["cards"] if c["card"] == "Rising Dragon Spire")
+    assert spire["versions"][0]["variant"] == "V"
+    assert spire["versions"][0]["leaderboard_share"] == 1
+    assert [r["card"] for r in plan["removals"]] == ["Strike"]
+    assert len(plan["removals"]) <= 5
+    assert plan["equipment"][0] == {"item": "eq_1", "leaderboard_share": 1}
+
+
+def test_plan_deck_for_unknown_character_is_null(call):
+    assert call("plan_deck", character="zzzz") is None
+
+
+def test_list_encounters_filters_by_chaos_and_names_copy_answers(call, game_data):
+    listing = call("list_encounters", chaos="The Blu Pot", reward="copy")
+    (event,) = listing["results"]
+    assert (listing["total"], event["name"]) == (1, "Mirror Hall")
+    assert event["answers"] == [{"stage": 2, "answer": "Look into the mirror", "gives": ["copy"]}]
+
+    found = call("get_encounter", name="mirror hall")
+    first, second = found["stages"]
+    assert [a["text"] for a in first["answers"]] == ["Step inside"]
+    assert first["answers"][0]["leads_to"] == second["stage"] == 2
+    assert second["answers"][0]["rewards"][0]["text"] == "Copy 1 card"
+
+
+def test_unknown_chaos_is_an_error_naming_the_known_ones(call, game_data):
+    with pytest.raises(Exception, match="Known: The Blue Pot$"):
+        call("list_encounters", chaos="Nowhere At All")

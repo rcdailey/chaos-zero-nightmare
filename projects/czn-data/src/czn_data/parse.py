@@ -71,7 +71,7 @@ def parse_page(url: str, html: str) -> ParsedPage:
     for tag in soup(["script", "style", "noscript", "template"]):
         tag.decompose()
     root = _content_root(soup)
-    page = ParsedPage(title=_title(soup, root), body=text_of(root))
+    page = ParsedPage(title=_title(soup, root), body=text_of(root, separate_spans=True))
     if not page.body:
         raise ParseError("document.body", "page has no text content")
     kind = page_kind(url)
@@ -82,8 +82,12 @@ def parse_page(url: str, html: str) -> ParsedPage:
     return page
 
 
-def text_of(el: Tag | None) -> str:
-    """Visible text with line breaks kept at block boundaries and spacing normalized."""
+def text_of(el: Tag | None, separate_spans: bool = False) -> str:
+    """Visible text with line breaks kept at block boundaries and spacing normalized.
+
+    separate_spans puts a space after every span. Prydwen lays out table-like rows as adjacent
+    spans ("Scarlet", "E4") that otherwise fuse ("ScarletE4"), which full-text search cannot
+    find; field values keep spans joined, since their inline markup can split one word."""
     if el is None:
         return ""
     el = copy.copy(el)
@@ -100,6 +104,9 @@ def text_of(el: Tag | None) -> str:
         block.insert_after("\n")
     for cell in el.find_all(["td", "th"]):
         cell.insert_after(" | ")
+    if separate_spans:
+        for span in el.find_all("span"):
+            span.insert_after(" ")
     text = el.get_text().replace("\u200b", "")
     lines = (re.sub(r"[ \t\xa0]+", " ", line).strip(" |") for line in text.split("\n"))
     return "\n".join(line for line in lines if line)

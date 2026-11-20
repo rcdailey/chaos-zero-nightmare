@@ -5,10 +5,12 @@ start work, so whichever pod starts first with a new image upgrades the database
 lock makes the second one wait, then find nothing to do.
 
 Migrations live in ``migrations/versions`` as plain SQL run through Alembic, one file per
-revision, forward only. Every table except ``page`` is derived from the HTML stored in ``page``.
-A migration that changes derived tables calls ``request_rebuild()``; after the last migration,
-all stored HTML is parsed again in the same transaction, so the schema change and the rebuilt
-rows commit together. Nothing is fetched from Prydwen.
+revision, forward only. In the ``prydwen`` schema every table except ``page`` (and the stored
+portraits) is derived from the HTML stored in ``page``; a migration that changes those tables
+calls ``request_rebuild()``. The merged tables in ``public`` are derived from both source
+schemas by ``czn_data.build``; a migration that changes them calls ``request_build()``. After
+the last migration, the requested steps run in the same transaction (reparse first, then
+build), so the schema change and the rebuilt rows commit together. Nothing is fetched.
 """
 
 import logging
@@ -24,6 +26,7 @@ MIGRATION_LOCK = 7_418_023_355
 
 
 def migrate(database_url: str) -> None:
+    from .build import build
     from .scrape import reparse
 
     url = make_url(database_url).set(drivername="postgresql+psycopg")
@@ -36,10 +39,13 @@ def migrate(database_url: str) -> None:
             connection.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": MIGRATION_LOCK})
             config.attributes["connection"] = connection
             command.upgrade(config, "head")
+            driver = connection.connection.driver_connection
             if config.attributes.get("rebuild"):
                 log.info("rebuilding derived tables from stored HTML")
-                result = reparse(connection.connection.driver_connection, allow_shrink=True)
+                result = reparse(driver, allow_shrink=True)
                 log.info("rebuild finished", extra={"pages": dict(result.pages)})
+            if config.attributes.get("rebuild") or config.attributes.get("build"):
+                build(driver)
     finally:
         engine.dispose()
 
@@ -47,3 +53,8 @@ def migrate(database_url: str) -> None:
 def request_rebuild() -> None:
     """Call from a migration's ``upgrade()`` when it changes tables derived from page HTML."""
     context.config.attributes["rebuild"] = True
+
+
+def request_build() -> None:
+    """Call from a migration's ``upgrade()`` when it changes the merged tables in ``public``."""
+    context.config.attributes["build"] = True

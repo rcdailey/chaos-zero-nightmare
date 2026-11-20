@@ -351,6 +351,7 @@ source = { editable = "." }
 dependencies = [
     { name = "alembic" },
     { name = "beautifulsoup4" },
+    { name = "cryptography" },
     { name = "curl-cffi" },
     { name = "lxml" },
     { name = "mcp" },
@@ -375,6 +376,7 @@ dev = [
 requires-dist = [
     { name = "alembic", specifier = ">=1.20.1" },
     { name = "beautifulsoup4", specifier = ">=4.15" },
+    { name = "cryptography", specifier = ">=50" },
     { name = "curl-cffi", specifier = ">=0.17" },
     { name = "lxml", specifier = ">=6.1" },
     { name = "mcp", specifier = ">=2.3" },

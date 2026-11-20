@@ -38,7 +38,7 @@ def site(pages: dict[str, str | Exception]):
 
 
 def card_names(conn) -> set[str]:
-    return {row[0] for row in conn.execute("SELECT name FROM card").fetchall()}
+    return {row[0] for row in conn.execute("SELECT name FROM prydwen.card").fetchall()}
 
 
 def test_clean_run_stores_every_game_page(conn):
@@ -49,7 +49,7 @@ def test_clean_run_stores_every_game_page(conn):
     assert result.ok
     assert f"{SITE}/nikke/tier-list" not in get.requested
     assert card_names(conn) == {"Strike", "Rising Dragon Spire", "Rising Dragon Spire V"}
-    titles = {row[0] for row in conn.execute("SELECT title FROM document").fetchall()}
+    titles = {row[0] for row in conn.execute("SELECT title FROM prydwen.document").fetchall()}
     assert titles == {"Mei Lin", "Beginner Guide"}
 
 
@@ -63,7 +63,7 @@ def test_layout_change_keeps_previous_rows_and_reports_the_field(conn):
     assert result.validation_failures == {("character", "character.name"): 1}
     assert card_names(conn) == {"Strike", "Rising Dragon Spire", "Rising Dragon Spire V"}
     html, data_at, fetched_at, error = conn.execute(
-        "SELECT html, data_fetched_at, fetched_at, parse_error FROM page"
+        "SELECT html, data_fetched_at, fetched_at, parse_error FROM prydwen.page"
     ).fetchone()
     assert html == broken  # kept so `reparse` can apply a parser fix later
     assert data_at < fetched_at
@@ -72,7 +72,7 @@ def test_layout_change_keeps_previous_rows_and_reports_the_field(conn):
 
 def test_reparse_recovers_stored_html_without_fetching(conn):
     scrape(conn, site({CHARACTER_URL: CHARACTER_HTML}), allow_shrink=False)
-    conn.execute("DELETE FROM card")
+    conn.execute("DELETE FROM prydwen.card")
 
     result = reparse(conn, allow_shrink=False)
 
@@ -133,7 +133,8 @@ def test_new_portraits_are_stored_once(conn):
 
     assert result.ok
     assert fetched == [PORTRAIT]
-    assert conn.execute("SELECT image_url, image FROM portrait").fetchall() == [(PORTRAIT, b"art")]
+    stored = conn.execute("SELECT image_url, image FROM prydwen.portrait").fetchall()
+    assert stored == [(PORTRAIT, b"art")]
 
 
 def test_portrait_that_fails_is_reported_and_retried_next_run(conn):
@@ -149,7 +150,7 @@ def test_portrait_that_fails_is_reported_and_retried_next_run(conn):
     retried = RunResult()
     fetch_portraits(conn, {PORTRAIT: b"art"}.__getitem__, retried)
     assert retried.ok
-    assert conn.execute("SELECT count(*) FROM portrait").fetchone() == (1,)
+    assert conn.execute("SELECT count(*) FROM prydwen.portrait").fetchone() == (1,)
 
 
 def test_blocked_portrait_fetch_stops_the_run(conn):

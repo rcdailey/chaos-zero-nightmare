@@ -1,7 +1,9 @@
 """MCP server that answers Chaos Zero Nightmare questions from the scraped database.
 
-It only reads; give it a database role with SELECT rights. Every result carries the Prydwen
-source URL and the time that data was fetched, so answers can be cited and checked for staleness.
+It only reads; give it a database role with SELECT rights. Tools read the merged tables that
+``czn_data.build`` derives (plus Prydwen's stored pages for guide search), never a source schema
+directly. Every result carries its source, a URL, and the time that data was fetched, so answers
+can be cited and checked for staleness.
 
 Auth: the server is an OAuth 2.1 resource server. It validates JWT access tokens issued by an
 OIDC provider (``OIDC_ISSUER``) and advertises that provider to MCP clients such as claude.ai,
@@ -11,7 +13,9 @@ which run the login flow themselves.
 import json
 import logging
 import os
+import re
 import urllib.request
+from collections import Counter
 from typing import Literal
 
 import anyio
@@ -21,6 +25,7 @@ import uvicorn
 from mcp.server import MCPServer
 from mcp.server.auth.provider import AccessToken, TokenVerifier
 from mcp.server.auth.settings import AuthSettings
+from mcp.server.mcpserver.exceptions import ToolError
 from mcp.server.transport_security import TransportSecuritySettings
 from psycopg.rows import dict_row
 from starlette.requests import Request
@@ -29,44 +34,76 @@ from starlette.responses import JSONResponse
 log = logging.getLogger(__name__)
 
 INSTRUCTIONS = """\
-Chaos Zero Nightmare (CZN) game data from prydwen.gg: characters, their cards and Epiphany
-variants with Prydwen's ratings, potentials, Manifest Ego levels, neutral cards, equipment, memory
-fragment sets, partners, keyword/effect definitions, Prydwen's per-character guides (teams,
-decks, equipment, fragment and partner rankings, synergies), and full-text search over every
-guide page. Start with `lookup` for any name seen on screen and `match_card_text` for card text
-seen on screen, then use the specific tools; `get_character` returns one section at a time.
+Chaos Zero Nightmare (CZN) data. Game facts (characters, cards and Epiphany versions,
+potentials, partners, equipment, memory fragment sets, keywords, Chaos events, Divine
+Epiphanies, leaderboard decks) come from the game's own data via wiki.e7bot.top; where it lacks
+a record, prydwen.gg fills in (`source` says which). Opinions come from Prydwen: ratings,
+reviews, Manifest Ego reviews, per-character guides (teams, decks, equipment, fragment and
+partner rankings, synergies), and full-text search over every guide page.
+Start with `lookup` for any name seen on screen and `match_card_text` for card text seen on
+screen, then use the specific tools; `get_character` returns one section at a time.
 `list_characters` filters the roster; `synergies` answers who to use with a character.
-Players name cards by color ("her purple card"); `list_cards` filters by color. Prydwen does not
-list Epiphanies that a partner unlocks for its character's cards, so they are not here.
-Fields that are empty are left out. Ratings are Prydwen's stars, 1 to 5. Cite `url` and
-`data_fetched_at` when the answer depends on the data. Player state (owned characters, current
-run) is not stored here; read it from the user's screenshots.
+Players name cards by color ("her purple card"); `list_cards` filters by color.
+For a Chaos run: players build one character's deck per run, because copy events are too rare
+for two. `plan_deck` gives that character's target deck, Epiphanies, removals, and equipment;
+`get_encounter` and `list_encounters` say what each answer of a question-mark event gives, with
+card copies and removals first; `list_divine_epiphanies` lists what can go on a given card.
+List tools return `total` and say when they show only part. Epiphanies a partner unlocks are
+not in either source.
+Fields that are empty are left out. Ratings are Prydwen's stars, 1 to 5. Cite `url` (and
+`prydwen_url` for opinions) and `data_fetched_at` when the answer depends on the data. Player
+state (owned characters, Codex upgrades, current run) is not stored here; read it from the
+user's screenshots.
 """
 
 LOOKUP_SQL = """
-SELECT entity.*, page.data_fetched_at FROM (
+SELECT entity.* FROM (
     SELECT 'character' AS kind, name, concat_ws(' ', rarity || '*', element, class) AS summary,
-           url FROM character
+           source, url, data_fetched_at FROM character
     UNION ALL
-    SELECT 'card', name, concat_ws(' | ', color, type, 'cost ' || cost, text), url FROM card
+    SELECT 'card', name, concat_ws(' | ', color, type, 'cost ' || cost, text), source, url,
+           data_fetched_at FROM card
     UNION ALL
-    SELECT 'equipment', name, concat_ws(' | ', rarity, slot, text), url FROM equipment
+    SELECT 'equipment', name, concat_ws(' | ', rarity, slot, text), source, url, data_fetched_at
+    FROM equipment
     UNION ALL
-    SELECT 'fragment_set', name, bonuses::text, url FROM fragment_set
+    SELECT 'fragment_set', name,
+           (SELECT string_agg((b->>'pieces') || '-piece: ' || (b->>'text'), ' | ')
+            FROM jsonb_array_elements(bonuses) b), source, url, data_fetched_at
+    FROM fragment_set
     UNION ALL
     SELECT 'partner', name, concat_ws(' | ', rarity || '*', class, passive_text,
-           'EGO ' || ego_name || ' (' || ego_cost || ' EP): ' || ego_text), url FROM partner
+           'EGO ' || ego_name || ' (' || ego_cost || ' EP): ' || ego_text), source, url,
+           data_fetched_at FROM partner
     UNION ALL
-    SELECT 'effect', name, concat_ws(' | ', type, description), url FROM effect
+    SELECT 'effect', name, concat_ws(' | ', type, description), source, url, data_fetched_at
+    FROM effect
+    UNION ALL
+    SELECT 'encounter', name, concat_ws(' | ', pack, array_to_string(chaos, ', '),
+           CASE WHEN any_chaos THEN 'any Chaos' END,
+           'gives ' || nullif(array_to_string(reward_classes, ', '), '')), 'e7bot', url,
+           data_fetched_at
+    FROM encounter
+    UNION ALL
+    SELECT 'divine_epiphany', text, {divine_summary}, 'e7bot', url, data_fetched_at
+    FROM divine_epiphany
+    UNION ALL
+    SELECT 'chaos', name, 'Chaos (run map)', 'e7bot', NULL, NULL FROM chaos
 ) entity
-JOIN page USING (url)
 WHERE (%(kind)s::text IS NULL OR entity.kind = %(kind)s)
   AND ({match} OR entity.kind = 'effect'
        AND to_tsvector('english', summary) @@ plainto_tsquery('english', %(name)s))
-ORDER BY {match} DESC, word_similarity(%(name)s, name) DESC, similarity(name, %(name)s) DESC,
-    name
+ORDER BY {match} DESC, {order}, name
 LIMIT %(limit)s
 """
+# Which cards a Divine Epiphany applies to, as text: "Attack, Skill | cost 1 | Vitor, Caligo".
+DIVINE_SUMMARY = """concat_ws(' | ',
+    coalesce(nullif(array_to_string(card_types, ', '), ''), 'any card type'),
+    CASE WHEN cost_min <= 0 AND cost_max >= 99 THEN 'any cost'
+         WHEN cost_max >= 99 THEN 'cost ' || cost_min || '+'
+         WHEN cost_min = cost_max THEN 'cost ' || cost_min
+         ELSE 'cost ' || cost_min || '-' || cost_max END,
+    nullif(array_to_string(gods, ', '), ''))"""
 # Other words for effect: the dictionary holds keywords, statuses, and card tags.
 LOOKUP_KIND_ALIASES = {"keyword": "effect", "status": "effect", "tag": "effect"}
 LookupKind = Literal[
@@ -79,12 +116,30 @@ LookupKind = Literal[
     "keyword",
     "status",
     "tag",
+    "encounter",
+    "divine_epiphany",
+    "chaos",
 ]
 
-# Fuzzy name match: substring, or pg_trgm word similarity ("flicker blad" finds
-# "Flicker Blade I"). Shared by every tool that resolves a name typed from a screenshot.
-NAME_MATCH = "(name ILIKE '%%' || %(name)s || '%%' OR %(name)s <%% name)"
-LOOKUP_SQL = LOOKUP_SQL.format(match=NAME_MATCH)
+
+# Fuzzy name match: substring, pg_trgm word similarity ("flicker blad" finds "Flicker Blade
+# I"), or trigram similarity ignoring spaces ("Meilin" finds "Mei Lin", "Blazbell" finds
+# "Blazebell"). Shared by every tool that resolves a name typed from a screenshot; NAME_ORDER
+# ranks the matches, best first.
+def _name_match(column: str) -> str:
+    squashed = f"similarity(replace({column}, ' ', ''), replace(%(name)s, ' ', ''))"
+    return (
+        f"({column} ILIKE '%%' || %(name)s || '%%' OR %(name)s <%% {column} OR {squashed} >= 0.3)"
+    )
+
+
+_SQUASHED = "similarity(replace(name, ' ', ''), replace(%(name)s, ' ', ''))"
+NAME_MATCH = _name_match("name")
+NAME_ORDER = (
+    f"(name ILIKE %(name)s) DESC, word_similarity(%(name)s, name) DESC, {_SQUASHED} DESC,"
+    " similarity(name, %(name)s) DESC"
+)
+LOOKUP_SQL = LOOKUP_SQL.format(match=NAME_MATCH, order=NAME_ORDER, divine_summary=DIVINE_SUMMARY)
 
 # get_character section name -> query for that part of one character's data (%(slug)s).
 CHARACTER_SECTIONS = {
@@ -112,47 +167,50 @@ _SECTION_COUNTS_SQL = "SELECT " + ", ".join(
 )
 
 # Where guides recommend an item: the best-matching equipment, fragment set, or partner name
-# (fuzzy), then every deck, equipment tab, and ranking row that lists it.
+# (fuzzy), then every deck, equipment tab, and ranking row that lists it. Guides spell items
+# Prydwen's way (guide_name), which can differ from the game's name.
 RECOMMENDED_BY_SQL = """
 WITH item AS (
-    SELECT name FROM (
-        SELECT name FROM equipment UNION SELECT name FROM fragment_set
-        UNION SELECT name FROM partner
+    SELECT name, guide_name FROM (
+        SELECT name, coalesce(prydwen_name, name) AS guide_name FROM equipment
+        UNION SELECT name, coalesce(prydwen_name, name) FROM fragment_set
+        UNION SELECT name, coalesce(prydwen_name, name) FROM partner
     ) names
     WHERE {match}
-    ORDER BY word_similarity(%(name)s, name) DESC, similarity(name, %(name)s) DESC
+    ORDER BY {order}
     LIMIT 1
 )
 SELECT item.name AS item, c.name AS character,
-       array_agg(DISTINCT r.place || ': ' || r.detail) AS places, c.url
+       array_agg(DISTINCT concat_ws(': ', r.place, r.detail)) AS places, r.url
 FROM item, LATERAL (
-    SELECT character_slug, 'deck' AS place, name AS detail FROM deck
-    WHERE item.name = ANY (equipment) OR item.name = ANY (fragments) OR partner = item.name
+    SELECT character_slug, 'deck' AS place, name AS detail, url FROM deck
+    WHERE item.guide_name = ANY (equipment) OR item.guide_name = ANY (fragments)
+       OR partner = item.guide_name
     UNION ALL
-    SELECT character_slug, 'equipment tab', tab FROM character_equipment
+    SELECT character_slug, 'equipment tab', tab, url FROM character_equipment
     WHERE EXISTS (
         SELECT FROM jsonb_each(slots) slot, jsonb_array_elements_text(slot.value) listed
-        WHERE listed = item.name
+        WHERE listed = item.guide_name
     )
     UNION ALL
     SELECT character_slug, 'fragment ranking',
-           concat_ws(' ', build, '#' || position, performance) FROM fragment_rank
-    WHERE item.name = ANY (sets)
+           concat_ws(' ', build, '#' || position, performance), url FROM fragment_rank
+    WHERE item.guide_name = ANY (sets)
     UNION ALL
     SELECT character_slug, 'partner ranking',
-           concat_ws(' ', '#' || position, dupes, performance) FROM partner_rank
-    WHERE partner = item.name
+           concat_ws(' ', '#' || position, dupes, performance), url FROM partner_rank
+    WHERE partner = item.guide_name
 ) r
 JOIN character c ON c.slug = r.character_slug
-GROUP BY item.name, c.name, c.url
+GROUP BY item.name, c.name, r.url
 ORDER BY count(*) DESC, c.name
 """
-RECOMMENDED_BY_SQL = RECOMMENDED_BY_SQL.format(match=NAME_MATCH)
+RECOMMENDED_BY_SQL = RECOMMENDED_BY_SQL.format(match=NAME_MATCH, order=NAME_ORDER)
 
 LIST_CHARACTERS_SQL = """
-SELECT c.name, c.rarity, c.element, c.class, g.gender
-FROM character c LEFT JOIN portrait_gender g USING (image_url)
-WHERE (%(gender)s::text IS NULL OR g.gender = lower(%(gender)s))
+SELECT c.name, c.rarity, c.element, c.class, c.gender
+FROM character c
+WHERE (%(gender)s::text IS NULL OR c.gender = lower(%(gender)s))
   AND (%(element)s::text IS NULL OR c.element ILIKE %(element)s)
   AND (%(class)s::text IS NULL OR c.class ILIKE %(class)s)
   AND (%(rarity)s::int IS NULL OR c.rarity = %(rarity)s)
@@ -166,8 +224,7 @@ SYNERGIES_SQL = """
 WITH me AS (
     SELECT slug, name FROM character
     WHERE slug = %(name)s OR {match}
-    ORDER BY slug = %(name)s DESC, word_similarity(%(name)s, name) DESC,
-        similarity(name, %(name)s) DESC
+    ORDER BY slug = %(name)s DESC, {order}
     LIMIT 1
 ),
 teams AS (
@@ -180,7 +237,8 @@ mentions AS (
     SELECT c.name, 'their synergy list', s.points, NULL
     FROM synergy s JOIN character c ON c.slug = s.character_slug, me WHERE s.name = me.name
     UNION ALL
-    SELECT member, 'team', NULL, concat_ws(' ', teams.tier, teams.name)
+    SELECT member, 'team', NULL,
+           teams.name || coalesce(' (' || teams.tier || ')', '')
     FROM teams, me, unnest(teams.members) member WHERE member <> me.name
 )
 SELECT (SELECT name FROM me) AS "for", partner AS name,
@@ -192,7 +250,158 @@ FROM mentions
 GROUP BY partner
 ORDER BY count(DISTINCT source) DESC, count(DISTINCT team) DESC, partner
 """
-SYNERGIES_SQL = SYNERGIES_SQL.format(match=NAME_MATCH)
+SYNERGIES_SQL = SYNERGIES_SQL.format(match=NAME_MATCH, order=NAME_ORDER)
+
+# plan_deck: one character's decks are its Save Data decks in the newest leaderboard season
+# (%(season)s) plus Prydwen's guide decks. Prydwen lists deck cards by name with the Epiphany
+# numeral ("Anchor Shot IV"), and lists complete decks: they are the size of saved decks.
+# Prydwen names some cards differently from the game (card.prydwen_name), so Prydwen deck
+# card names are translated to the game's base name before counting.
+_DECKS = """
+lb AS (
+    SELECT rank, team, cards, equipment FROM leaderboard_deck
+    WHERE character_slug = %(slug)s AND season = %(season)s
+),
+pdecks AS (
+    SELECT row_number() OVER () AS id, cards, equipment FROM deck
+    WHERE character_slug = %(slug)s
+),
+pd_cards AS (
+    SELECT pdecks.id, coalesce(game.base_name, listed.base) AS base, listed.variant
+    FROM pdecks, jsonb_array_elements(pdecks.cards) e,
+         LATERAL (SELECT regexp_replace(e->>'name', '\\s+(I|II|III|IV|V)$', '') AS base,
+                         coalesce(substring(e->>'name' from '\\s(I|II|III|IV|V)$'), '')
+                             AS variant) listed
+    LEFT JOIN LATERAL (
+        SELECT base_name FROM card
+        WHERE (character_slug = %(slug)s OR character_slug IS NULL)
+          AND listed.base IN (base_name, prydwen_name)
+        ORDER BY character_slug NULLS LAST LIMIT 1
+    ) game ON true
+)
+"""
+PLAN_CARDS_SQL = f"""
+WITH {_DECKS},
+total AS (SELECT count(*) AS n FROM lb),
+lb_picks AS (
+    SELECT c->>'base' AS base, c->>'variant' AS variant, count(DISTINCT (rank, team)) AS decks,
+           array_remove(array_agg(DISTINCT c->>'divine_epiphany'), NULL) AS divine
+    FROM lb, jsonb_array_elements(lb.cards) c GROUP BY 1, 2
+),
+pd_picks AS (
+    SELECT base, variant, count(DISTINCT id) AS decks FROM pd_cards GROUP BY 1, 2
+),
+picks AS (
+    SELECT coalesce(l.base, p.base) AS base, coalesce(l.variant, p.variant) AS variant,
+           l.decks AS lb_decks, l.divine, p.decks AS pd_decks
+    FROM lb_picks l FULL JOIN pd_picks p ON p.base = l.base AND p.variant = l.variant
+)
+SELECT picks.base AS card, base.category, base.cost, base.color,
+       jsonb_agg(jsonb_strip_nulls(jsonb_build_object(
+           'variant', coalesce(nullif(picks.variant, ''), 'base'),
+           'rating', r.rating,
+           'leaderboard_share', round(picks.lb_decks::numeric / nullif(total.n, 0), 2),
+           'prydwen_decks', picks.pd_decks,
+           'divine_epiphanies', nullif(picks.divine, '{{}}')
+       )) ORDER BY coalesce(picks.lb_decks, 0) DESC, coalesce(picks.pd_decks, 0) DESC,
+                   picks.variant) AS versions
+FROM picks CROSS JOIN total
+LEFT JOIN LATERAL (
+    SELECT rating FROM card
+    WHERE base_name = picks.base AND variant = picks.variant
+      AND (character_slug = %(slug)s OR character_slug IS NULL)
+    ORDER BY character_slug NULLS LAST LIMIT 1
+) r ON true
+LEFT JOIN LATERAL (
+    SELECT category, cost, color FROM card
+    WHERE base_name = picks.base AND variant = ''
+      AND (character_slug = %(slug)s OR character_slug IS NULL)
+    ORDER BY character_slug NULLS LAST LIMIT 1
+) base ON true
+GROUP BY picks.base, base.category, base.cost, base.color
+ORDER BY max(coalesce(picks.lb_decks, 0)) DESC, sum(coalesce(picks.pd_decks, 0)) DESC, picks.base
+LIMIT 40
+"""
+# Removal candidates are starting cards; the Ego skill is not in the deck (Prydwen-only
+# characters mark it by type, game data by category).
+PLAN_REMOVALS_SQL = f"""
+WITH {_DECKS},
+starting AS (
+    SELECT DISTINCT base_name FROM card
+    WHERE character_slug = %(slug)s AND category = 'starting' AND variant = ''
+      AND type IS DISTINCT FROM 'Ego Skill'
+),
+decks AS (
+    SELECT array(SELECT c->>'base' FROM jsonb_array_elements(lb.cards) c) AS names FROM lb
+    UNION ALL
+    SELECT array_agg(base) FROM pd_cards GROUP BY id
+)
+SELECT s.base_name AS card,
+       round(avg((NOT s.base_name = ANY (d.names))::int), 2)::float8 AS dropped_share,
+       count(*) AS decks
+FROM starting s CROSS JOIN decks d
+GROUP BY s.base_name
+HAVING bool_or(NOT s.base_name = ANY (d.names))
+ORDER BY dropped_share DESC, card
+LIMIT 5
+"""
+# Equipment worn in leaderboard decks (share of them) and listed in Prydwen decks (count),
+# under the game's item name.
+PLAN_EQUIPMENT_SQL = f"""
+WITH {_DECKS},
+worn AS (
+    SELECT item, (rank, team)::text AS deck, 'leaderboard' AS source
+    FROM lb, unnest(lb.equipment) item
+    UNION ALL
+    SELECT coalesce(e.name, listed), id::text, 'prydwen'
+    FROM pdecks, unnest(pdecks.equipment) listed
+    LEFT JOIN LATERAL (
+        SELECT name FROM equipment WHERE listed IN (name, prydwen_name) LIMIT 1
+    ) e ON true
+)
+SELECT worn.item, max(e.slot) AS slot,
+       round(count(DISTINCT deck) FILTER (WHERE worn.source = 'leaderboard')::numeric
+             / nullif((SELECT count(*) FROM lb), 0), 2)::float8 AS leaderboard_share,
+       nullif(count(DISTINCT deck) FILTER (WHERE worn.source = 'prydwen'), 0) AS prydwen_decks
+FROM worn LEFT JOIN equipment e ON e.name = worn.item
+GROUP BY worn.item
+ORDER BY leaderboard_share DESC NULLS LAST, prydwen_decks DESC NULLS LAST, worn.item
+LIMIT 20
+"""
+
+# Events that can appear in a Chaos (%(chaos)s, an exact name from the chaos view): those
+# listed for it, plus common events of every Chaos.
+_IN_CHAOS = "(%(chaos)s::text IS NULL OR e.any_chaos OR %(chaos)s = ANY (e.chaos))"
+ENCOUNTER_MATCH_SQL = f"""
+SELECT e.id, e.name, e.rarity, e.pack, e.chaos, e.any_chaos, e.reward_classes, e.url,
+       e.data_fetched_at
+FROM encounter e
+WHERE {NAME_MATCH} AND {_IN_CHAOS}
+ORDER BY {NAME_ORDER}, e.id
+LIMIT 1
+"""
+# Rows past LIST_LIMIT are cut; total says how many matched.
+LIST_LIMIT = 60
+LIST_ENCOUNTERS_SQL = f"""
+SELECT e.name, e.pack, e.chaos, e.any_chaos, e.reward_classes,
+       (SELECT jsonb_agg(jsonb_build_object('stage', o.stage, 'answer', o.text,
+                                            'gives', o.reward_classes)
+                         ORDER BY o.stage, o.position)
+        FROM encounter_option o
+        WHERE o.encounter_id = e.id
+          AND o.reward_classes && CASE WHEN %(reward)s::text IS NULL
+              THEN ARRAY['copy', 'removal'] ELSE ARRAY[%(reward)s::text] END
+       ) AS answers,
+       e.url, e.data_fetched_at, count(*) OVER () AS total
+FROM encounter e
+WHERE {_IN_CHAOS} AND (%(reward)s::text IS NULL OR %(reward)s = ANY (e.reward_classes))
+ORDER BY 'copy' = ANY (e.reward_classes) DESC, 'removal' = ANY (e.reward_classes) DESC,
+         e.any_chaos, e.name
+LIMIT {LIST_LIMIT}
+"""
+CHAOS_MATCH_SQL = f"""
+SELECT name FROM chaos WHERE {NAME_MATCH} ORDER BY {NAME_ORDER} LIMIT 1
+"""
 
 
 def _database_url() -> str:
@@ -230,7 +439,9 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
     async def lookup(name: str, kind: LookupKind | None = None, limit: int = 10) -> list[dict]:
         """Fuzzy-find any named game entity, tolerant of typos and partial names.
 
-        kind narrows the search: character, card, equipment, fragment_set, partner, effect.
+        kind narrows the search: character, card, equipment, fragment_set, partner, effect
+        (keyword, status and tag are other names for it), encounter (Chaos event),
+        divine_epiphany, or chaos (the Chaos maps, for names list_encounters accepts).
         Effects are keywords, statuses and card tags (for example Exhaust, Retain, Vulnerable);
         a term without its own entry, such as Polarization, finds the effects whose description
         uses it. Card summaries start with the card's color (its rarity in game: White, Blue,
@@ -244,14 +455,7 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
         """The best-matching partner: rarity, class, passive, EGO skill (name, EP cost, text)
         and base stats. Use recommended_by for which characters' guides rank it."""
         found = await _query(
-            """
-            SELECT partner.*, page.data_fetched_at FROM partner JOIN page USING (url)
-            WHERE """
-            + NAME_MATCH
-            + """
-            ORDER BY word_similarity(%(name)s, name) DESC, similarity(name, %(name)s) DESC
-            LIMIT 1
-            """,
+            f"SELECT * FROM partner WHERE {NAME_MATCH} ORDER BY {NAME_ORDER} LIMIT 1",
             {"name": name},
         )
         return found[0] if found else None
@@ -263,17 +467,14 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
         base card also carries the overall review, the recommended Neutral Epiphany
         (target_neutral) and Prydwen's Neutral and Divine advice."""
         return await _query(
-            """
+            f"""
             WITH best AS (
                 SELECT base_name, character_slug FROM card
-                WHERE """
-            + NAME_MATCH
-            + """
-                ORDER BY word_similarity(%(name)s, name) DESC, similarity(name, %(name)s) DESC
+                WHERE {NAME_MATCH} OR prydwen_name ILIKE %(name)s
+                ORDER BY coalesce(prydwen_name ILIKE %(name)s, false) DESC, {NAME_ORDER}
                 LIMIT 1
             )
-            SELECT card.*, page.data_fetched_at FROM card JOIN best USING (base_name)
-            JOIN page USING (url)
+            SELECT card.* FROM card JOIN best USING (base_name)
             WHERE card.character_slug IS NOT DISTINCT FROM best.character_slug
             ORDER BY variant
             """,
@@ -283,68 +484,115 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
     @mcp.tool()
     async def get_character(name: str, section: str | None = None) -> dict | None:
         """Profile of the best-matching character. Without section: rarity, element, class,
-        gender (female or male, judged from the character's art by an image tagger; Prydwen
-        does not state it) and the list of available sections. With section, that part of
+        gender (from the game data; for characters only Prydwen has, judged from the art by an
+        image tagger) and the list of available sections. With section, that part of
         Prydwen's guide: cards (without reviews; use get_card), potentials, manifest_egos,
         teams, decks, equipment (per season tab), seasonal_powers, fragments, partners,
         synergies, or a prose section by title (Pros, Cons, Introduction, Key Mechanics, Stats,
-        Potential Priority, ...)."""
+        Potential Priority, ...). A section reply names the character but repeats no profile.
+        note explains missing data, such as a character neither source covers yet."""
         character = await _find_character(name)
         if character is None:
             return None
         prose = character.pop("sections", [])
         slug = {"slug": character["slug"]}
+        counts = (await _query(_SECTION_COUNTS_SQL, slug))[0]
+        if not counts.get("cards"):
+            character["note"] = (
+                "No cards in either source yet: the game data (e7bot) does not have this"
+                " character, and Prydwen's page has no card data."
+            )
         if section is None:
-            counts = await _query(_SECTION_COUNTS_SQL, slug)
-            available = [s for s, n in counts[0].items() if n] if counts else []
+            available = [s for s, n in counts.items() if n]
             return character | {"sections": available + [s["title"] for s in prose]}
+        header = {
+            k: character[k]
+            for k in ("name", "slug", "source", "prydwen_url", "data_fetched_at", "note")
+            if k in character
+        }
         key = section.strip().lower()
         if key in CHARACTER_SECTIONS:
-            return character | {key: await _query(CHARACTER_SECTIONS[key], slug)}
-        matches = [s for s in prose if key in s["title"].lower()]
-        return character | {"sections": matches}
+            return header | {key: await _query(CHARACTER_SECTIONS[key], slug)}
+        return header | {"sections": [s for s in prose if key in s["title"].lower()]}
 
     @mcp.tool()
     async def match_card_text(
         text: str, character: str | None = None, limit: int = 5
     ) -> list[dict]:
         """Find the card and Epiphany variant whose effect text best matches text read from the
-        screen (the game shows Epiphany choices as text, without variant numbers). character
-        narrows the search to one character's cards (name or slug)."""
-        return await _query(
+        screen (the game shows Epiphany choices as text, without variant numbers). Numbers in
+        the text decide between versions that differ only in them. character narrows the
+        search to one character's cards (name or slug, typos tolerated). match is 0 to 1."""
+        slug = None
+        if character:
+            found = await _find_character(character)
+            if found is None:
+                return []
+            slug = found["slug"]
+        rows = await _query(
             """
             SELECT card.name, card.base_name, card.variant, card.alias, card.color, card.cost,
-                   card.type, card.text, card.rating, character.name AS character, card.url,
-                   round(word_similarity(%(text)s, card.text)::numeric, 2) AS match
+                   card.type, card.text, card.rating, character.name AS character, card.source,
+                   card.url, card.prydwen_url, card.data_fetched_at,
+                   word_similarity(%(text)s, card.text)::float8 AS match
             FROM card LEFT JOIN character ON character.slug = card.character_slug
-            WHERE (%(character)s::text IS NULL OR character.slug = %(character)s
-                   OR character.name ILIKE %(character)s)
+            WHERE %(slug)s::text IS NULL OR card.character_slug = %(slug)s
             ORDER BY word_similarity(%(text)s, card.text) DESC, card.name
-            LIMIT %(limit)s
+            LIMIT 40
             """,
-            {"text": text, "character": character, "limit": min(limit, 20)},
+            {"text": text, "slug": slug},
         )
+        wanted = Counter(re.findall(r"\d+", text))
+        for row in rows:
+            have = Counter(re.findall(r"\d+", row["text"]))
+            shared = sum((wanted & have).values())
+            # Half the score is the words, half the numbers (when the screen text has any).
+            numbers = shared / max(sum(wanted.values()), sum(have.values())) if wanted else 1
+            row["match"] = round(row["match"] * (0.5 + 0.5 * numbers), 2)
+        rows.sort(key=lambda row: -row["match"])
+        return rows[: min(limit, 20)]
 
     @mcp.tool()
     async def find_teams(character: str) -> list[dict]:
-        """Every team in Prydwen's guides that includes the best-matching character, with the
-        team name, tier, members, and the characters whose pages list it."""
+        """Every team that includes the best-matching character: teams in Prydwen's guides
+        (source prydwen: name, tier, members, the characters whose pages list it), then the
+        lineups of the newest leaderboard season (source leaderboard: members, how many
+        ranked teams used the lineup, and its best rank), most used first."""
         return await _query(
-            """
+            f"""
             WITH member AS (
-                SELECT name FROM (SELECT DISTINCT unnest(members) AS name FROM team) members
-                WHERE """
-            + NAME_MATCH
-            + """
-                ORDER BY word_similarity(%(name)s, name) DESC, similarity(name, %(name)s) DESC
+                SELECT name FROM (
+                    SELECT DISTINCT unnest(members) AS name FROM team
+                    UNION SELECT name FROM character
+                ) members
+                WHERE {NAME_MATCH}
+                ORDER BY {NAME_ORDER}
                 LIMIT 1
+            ),
+            ranked AS (
+                SELECT d.season, d.rank, d.team, max(d.url) AS url,
+                       max(d.data_fetched_at) AS data_fetched_at,
+                       array_agg(c.name ORDER BY c.name) AS members
+                FROM leaderboard_deck d JOIN character c ON c.slug = d.character_slug
+                WHERE d.season = (SELECT max(season) FROM leaderboard_entry)
+                GROUP BY d.season, d.rank, d.team
             )
-            SELECT team.name, team.tier, team.members,
-                   array_agg(owner.name ORDER BY owner.name) AS listed_for
-            FROM member, team JOIN character owner ON owner.slug = team.character_slug
-            WHERE member.name = ANY (team.members)
-            GROUP BY team.name, team.tier, team.members
-            ORDER BY team.tier NULLS LAST, team.name
+            SELECT * FROM (
+                SELECT 'prydwen' AS source, team.name, team.tier, team.members,
+                       array_agg(owner.name ORDER BY owner.name) AS listed_for,
+                       NULL::text AS season, NULL::bigint AS teams, NULL::int AS best_rank,
+                       min(team.url) AS url, min(team.data_fetched_at) AS data_fetched_at
+                FROM member, team JOIN character owner ON owner.slug = team.character_slug
+                WHERE member.name = ANY (team.members)
+                GROUP BY team.name, team.tier, team.members
+                UNION ALL
+                SELECT 'leaderboard', NULL, NULL, ranked.members, NULL, ranked.season,
+                       count(*), min(ranked.rank), max(ranked.url), max(ranked.data_fetched_at)
+                FROM member, ranked WHERE member.name = ANY (ranked.members)
+                GROUP BY ranked.members, ranked.season
+            ) found
+            ORDER BY source DESC, tier NULLS LAST, teams DESC NULLS LAST, best_rank, name
+            LIMIT 30
             """,
             {"name": character},
         )
@@ -383,20 +631,24 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
 
     async def _find_character(name: str) -> dict | None:
         found = await _query(
-            """
-            SELECT character.*, portrait_gender.gender, page.data_fetched_at
-            FROM character JOIN page USING (url)
-            LEFT JOIN portrait_gender USING (image_url)
-            WHERE slug = %(name)s OR """
-            + NAME_MATCH
-            + """
-            ORDER BY slug = %(name)s DESC, word_similarity(%(name)s, name) DESC,
-                similarity(name, %(name)s) DESC
-            LIMIT 1
+            f"""
+            SELECT * FROM character WHERE slug = %(name)s OR {NAME_MATCH}
+            ORDER BY slug = %(name)s DESC, {NAME_ORDER} LIMIT 1
             """,
             {"name": name},
         )
         return found[0] if found else None
+
+    async def _listing(sql: str, params: dict) -> dict:
+        """A list tool's reply: total matches, and the rows shown (at most LIST_LIMIT)."""
+        rows = await _query(sql, params)
+        total = rows[0]["total"] if rows else 0
+        for row in rows:
+            del row["total"]
+        reply = {"total": total, "results": rows}
+        if total > len(rows):
+            reply["note"] = f"Showing {len(rows)} of {total}; add filters to narrow."
+        return reply
 
     @mcp.tool()
     async def list_cards(
@@ -406,29 +658,38 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
         tag: str | None = None,
         color: str | None = None,
         base_only: bool = True,
-    ) -> list[dict]:
-        """List cards with optional filters. character is a name or slug; category is starting,
-        unique, generated or neutral; type is Attack, Skill, Upgrade and so on; tag is a card
-        tag such as Exhaust; color is the card's rarity color (White, Blue, Purple, Gold,
-        Orange), which players use to name cards ("her purple card"). base_only skips Epiphany
-        variants."""
-        return await _query(
-            """
+    ) -> dict:
+        """List cards with optional filters; total counts every match, and note says when
+        results shows only part of them. character is a name or slug (typos tolerated); category is starting (in
+        the starting deck), unique (gained in a run), ego (the Ego skill, cast with EP, not in
+        the deck), collapse (replaces a card when the character's Collapse triggers),
+        generated (created by other cards), neutral, monster or forbidden; type is Attack,
+        Skill, Upgrade and so on; tag is a card tag such as Exhaust; color is the card's rarity
+        color (White, Blue, Purple, Gold, Orange), which players use to name cards ("her purple
+        card"). base_only skips Epiphany and other versions."""
+        slug = None
+        if character:
+            found = await _find_character(character)
+            if found is None:
+                return {"total": 0, "results": [], "note": f"No character matches {character!r}."}
+            slug = found["slug"]
+        listing = await _listing(
+            f"""
             SELECT card.name, card.category, card.color, card.cost, card.type, card.tags,
-                   card.text, card.variant, card.rating, character.name AS character, card.url
+                   card.text, card.variant, card.rating, character.name AS character,
+                   card.source, card.url, card.data_fetched_at, count(*) OVER () AS total
             FROM card LEFT JOIN character ON character.slug = card.character_slug
-            WHERE (%(character)s::text IS NULL OR character.slug = %(character)s
-                   OR character.name ILIKE %(character)s)
-              AND (%(category)s::text IS NULL OR card.category = %(category)s)
+            WHERE (%(slug)s::text IS NULL OR card.character_slug = %(slug)s)
+              AND (%(category)s::text IS NULL OR card.category = lower(%(category)s))
               AND (%(type)s::text IS NULL OR card.type ILIKE %(type)s)
               AND (%(tag)s::text IS NULL OR %(tag)s ILIKE ANY (card.tags))
               AND (%(color)s::text IS NULL OR card.color ILIKE %(color)s)
               AND (NOT %(base_only)s OR card.variant = '')
-            ORDER BY character.name NULLS LAST, card.name
-            LIMIT 300
+            ORDER BY character.name NULLS LAST, card.category, card.name
+            LIMIT {LIST_LIMIT * 2}
             """,
             {
-                "character": character,
+                "slug": slug,
                 "category": category,
                 "type": type,
                 "tag": tag,
@@ -436,19 +697,33 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
                 "base_only": base_only,
             },
         )
+        if slug and not listing["total"]:
+            listing["note"] = f"No cards for {found['name']} in either source yet."
+        return listing
 
     @mcp.tool()
-    async def list_equipment(slot: str | None = None, rarity: str | None = None) -> list[dict]:
-        """List equipment, optionally by slot (Weapon, Armor, Trinket) or rarity (Rare,
-        Legendary, ...), with effect text, stats per level and where it drops."""
-        return await _query(
-            """
-            SELECT name, rarity, slot, text, stats, source, url FROM equipment
-            WHERE (%(slot)s::text IS NULL OR slot ILIKE %(slot)s)
+    async def list_equipment(
+        slot: str | None = None, rarity: str | None = None, name: str | None = None
+    ) -> dict:
+        """List equipment, optionally by slot (Weapon, Armor, Trinket; plurals work), rarity
+        (Rare, Legendary, ...) or name (typos tolerated), with effect text and where it drops
+        (obtained_from); total counts every match, and note says when results shows only part
+        of them. Stats per level are included when name is given."""
+        return await _listing(
+            f"""
+            SELECT name, rarity, slot, text, obtained_from,
+                   CASE WHEN %(name)s::text IS NOT NULL THEN stats END AS stats,
+                   prydwen_name, source, url, data_fetched_at, count(*) OVER () AS total
+            FROM equipment
+            WHERE (%(slot)s::text IS NULL OR slot ILIKE regexp_replace(%(slot)s, 's$', ''))
               AND (%(rarity)s::text IS NULL OR rarity ILIKE %(rarity)s)
-            ORDER BY name LIMIT 300
+              AND (%(name)s::text IS NULL OR {NAME_MATCH}
+                   OR {_name_match("prydwen_name")})
+            ORDER BY CASE WHEN %(name)s::text IS NOT NULL THEN word_similarity(%(name)s, name)
+                     END DESC NULLS LAST, name
+            LIMIT {LIST_LIMIT * 2}
             """,
-            {"slot": slot, "rarity": rarity},
+            {"slot": slot, "rarity": rarity, "name": name},
         )
 
     @mcp.tool()
@@ -460,7 +735,8 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
             SELECT url, title, page.data_fetched_at,
                    ts_headline('english', body, q,
                        'MaxFragments=3, MaxWords=40, MinWords=10') AS excerpt
-            FROM document JOIN page USING (url), websearch_to_tsquery('english', %(q)s) q
+            FROM prydwen.document JOIN prydwen.page USING (url),
+                 websearch_to_tsquery('english', %(q)s) q
             WHERE search @@ q
             ORDER BY ts_rank(search, q) DESC LIMIT %(limit)s
             """,
@@ -471,28 +747,169 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
     async def get_page(url: str) -> dict | None:
         """Full text of one scraped Prydwen page, by URL from search_guides or lookup."""
         rows = await _query(
-            "SELECT url, title, body, page.data_fetched_at FROM document JOIN page USING (url)"
-            " WHERE url = %(url)s",
+            "SELECT url, title, body, page.data_fetched_at"
+            " FROM prydwen.document JOIN prydwen.page USING (url) WHERE url = %(url)s",
             {"url": url},
         )
         return rows[0] if rows else None
 
     @mcp.tool()
     async def data_status() -> dict:
-        """Freshness of the data: page counts, oldest and newest fetch times, and pages whose
-        latest version failed to parse (their previous data is still served)."""
+        """Freshness of each source. prydwen: page counts, oldest and newest fetch times, and
+        pages whose latest version failed to parse. e7bot: when the served game data was
+        fetched, and the last attempt with its error. Failed fetches never replace served
+        data."""
         summary = await _query(
             """
             SELECT count(*) AS pages, min(data_fetched_at) AS oldest_data,
                    max(fetched_at) AS last_fetch,
                    count(*) FILTER (WHERE parse_error IS NOT NULL) AS pages_with_errors
-            FROM page
+            FROM prydwen.page
             """
         )
         errors = await _query(
-            "SELECT url, parse_error FROM page WHERE parse_error IS NOT NULL ORDER BY url"
+            "SELECT url, parse_error FROM prydwen.page WHERE parse_error IS NOT NULL ORDER BY url"
         )
-        return summary[0] | {"errors": errors}
+        e7bot = await _query(
+            """
+            SELECT (SELECT max(fetched_at) FROM e7bot.document) AS data_fetched_at,
+                   (SELECT count(*) FROM e7bot.save) AS leaderboard_saves,
+                   latest.finished_at AS last_attempt, latest.ok AS last_attempt_ok,
+                   latest.error
+            FROM (SELECT 1) one
+            LEFT JOIN LATERAL (
+                SELECT * FROM e7bot.run ORDER BY started_at DESC LIMIT 1
+            ) latest ON true
+            """
+        )
+        return {"prydwen": summary[0] | {"errors": errors}, "e7bot": e7bot[0]}
+
+    @mcp.tool()
+    async def plan_deck(character: str) -> dict | None:
+        """Plan the one character's deck to build this Chaos run (players build one per run;
+        copy events are too rare for two). Uses the newest leaderboard season's Save Data decks
+        and Prydwen's guide decks and ratings. cards: each card the decks use, best first, with
+        category, cost and color, and per version (base or Epiphany I-V) Prydwen's rating, the
+        share of leaderboard decks taking it, how many Prydwen decks list it, and common Divine
+        Epiphanies. removals: up to 5 starting cards the decks drop (a deck can remove at most
+        5), with the share of decks that drop each; the Ego skill is never one. equipment: each
+        item with its slot, the share of leaderboard decks wearing it, and how many Prydwen
+        decks list it. Names are the game's; use get_card for card text."""
+        found = await _find_character(character)
+        if found is None:
+            return None
+        slug = {"slug": found["slug"]}
+        season_rows = await _query(
+            "SELECT max(season) AS season, count(*) AS decks FROM leaderboard_deck"
+            " WHERE character_slug = %(slug)s"
+            " AND season = (SELECT max(season) FROM leaderboard_entry)",
+            slug,
+        )
+        season = season_rows[0].get("season") if season_rows else None
+        params = slug | {"season": season}
+        cards = await _query(PLAN_CARDS_SQL, params)
+        removals = await _query(PLAN_REMOVALS_SQL, params)
+        equipment = await _query(PLAN_EQUIPMENT_SQL, params)
+        decks = await _query(
+            "SELECT name, partner, equipment, fragments, cards, notes, url FROM deck"
+            " WHERE character_slug = %(slug)s",
+            slug,
+        )
+        plan = {
+            "character": found["name"],
+            "season": season,
+            "leaderboard_decks": season_rows[0].get("decks", 0) if season_rows else 0,
+            "prydwen_decks": decks,
+            "cards": cards,
+            "removals": removals,
+            "equipment": equipment,
+        }
+        if not cards:
+            plan["note"] = (
+                "No leaderboard or Prydwen deck uses this character yet, so there is nothing"
+                " to plan from."
+            )
+        return plan
+
+    @mcp.tool()
+    async def get_encounter(name: str, chaos: str | None = None) -> dict | None:
+        """The best-matching Chaos event (question-mark node) by name, with every stage it can
+        reach. stages: each stage's answers with requirements, what each gives (rewards:
+        outcome success or failure for dice answers, class copy, removal, epiphany,
+        divine_epiphany, equipment, card or other, and text), and leads_to, the stage that
+        answer opens. The event starts at stage 1; some events start at a random one of
+        several stages that no answer leads to. chaos (typos tolerated) narrows to events that
+        can appear in that Chaos."""
+        params = {"name": name, "chaos": await _resolve_chaos(chaos)}
+        found = await _query(ENCOUNTER_MATCH_SQL, params)
+        if not found:
+            return None
+        options = await _query(
+            "SELECT stage, text, requirements, rewards, reward_classes, leads_to"
+            " FROM encounter_option WHERE encounter_id = %(id)s ORDER BY stage, position",
+            {"id": found[0]["id"]},
+        )
+        stages: dict[int, list[dict]] = {}
+        for option in options:
+            stages.setdefault(option.pop("stage"), []).append(option)
+        event = found[0]
+        del event["id"]
+        return event | {
+            "stages": [{"stage": n, "answers": answers} for n, answers in stages.items()]
+        }
+
+    @mcp.tool()
+    async def list_encounters(
+        chaos: str | None = None,
+        reward: Literal["copy", "removal", "epiphany", "divine_epiphany", "equipment", "card"]
+        | None = None,
+    ) -> dict:
+        """Chaos events, optionally only those that can appear in one Chaos (by name, typos
+        tolerated; lookup kind chaos lists the names) and those with an answer giving one
+        reward class. Events offering card copies come first, then removals, since those
+        decide a one-character deck. Each row names the answers (with their stage) that give
+        the requested class (or copies and removals). total counts every match, and note says
+        when results shows only part of them. An unknown Chaos name is an error that lists the
+        known ones."""
+        return await _listing(
+            LIST_ENCOUNTERS_SQL, {"chaos": await _resolve_chaos(chaos), "reward": reward}
+        )
+
+    @mcp.tool()
+    async def list_divine_epiphanies(
+        card_type: str | None = None, cost: int | None = None, god: str | None = None
+    ) -> dict:
+        """Divine Epiphanies that can be added to a card: optionally only those that apply to a
+        card type (Attack, Skill, Upgrade) and a card cost, or that a god offers (Vitor,
+        Caligo, Circen, Diallos, Nihilum, Secred). Each has its effect text, the card types and
+        cost range it applies to (applies_to), and the gods that offer it. total counts every
+        match, and note says when results shows only part of them."""
+        return await _listing(
+            f"""
+            SELECT text, {DIVINE_SUMMARY} AS applies_to, gods, rarities, url,
+                   data_fetched_at, count(*) OVER () AS total
+            FROM divine_epiphany
+            WHERE (%(type)s::text IS NULL OR card_types = '{{}}'
+                   OR %(type)s ILIKE ANY (card_types))
+              AND (%(cost)s::int IS NULL OR %(cost)s BETWEEN cost_min AND cost_max
+                   OR cost_min IS NULL)
+              AND (%(god)s::text IS NULL OR %(god)s ILIKE ANY (gods))
+            ORDER BY text, applies_to
+            LIMIT {LIST_LIMIT * 2}
+            """,
+            {"type": card_type, "cost": cost, "god": god},
+        )
+
+    async def _resolve_chaos(name: str | None) -> str | None:
+        """The Chaos name the data uses for name; an unknown name raises an error listing the
+        known ones, so a wrong name never silently yields only the any-Chaos events."""
+        if name is None:
+            return None
+        found = await _query(CHAOS_MATCH_SQL, {"name": name})
+        if found:
+            return found[0]["name"]
+        known = [row["name"] for row in await _query("SELECT name FROM chaos ORDER BY name")]
+        raise ToolError(f"Unknown Chaos {name!r}. Known: {', '.join(known)}")
 
     return mcp
 

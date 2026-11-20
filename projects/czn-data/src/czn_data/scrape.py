@@ -96,9 +96,9 @@ def fetch_portraits(
         url
         for (url,) in conn.execute(
             """
-            SELECT DISTINCT image_url FROM character
+            SELECT DISTINCT image_url FROM prydwen.character
             WHERE image_url IS NOT NULL
-              AND image_url NOT IN (SELECT image_url FROM portrait)
+              AND image_url NOT IN (SELECT image_url FROM prydwen.portrait)
             ORDER BY image_url
             """
         )
@@ -117,7 +117,7 @@ def fetch_portraits(
             result.pages["fetch_error"] += 1
             continue
         conn.execute(
-            "INSERT INTO portrait (image_url, image, fetched_at) VALUES (%s, %s, %s)",
+            "INSERT INTO prydwen.portrait (image_url, image, fetched_at) VALUES (%s, %s, %s)",
             (url, image, datetime.now(UTC)),
         )
 
@@ -125,7 +125,7 @@ def fetch_portraits(
 def reparse(conn: psycopg.Connection, allow_shrink: bool) -> RunResult:
     """Parse the stored HTML again, for example after fixing a parser. Fetches nothing."""
     result = RunResult()
-    pages = conn.execute("SELECT url, html, fetched_at FROM page ORDER BY url").fetchall()
+    pages = conn.execute("SELECT url, html, fetched_at FROM prydwen.page ORDER BY url").fetchall()
     for url, html, fetched_at in pages:
         _process(conn, url, html, fetched_at, allow_shrink, result)
     return result

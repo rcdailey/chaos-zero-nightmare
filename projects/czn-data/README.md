@@ -1,21 +1,51 @@
 # czn-data
 
-Scrapes the Chaos Zero Nightmare pages on [prydwen.gg](https://www.prydwen.gg/chaos-zero-nightmare)
-into Postgres and serves the data to Claude (or any MCP client) through an MCP server.
+Collects Chaos Zero Nightmare data from two sources into Postgres and serves it to Claude (or any
+MCP client) through an MCP server:
 
-One container image (`ghcr.io/rcdailey/czn-data`) runs both workloads:
+- [wiki.e7bot.top](https://wiki.e7bot.top/#/czn/cards) serves the game's own data: characters,
+  cards and every Epiphany version, potentials, partners, equipment, memory fragment sets,
+  keywords, Chaos events (question-mark nodes) with every answer, Divine Epiphanies, and the
+  current Chaos leaderboard with each ranked character's saved deck.
+- [prydwen.gg](https://www.prydwen.gg/chaos-zero-nightmare) supplies the opinions: ratings,
+  reviews, per-character guides (teams, decks, equipment, fragment and partner rankings,
+  synergies), and guide pages.
 
-- `czn-data scrape`: run on a schedule (a daily Kubernetes CronJob). A run takes about 20 minutes
-  because it waits 10 seconds between requests, as Prydwen's robots.txt asks.
+Each scrape only collects its source, in that source's own shape (schemas `e7bot` and
+`prydwen`). A build step then merges both into the tables the MCP server reads (schema
+`public`). Where both sources describe the same fact, e7bot's value wins; Prydwen fills only the
+fields and records e7bot lacks, such as a character Prydwen covers first. Every merged row has
+`source` (`e7bot` or `prydwen`), `url`, and `data_fetched_at`; Prydwen opinions on it link to
+`prydwen_url`.
+
+One container image (`ghcr.io/rcdailey/czn-data`) runs every workload:
+
+- `czn-data scrape-e7bot`: run on a schedule (a daily Kubernetes CronJob), then builds. It
+  makes 4 requests at a time, each worker pausing one second between requests. A run fetches
+  the 11 list and diff documents; the 445 character and event details only when e7bot's diff
+  timestamp shows new game data, or once a week (about 2 minutes then). Leaderboard saves never
+  change, so each is fetched once; the first run fetches about 1,300 (about 6 minutes).
+- `czn-data scrape`: the Prydwen scrape, on its own daily CronJob, then builds. A run takes
+  about 20 minutes because it waits 10 seconds between requests, as Prydwen's robots.txt asks.
+- `czn-data build`: merges the stored sources again without fetching anything.
 - `czn-data enrich`: derives data from what the scrape stored (character gender), without
   contacting Prydwen. Run it on its own schedule (a second CronJob), such as an hour after the
-  scrape. A run that finds nothing new exits in seconds.
+  scrape. A run that finds nothing new exits in seconds. It then builds, so new tags reach the
+  merged tables at once.
 - `czn-data serve`: the MCP server (a Deployment), listening on port 8000.
-- `czn-data migrate`: upgrades the database schema, then exits. `scrape`, `reparse`, and
-  `enrich` run it first on their own. Run it as an init container of the server Deployment,
-  with the scraper's database credentials, so a new image never serves an old schema.
+- `czn-data migrate`: upgrades the database schema, then exits. Every other command except
+  `serve` runs it first on its own. Run it as an init container of the server Deployment, with
+  the scraper's database credentials, so a new image never serves an old schema.
 
-## What gets stored
+## What gets stored from e7bot
+
+e7bot's API is undocumented. Its responses are AES-encrypted with a key in the site's public
+JavaScript; `czn_data.e7bot` decrypts them and stores each response's data as received. Game
+text keeps the game's markup until the build turns it into plain text. Player names and IDs on
+the leaderboard are not stored. e7bot shows no Epiphanies that partners unlock, so those are in
+neither source.
+
+## What gets stored from Prydwen
 
 The scraper finds every page through robots.txt and the sitemaps, saves its HTML, and parses it:
 
@@ -25,7 +55,8 @@ The scraper finds every page through robots.txt and the sitemaps, saves its HTML
   season tab, fragment and partner rankings, synergies, and the prose sections (pros, cons,
   introduction, stats, and so on).
 - Each character's card art (about 30 KB per image), fetched once per image URL.
-- Character gender, female or male, set by `enrich`. Prydwen does not state it, so `enrich` runs
+- Character gender, female or male, set by `enrich` for characters e7bot lacks (e7bot states
+  every other character's gender). Prydwen does not state it, so `enrich` runs
   the WD14 anime image tagger (`SmilingWolf/wd-swinv2-tagger-v3`) on each stored card art: a
   `1girl` score of at least 0.5 is female, anything else male. Each image is tagged once. Only a
   run that finds untagged art uses the model: it downloads the newest revision of the 467 MB
@@ -42,7 +73,18 @@ unlocks for its character's cards. Fates, events, bosses, and shops are not on P
 
 ## How failures are handled
 
-A page's rows are replaced only when its new HTML parses cleanly. If parsing fails, or a page
+An e7bot run replaces the stored responses only when every path fetched, decrypted, and kept
+its expected fields, and no list shrank by more than 20%. Otherwise the previous responses stay,
+the MCP keeps serving them, and the run fails; `czn-data scrape-e7bot --allow-shrink` accepts a
+real removal. A leaderboard save that fails is tried again next run.
+
+The build fails, and the previous merged tables stay, when e7bot holds a value it cannot map
+(such as a new element). It matches Prydwen records to e7bot records by name (case, quote
+characters, and close spellings are tolerated). A Prydwen card row on a character e7bot knows
+that matches no e7bot card is still served, marked `prydwen`, and counted in
+`czn_build_unmatched{entity="card"}`.
+
+A Prydwen page's rows are replaced only when its new HTML parses cleanly. If parsing fails, or a page
 suddenly yields more than 20% fewer rows of a kind, the previous rows stay and the run fails. The
 new HTML is saved anyway, so after a parser fix `czn-data reparse` rebuilds the rows without
 fetching the site. If Prydwen really removed content, run `czn-data reparse --allow-shrink`.
@@ -71,7 +113,15 @@ Every series also carries the OTLP resource attributes as labels, such as `servi
 - `czn_scrape_pages{result}`: pages per result (`ok`, `fetch_error`, `parse_error`). Card
   images that fail to download also count as `fetch_error`.
 - `czn_scrape_validation_failures{kind,field}`: page kind and field that stopped parsing.
-- `czn_data_rows{table}`: rows per table after the run.
+- `czn_data_rows{table}`: rows per table after the run (Prydwen tables from the scrape, merged
+  tables from the build).
+
+The e7bot scrape sends the same kind of series under `czn_e7bot_`: `success`,
+`last_success_timestamp_seconds`, `last_run_timestamp_seconds`, `duration_seconds`, `blocked`,
+`requests{result}` (`ok`, `fetch_error`, `invalid`), and `validation_failures{field}`.
+
+Every job that builds also sends `czn_build_success`, `czn_build_last_run_timestamp_seconds`,
+and `czn_build_unmatched{entity}`.
 
 The enrich job sends its own series the same way. It exits non-zero when any row fails, and the
 failed rows are tried again on the next run:

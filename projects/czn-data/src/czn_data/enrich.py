@@ -34,8 +34,8 @@ def tag_genders(conn: psycopg.Connection, gender: Callable[[bytes], str], result
     """Assign a gender to every stored portrait that has none yet (see ``czn_data.gender``)."""
     portraits = conn.execute(
         """
-        SELECT image_url, image FROM portrait
-        WHERE image_url NOT IN (SELECT image_url FROM portrait_gender)
+        SELECT image_url, image FROM prydwen.portrait
+        WHERE image_url NOT IN (SELECT image_url FROM prydwen.portrait_gender)
         ORDER BY image_url
         """
     ).fetchall()
@@ -53,7 +53,8 @@ def tag_genders(conn: psycopg.Connection, gender: Callable[[bytes], str], result
             result.failures["gender"] += 1
             continue
         conn.execute(
-            "INSERT INTO portrait_gender (image_url, gender, tagged_at) VALUES (%s, %s, %s)",
+            "INSERT INTO prydwen.portrait_gender (image_url, gender, tagged_at)"
+            " VALUES (%s, %s, %s)",
             (url, assigned, datetime.now(UTC)),
         )
 

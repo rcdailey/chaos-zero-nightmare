@@ -36,10 +36,10 @@ def test_database_from_before_migrations_keeps_its_pages_and_gets_rebuilt_rows(d
     migrate(database_url)
 
     with psycopg.connect(database_url) as conn:
-        assert conn.execute("SELECT count(*) FROM page").fetchone() == (1,)
-        names = {row[0] for row in conn.execute("SELECT name FROM card")}
+        assert conn.execute("SELECT count(*) FROM prydwen.page").fetchone() == (1,)
+        names = {row[0] for row in conn.execute("SELECT name FROM prydwen.card")}
         assert "Rising Dragon Spire" in names
-        (title,) = conn.execute("SELECT title FROM document").fetchone()
+        (title,) = conn.execute("SELECT title FROM prydwen.document").fetchone()
         assert title == "Mei Lin"
 
 

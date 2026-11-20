@@ -1,8 +1,11 @@
 # Game data investigation
 
 Investigation from November 2026 into adding data from CZN's own game files to `czn-data`, next to
-the Prydwen scrape. Nothing from it is implemented yet. The probe scripts and downloads lived in a
-temp directory and are not in the repository; the formats they relied on are recorded below.
+the Prydwen scrape. Nothing from it is implemented. `czn-data` now takes game facts from
+wiki.e7bot.top instead, which serves the same game tables as JSON (see `projects/czn-data`);
+reading the game files directly would remove that dependency. The probe scripts and downloads
+lived in a temp directory and are not in the repository; the formats they relied on are recorded
+below.
 
 ## Goal and requirements
 

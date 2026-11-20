@@ -10,6 +10,7 @@ requires-python = ">=3.14"
 dependencies = [
     "alembic>=1.20.1",
     "beautifulsoup4>=4.15",
+    "cryptography>=50",
     "curl-cffi>=0.17",
     "lxml>=6.1",
     "mcp>=2.3",

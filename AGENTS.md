@@ -1,6 +1,5 @@
 # Repository Rules
 
-- MUST NOT run acceptance audits; this repository is exempt from every audit trigger.
 - Work in the current checkout on `main`. MUST NOT create worktrees or feature branches.
 - Pushing `main` deploys: `projects/czn-tools` to GitHub Pages, and `projects/czn-data` as the
   `latest` image the cluster runs.

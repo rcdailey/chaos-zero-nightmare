@@ -1,8 +1,5 @@
 {
   "$schema": "https://opencode.ai/config.json",
-  "permissions": [
-    { "action": "subagent", "resource": "acceptance", "effect": "deny" },
-  ],
   "mcp": {
     "servers": {
       "czn-data": {

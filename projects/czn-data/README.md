@@ -23,22 +23,23 @@ lacks, such as a character Prydwen covers first. Every merged row has `source` (
 
 One container image (`ghcr.io/rcdailey/czn-data`) runs every workload:
 
-- `czn-data scrape-e7bot`: run on a schedule (a daily Kubernetes CronJob), then builds. It
-  makes 4 requests at a time, each worker pausing one second between requests. A run fetches
+- `czn-data daily`: the scheduled run (a daily Kubernetes CronJob). It runs the three scrapes
+  below at once, then `enrich`, then one build, so a run takes about as long as the Prydwen
+  scrape. A failed step fails the run but never stops a later one; enrich and the build then use
+  the last good data of that source. Each scrape and enrich also runs on its own (for a manual
+  rerun after a failure), and then builds.
+- `czn-data scrape-e7bot`: the e7bot scrape. It makes 4 requests at a time, each worker pausing one second between requests. A run fetches
   the 11 list and diff documents; the 445 character and event details only when e7bot's diff
   timestamp shows new game data, or once a week (about 2 minutes then). Leaderboard saves never
   change, so each is fetched once; the first run fetches about 1,300 (about 6 minutes).
-- `czn-data scrape`: the Prydwen scrape, on its own daily CronJob, then builds. A run takes
-  about 20 minutes because it waits 10 seconds between requests, as Prydwen's robots.txt asks.
-- `czn-data scrape-stove`: the Stove scrape, on its own daily CronJob so a Stove failure never
-  fails the other scrapes, then builds. It pauses one second between requests. Board lists are
+- `czn-data scrape`: the Prydwen scrape. A run takes about 20 minutes because it waits 10
+  seconds between requests, as Prydwen's robots.txt asks.
+- `czn-data scrape-stove`: the Stove scrape. It pauses one second between requests. Board lists are
   read every run; a post is fetched only when its edit time changed (about 120 posts, 2 minutes,
   on an empty database; seconds after).
 - `czn-data build`: merges the stored sources again without fetching anything.
-- `czn-data enrich`: derives data from what the scrape stored (character gender), without
-  contacting Prydwen. Run it on its own schedule (a second CronJob), such as an hour after the
-  scrape. A run that finds nothing new exits in seconds. It then builds, so new tags reach the
-  merged tables at once.
+- `czn-data enrich`: derives data from what the Prydwen scrape stored (character gender),
+  without contacting Prydwen. A run that finds nothing new exits in seconds.
 - `czn-data serve`: the MCP server (a Deployment), listening on port 8000.
 - `czn-data migrate`: upgrades the database schema, then exits. Every other command except
   `serve` runs it first on its own. Run it as an init container of the server Deployment, with
@@ -159,10 +160,10 @@ The e7bot scrape sends the same kind of series under `czn_e7bot_`: `success`,
 scrape sends the same series under `czn_stove_`, plus `articles{result}` (`fetched`,
 `unchanged`, `removed`).
 
-Every job that builds also sends `czn_build_success`, `czn_build_last_run_timestamp_seconds`,
+Every command that builds also sends `czn_build_success`, `czn_build_last_run_timestamp_seconds`,
 and `czn_build_unmatched{entity}`.
 
-The enrich job sends its own series the same way. It exits non-zero when any row fails, and the
+Enrich sends its own series the same way. It exits non-zero when any row fails, and the
 failed rows are tried again on the next run:
 
 - `czn_enrich_success`, `czn_enrich_last_success_timestamp_seconds`,
@@ -173,9 +174,10 @@ failed rows are tried again on the next run:
 
 Environment variables:
 
-- `DATABASE_URL` (all): Postgres URL. `migrate`, the scrapes, and `enrich` need the database
-  owner; the server needs `SELECT` only.
-- `OTEL_EXPORTER_OTLP_ENDPOINT` or `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` (scrapes, enrich):
+- `DATABASE_URL` (all): Postgres URL. Every command except `serve` needs the database owner;
+  the server needs `SELECT` only.
+- `OTEL_EXPORTER_OTLP_ENDPOINT` or `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` (all but `serve` and
+  `migrate`):
   OTLP/HTTP receiver, such as `http://otel-gateway-collector.observability:4318`. With neither
   set, no metrics are sent. The other standard variables also apply: `OTEL_SERVICE_NAME`,
   `OTEL_RESOURCE_ATTRIBUTES`, `OTEL_EXPORTER_OTLP_HEADERS`, `OTEL_EXPORTER_OTLP_TIMEOUT`, and
@@ -187,9 +189,9 @@ Environment variables:
 - `OIDC_AUDIENCE` (serve): expected `aud` claim. Defaults to `MCP_PUBLIC_URL`.
 - `OIDC_REQUIRED_SCOPES` (serve): space-separated scopes every token must carry. Defaults to none.
 - `MCP_ALLOW_UNAUTHENTICATED` (serve): `true` runs without auth, for local use.
-- `CZN_TAGGER_DIR` (enrich): writable directory, kept across runs (such as a PVC of at least
-  1 GB), where the portrait tagger stores its model. Without it, new characters get no gender
-  and the run fails. The scrape job does not need it.
+- `CZN_TAGGER_DIR` (daily, enrich): writable directory, kept across runs (such as a PVC of at
+  least 1 GB), where the portrait tagger stores its model. Without it, new characters get no
+  gender and the run fails. The scrape commands do not need it.
 - `FASTEMBED_CACHE_PATH` (build, serve): where the search embedding model is kept. The image
   ships the model there and sets `HF_HUB_OFFLINE=1`; outside it, the model downloads on first
   use.

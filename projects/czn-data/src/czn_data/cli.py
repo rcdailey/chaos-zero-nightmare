@@ -1,5 +1,6 @@
 """Command line entry point:
-``czn-data scrape | scrape-e7bot | scrape-stove | reparse | build | enrich | migrate | serve``.
+``czn-data daily | scrape | scrape-e7bot | scrape-stove | reparse | build | enrich | migrate |
+serve``.
 
 Configuration comes from environment variables, documented in the project README.
 """
@@ -10,6 +11,8 @@ import logging
 import os
 import sys
 import time
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 
 import psycopg
@@ -38,6 +41,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(prog="czn-data")
     commands = parser.add_subparsers(dest="command", required=True)
     for name, help_text in (
+        ("daily", "run every scrape in parallel, then enrich, then build the merged tables"),
         ("scrape", "fetch every Prydwen CZN page, then build the merged tables"),
         ("scrape-e7bot", "fetch e7bot's CZN game data, then build the merged tables"),
         ("scrape-stove", "fetch the official Stove posts, then build the merged tables"),
@@ -78,15 +82,55 @@ def main() -> None:
     migrate(os.environ["DATABASE_URL"])
     if args.command == "migrate":
         return
-    if args.command == "enrich":
-        sys.exit(_run_enrich())
+    if args.command == "daily":
+        sys.exit(_run_daily(args.allow_shrink))
     if args.command == "build":
-        sys.exit(_run_build())
-    if args.command == "scrape-e7bot":
-        sys.exit(_run_e7bot(args.allow_shrink))
-    if args.command == "scrape-stove":
-        sys.exit(_run_stove(args.allow_shrink))
-    sys.exit(_run_job(args.command, args.allow_shrink))
+        sys.exit(0 if _guarded(_build_step) else 1)
+    steps = {
+        "enrich": _enrich,
+        "scrape-e7bot": lambda: _scrape_e7bot(args.allow_shrink),
+        "scrape-stove": lambda: _scrape_stove(args.allow_shrink),
+        "scrape": lambda: _prydwen("scrape", args.allow_shrink),
+        "reparse": lambda: _prydwen("reparse", args.allow_shrink),
+    }
+    sys.exit(_then_build(steps[args.command]))
+
+
+def _then_build(step: Callable[[], bool]) -> int:
+    """Exit code of ``step`` followed by a build, for the commands that run one source."""
+    ok = _guarded(step)
+    return 0 if _build_step() and ok else 1
+
+
+def _run_daily(allow_shrink: bool) -> int:
+    """The scheduled run: every scrape at once, then enrich, then one build.
+
+    The scrapes write disjoint schemas and fetch different sites, so they share nothing. Enrich
+    tags the card art the Prydwen scrape stores, and the build merges all of it, so both wait.
+    A failed step fails the run but never stops a later one, which then uses the last good data.
+    """
+    scrapes = (
+        lambda: _prydwen("scrape", allow_shrink),
+        lambda: _scrape_e7bot(allow_shrink),
+        lambda: _scrape_stove(allow_shrink),
+    )
+    with ThreadPoolExecutor(max_workers=len(scrapes)) as pool:
+        ok = all(list(pool.map(_guarded, scrapes)))
+    ok = _guarded(_enrich) and ok
+    return 0 if _build_step() and ok else 1
+
+
+def _guarded(step: Callable[[], bool]) -> bool:
+    """Run one step; an unexpected error fails it without stopping the steps after it."""
+    try:
+        return step()
+    except Exception:
+        logging.getLogger("czn_data").exception("step crashed")
+        return False
+
+
+def _connect() -> psycopg.Connection:
+    return psycopg.connect(os.environ["DATABASE_URL"], autocommit=True)
 
 
 def _build(conn: psycopg.Connection):
@@ -100,51 +144,48 @@ def _build(conn: psycopg.Connection):
         return None
 
 
-def _run_build() -> int:
+def _build_step() -> bool:
     from .build import export_metrics
 
     started = time.time()
-    with psycopg.connect(os.environ["DATABASE_URL"], autocommit=True) as conn:
+    with _connect() as conn:
         result = _build(conn)
-    return 0 if result is not None and _export(lambda: export_metrics(result, started)) else 1
+    exported = _export(lambda: export_metrics(result, started))
+    return result is not None and exported
 
 
-def _run_e7bot(allow_shrink: bool) -> int:
-    from . import build, e7bot
+def _scrape_e7bot(allow_shrink: bool) -> bool:
+    from . import e7bot
 
     log = logging.getLogger("czn_data")
     started = time.time()
     log.info("run started", extra={"command": "scrape-e7bot"})
-    with psycopg.connect(os.environ["DATABASE_URL"], autocommit=True) as conn:
+    with _connect() as conn:
         client = e7bot.Client(e7bot.threaded_get())
         result = e7bot.scrape_e7bot(conn, client, allow_shrink)
-        built = _build(conn)
-        log.info(
-            "run finished",
-            extra={
-                "command": "scrape-e7bot",
-                "ok": result.ok,
-                "requests": dict(result.requests),
-                "blocked": result.blocked,
-                "validation_failures": dict(result.validation_failures),
-            },
-        )
-        exported = _export(lambda: e7bot.export_metrics(result, started))
-    exported = _export(lambda: build.export_metrics(built, started)) and exported
-    return 0 if result.ok and built is not None and exported else 1
+    log.info(
+        "run finished",
+        extra={
+            "command": "scrape-e7bot",
+            "ok": result.ok,
+            "requests": dict(result.requests),
+            "blocked": result.blocked,
+            "validation_failures": dict(result.validation_failures),
+        },
+    )
+    return _export(lambda: e7bot.export_metrics(result, started)) and result.ok
 
 
-def _run_stove(allow_shrink: bool) -> int:
-    from . import build, stove
+def _scrape_stove(allow_shrink: bool) -> bool:
+    from . import stove
     from .fetch import Fetcher
 
     log = logging.getLogger("czn_data")
     started = time.time()
     log.info("run started", extra={"command": "scrape-stove"})
-    with psycopg.connect(os.environ["DATABASE_URL"], autocommit=True) as conn:
+    with _connect() as conn:
         client = stove.Client(Fetcher(delay=stove.DELAY_SECONDS).get)
         result = stove.scrape_stove(conn, client, allow_shrink)
-        built = _build(conn)
     log.info(
         "run finished",
         extra={
@@ -156,9 +197,7 @@ def _run_stove(allow_shrink: bool) -> int:
             "validation_failures": dict(result.validation_failures),
         },
     )
-    exported = _export(lambda: stove.export_metrics(result, started))
-    exported = _export(lambda: build.export_metrics(built, started)) and exported
-    return 0 if result.ok and built is not None and exported else 1
+    return _export(lambda: stove.export_metrics(result, started)) and result.ok
 
 
 def _export(send) -> bool:
@@ -169,7 +208,7 @@ def _export(send) -> bool:
         return False
 
 
-def _run_enrich() -> int:
+def _enrich() -> bool:
     from .enrich import EnrichResult, export_metrics, tag_genders
     from .gender import Tagger
 
@@ -177,30 +216,23 @@ def _run_enrich() -> int:
     started = time.time()
     log.info("run started", extra={"command": "enrich"})
     result = EnrichResult()
-    from .build import export_metrics as build_metrics
-
-    with psycopg.connect(os.environ["DATABASE_URL"], autocommit=True) as conn:
+    with _connect() as conn:
         tag_genders(conn, Tagger().gender, result)
-        # Merged characters that only Prydwen has take their gender from the tags.
-        built = _build(conn)
     log.info(
         "run finished",
         extra={"command": "enrich", "ok": result.ok, "failures": dict(result.failures)},
     )
-    exported = _export(lambda: export_metrics(result, started))
-    exported = _export(lambda: build_metrics(built, started)) and exported
-    return 0 if result.ok and built is not None and exported else 1
+    return _export(lambda: export_metrics(result, started)) and result.ok
 
 
-def _run_job(command: str, allow_shrink: bool) -> int:
-    from .build import export_metrics as build_metrics
+def _prydwen(command: str, allow_shrink: bool) -> bool:
     from .fetch import Fetcher
     from .scrape import export_metrics, fetch_portraits, reparse, scrape
 
     log = logging.getLogger("czn_data")
     started = time.time()
     log.info("run started", extra={"command": command})
-    with psycopg.connect(os.environ["DATABASE_URL"], autocommit=True) as conn:
+    with _connect() as conn:
         if command == "scrape":
             fetcher = Fetcher()
             result = scrape(conn, fetcher.get, allow_shrink)
@@ -208,7 +240,6 @@ def _run_job(command: str, allow_shrink: bool) -> int:
                 fetch_portraits(conn, fetcher.get_bytes, result)
         else:
             result = reparse(conn, allow_shrink)
-        built = _build(conn)
         log.info(
             "run finished",
             extra={
@@ -225,5 +256,4 @@ def _run_job(command: str, allow_shrink: bool) -> int:
         exported = True
         if command == "scrape":
             exported = _export(lambda: export_metrics(conn, result, started))
-    exported = _export(lambda: build_metrics(built, started)) and exported
-    return 0 if result.ok and built is not None and exported else 1
+    return exported and result.ok

@@ -1,4 +1,4 @@
-# One image for both workloads: `czn-data scrape` (CronJob) and `czn-data serve` (Deployment).
+# One image for both workloads: `czn-data daily` (CronJob) and `czn-data serve` (Deployment).
 FROM ghcr.io/astral-sh/uv:0.13-python3.14-trixie-slim AS build
 ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy UV_PYTHON_DOWNLOADS=never
 WORKDIR /app

@@ -18,6 +18,8 @@ import pytest
 import yaml
 
 from czn_data import enrich, store, stove
+from czn_data.cli import main
+from czn_data.fetch import FetchFailed
 from czn_data.scrape import RunResult, export_metrics
 
 ALERTS = yaml.safe_load((Path(__file__).parents[1] / "deploy" / "alerts.yaml").read_text())
@@ -187,6 +189,29 @@ def test_stove_alert_fires_on_bad_run_and_resolves_after_good_run(vm, monkeypatc
 
     export_stove_run(monkeypatch)
     assert not query(vm, ALERT_EXPRS[alert], expect_result=False), f"{alert} did not resolve"
+
+
+def test_daily_run_enriches_and_builds_after_failed_scrapes(conn, database_url, vm, monkeypatch):
+    class Unreachable:
+        def __init__(self, **_):
+            pass
+
+        def get(self, url: str) -> str:
+            raise FetchFailed(f"{url}: HTTP 503")
+
+    monkeypatch.setattr("czn_data.fetch.Fetcher", Unreachable)
+    monkeypatch.setattr("czn_data.e7bot.Fetcher", Unreachable)
+    monkeypatch.setenv("DATABASE_URL", database_url)
+    monkeypatch.setattr("sys.argv", ["czn-data", "daily"])
+
+    with pytest.raises(SystemExit) as exit_:
+        main()
+
+    assert exit_.value.code == 1
+    for source in ("scrape", "e7bot", "stove"):
+        assert query(vm, f"czn_{source}_success")[0]["value"][1] == "0", source
+    assert query(vm, "czn_enrich_success")[0]["value"][1] == "1"
+    assert query(vm, "czn_build_success")[0]["value"][1] == "1"
 
 
 def test_no_endpoint_configured_exports_nothing_without_error(conn, monkeypatch):

@@ -1,7 +1,7 @@
 """Post-processing: derive data from what the scrape stored, without contacting Prydwen.
 
-Runs as its own job (``czn-data enrich``), so a slow or failing step never affects the scrape,
-and can run again at any time. Each step processes only rows it has not processed yet; a row
+Runs after the scrapes in ``czn-data daily``, or alone as ``czn-data enrich``; it can run again
+at any time. Each step processes only rows it has not processed yet; a row
 that fails counts as a failure of that step and is tried again next run.
 """
 

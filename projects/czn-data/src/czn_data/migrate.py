@@ -1,6 +1,6 @@
 """Database migrations: bring the schema to the version this code expects.
 
-Both the scrape CronJob and the MCP server's init container run ``czn-data migrate`` before they
+Both the daily CronJob and the MCP server's init container run ``czn-data migrate`` before they
 start work, so whichever pod starts first with a new image upgrades the database. An advisory
 lock makes the second one wait, then find nothing to do.
 

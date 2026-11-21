@@ -33,17 +33,16 @@ fi
 service=app.dailey.czn.companion/app.dailey.czn.companion.overlay.OverlayService
 for serial in "${serials[@]}"; do
   adb -s "$serial" shell am start -n app.dailey.czn.companion/.MainActivity
-  # A reinstall leaves the overlay service enabled but unbound; toggling rebinds it. Lenovo ZUI
-  # refuses to start the app's process for a background bind, so the activity starts first.
-  sleep 3
+  # Android rebinds the still-enabled overlay service by itself after a reinstall. Where it is
+  # the only accessibility service (the Lenovo tablet), accessibility reads as off until then,
+  # which can take over a minute; toggling it rebinds at once. Devices with other services
+  # enabled keep accessibility on and are left alone, so their service list is never rewritten.
   enabled=$(adb -s "$serial" shell settings get secure enabled_accessibility_services | tr -d '\r')
-  if [[ $enabled == *"$service"* ]]; then
-    others=$(tr ':' '\n' <<<"$enabled" | awk -v s="$service" '$0 != s' | paste -sd:)
-    # "" reaches the device shell as an empty value.
-    adb -s "$serial" shell settings put secure enabled_accessibility_services "${others:-\"\"}"
+  on=$(adb -s "$serial" shell settings get secure accessibility_enabled | tr -d '\r')
+  if [[ $enabled == "$service" && $on == 0 ]]; then
+    adb -s "$serial" shell settings put secure enabled_accessibility_services '""'
     sleep 1
-    adb -s "$serial" shell settings put secure enabled_accessibility_services \
-      "${others:+$others:}$service"
+    adb -s "$serial" shell settings put secure enabled_accessibility_services "$service"
     adb -s "$serial" shell settings put secure accessibility_enabled 1
   fi
 done

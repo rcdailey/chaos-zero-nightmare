@@ -28,10 +28,11 @@ One container image (`ghcr.io/rcdailey/czn-data`) runs every workload:
   scrape. A failed step fails the run but never stops a later one; enrich and the build then use
   the last good data of that source. Each scrape and enrich also runs on its own (for a manual
   rerun after a failure), and then builds.
-- `czn-data scrape-e7bot`: the e7bot scrape. It makes 4 requests at a time, each worker pausing one second between requests. A run fetches
-  the 11 list and diff documents; the 445 character and event details only when e7bot's diff
-  timestamp shows new game data, or once a week (about 2 minutes then). Leaderboard saves never
-  change, so each is fetched once; the first run fetches about 1,300 (about 6 minutes).
+- `czn-data scrape-e7bot`: the e7bot scrape. It makes 4 requests at a time, each worker pausing one
+  second between requests. A run fetches the 11 list and diff documents; the 445 character and event
+  details only when e7bot's diff timestamp shows new game data, or once a week (about 2 minutes
+  then). Leaderboard saves never change, so each is fetched once; the first run fetches about 1,300
+  (about 6 minutes).
 - `czn-data scrape`: the Prydwen scrape. A run takes about 20 minutes because it waits 10
   seconds between requests, as Prydwen's robots.txt asks.
 - `czn-data scrape-stove`: the Stove scrape. It pauses one second between requests. Board lists are
@@ -71,13 +72,13 @@ The scraper finds every page through robots.txt and the sitemaps, saves its HTML
   run that finds untagged art uses the model: it downloads the newest revision of the 467 MB
   model from Hugging Face into `CZN_TAGGER_DIR` when the stored copy is missing or outdated,
   then loads it (about 1 GB of memory). If Hugging Face is unreachable, the stored copy is used.
-- Character appearance, for every character with card art, set by `enrich` with the same
-  tagger: visible traits scoring at least 0.35, most certain first, without framing, pose,
-  expression, or body tags. Key traits (hair color and style, eye color, eyewear, horns, ears,
-  weapons) are always kept; other tags (outfit, accessories) fill up to 15 in total. When no
-  hair color reaches 0.35, the best one is kept if it scores at least 0.15. Claude matches it against portraits on game screens, which show no names. Each image
-  is tagged once, so a change to the trait filter applies only to new art until the
-  `prydwen.portrait_appearance` rows are deleted.
+- Character appearance, for every character with card art, set by `enrich` with the same tagger:
+  visible traits scoring at least 0.35, most certain first, without framing, pose, expression, or
+  body tags. Key traits (hair color and style, eye color, eyewear, horns, ears, weapons) are always
+  kept; other tags (outfit, accessories) fill up to 15 in total. When no hair color reaches 0.35,
+  the best one is kept if it scores at least 0.15. Claude matches it against portraits on game
+  screens, which show no names. Each image is tagged once, so a change to the trait filter applies
+  only to new art until the `prydwen.portrait_appearance` rows are deleted.
 - `neutral-cards`, `equipment` (stats per level, drop source), `memory-fragments`, `partners`
   (passive, EGO skill, base stats), and `guides/effects-dictionary` (keyword and status
   definitions).

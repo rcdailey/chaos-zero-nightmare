@@ -181,17 +181,14 @@ def _section(root: Tag, heading: str) -> Tag | None:
 
 
 def _numbered_entries(section: Tag, field_prefix: str) -> list[dict]:
-    entries = []
-    for article in section.select("article.constellation-database-card"):
-        entries.append(
-            {
-                "label": _required_text(article.select_one(".mini-label"), f"{field_prefix}.label"),
-                "name": _required_text(article.select_one("h3"), f"{field_prefix}.name"),
-                "text": _required_text(
-                    article.select_one(".kit-description"), f"{field_prefix}.text"
-                ),
-            }
-        )
+    entries = [
+        {
+            "label": _required_text(article.select_one(".mini-label"), f"{field_prefix}.label"),
+            "name": _required_text(article.select_one("h3"), f"{field_prefix}.name"),
+            "text": _required_text(article.select_one(".kit-description"), f"{field_prefix}.text"),
+        }
+        for article in section.select("article.constellation-database-card")
+    ]
     if not entries and not section.select_one(".info-box"):  # .info-box: "added soon" notice
         raise ParseError(field_prefix, "section present but no entries parsed")
     return entries
@@ -466,16 +463,14 @@ def _texts(el: Tag, selector: str) -> list[str]:
 
 
 def _teams(section: Tag) -> list[dict]:
-    teams = []
-    for tile in section.select(".czn-team-tile"):
-        teams.append(
-            {
-                "name": _required_text(tile.select_one(".czn-team-name"), "team.name"),
-                "tier": text_of(tile.select_one(".czn-team-rating")) or None,
-                "members": _texts(tile, ".czn-team-members .emp-name"),
-            }
-        )
-    return teams
+    return [
+        {
+            "name": _required_text(tile.select_one(".czn-team-name"), "team.name"),
+            "tier": text_of(tile.select_one(".czn-team-rating")) or None,
+            "members": _texts(tile, ".czn-team-members .emp-name"),
+        }
+        for tile in section.select(".czn-team-tile")
+    ]
 
 
 def _decks(section: Tag) -> list[dict]:
@@ -775,15 +770,14 @@ def parse_partners(html: str) -> dict[str, list[dict]]:
 
 
 def parse_effects(root: Tag, url: str) -> dict[str, list[dict]]:
-    effects = []
-    for row in root.select("tr:has(td.pw-col-name)"):
-        effects.append(
-            {
-                "name": _required_text(row.select_one(".pw-col-name"), "effect.name"),
-                "type": text_of(row.select_one(".pw-col-type")) or None,
-                "description": _required_text(row.select_one(".pw-col-desc"), "effect.description"),
-            }
-        )
+    effects = [
+        {
+            "name": _required_text(row.select_one(".pw-col-name"), "effect.name"),
+            "type": text_of(row.select_one(".pw-col-type")) or None,
+            "description": _required_text(row.select_one(".pw-col-desc"), "effect.description"),
+        }
+        for row in root.select("tr:has(td.pw-col-name)")
+    ]
     if not effects:
         raise ParseError("effect", "no effects parsed")
     return {"effect": effects}

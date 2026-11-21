@@ -317,8 +317,10 @@ def _post_sections(sources: _Sources) -> list[dict]:
             "url": POST_URL.format(article["article_id"]),
             "data_fetched_at": article["fetched_at"],
         }
-        for section in split_post(article["content"], article["created_at"]):
-            rows.append(post | vars(section))
+        rows.extend(
+            post | vars(section)
+            for section in split_post(article["content"], article["created_at"])
+        )
     texts = [embed.passage_text(r["post_title"], r["heading"], r["text"]) for r in rows]
     missing = [text for text in dict.fromkeys(texts) if text not in sources.embeddings]
     vectors = sources.embeddings | dict(zip(missing, embed.passages(missing), strict=True))
@@ -372,31 +374,31 @@ def _characters(sources: _Sources) -> tuple[list[dict], dict[str, str]]:
                 "data_fetched_at": fetched_at,
             }
         )
-    for found in prydwen.values():
-        rows.append(
-            {
-                key: found[key]
-                for key in (
-                    "slug",
-                    "name",
-                    "rarity",
-                    "element",
-                    "class",
-                    "image_url",
-                    "updated_text",
-                    "sections",
-                    "url",
-                    "data_fetched_at",
-                )
-            }
-            | {
-                "game_id": None,
-                "gender": sources.genders.get(found["image_url"]),
-                "appearance": sources.appearances.get(found["image_url"]),
-                "prydwen_url": found["url"],
-                "source": "prydwen",
-            }
-        )
+    rows.extend(
+        {
+            key: found[key]
+            for key in (
+                "slug",
+                "name",
+                "rarity",
+                "element",
+                "class",
+                "image_url",
+                "updated_text",
+                "sections",
+                "url",
+                "data_fetched_at",
+            )
+        }
+        | {
+            "game_id": None,
+            "gender": sources.genders.get(found["image_url"]),
+            "appearance": sources.appearances.get(found["image_url"]),
+            "prydwen_url": found["url"],
+            "source": "prydwen",
+        }
+        for found in prydwen.values()
+    )
     return rows, slugs
 
 
@@ -650,12 +652,12 @@ def _potentials(sources: _Sources, slugs: dict[str, str]) -> list[dict]:
                     "data_fetched_at": fetched_at,
                 }
             )
-    for row in sources.prydwen["potential"]:
-        if row["character_slug"] not in covered:
-            rows.append(
-                {key: row[key] for key in COLUMNS["potential"].split() if key in row}
-                | {"source": "prydwen"}
-            )
+    rows.extend(
+        {key: row[key] for key in COLUMNS["potential"].split() if key in row}
+        | {"source": "prydwen"}
+        for row in sources.prydwen["potential"]
+        if row["character_slug"] not in covered
+    )
     return rows
 
 

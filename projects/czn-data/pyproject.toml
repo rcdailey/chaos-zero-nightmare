@@ -44,7 +44,9 @@ dev = [
 line-length = 100
 
 [tool.ruff.lint]
-extend-select = ["I", "UP", "B", "SIM"]
+extend-select = ["I", "UP", "B", "SIM", "RUF", "PTH", "C4", "PERF", "FURB"]
+# Scraped posts and wiki text use these; the parsers match them on purpose.
+allowed-confusables = ["–", "‘", "’"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

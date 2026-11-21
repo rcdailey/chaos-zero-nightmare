@@ -547,5 +547,5 @@ def test_list_equipment_by_chaos_matches_listed_and_shortened_zone_names(call, c
 
 
 def test_unknown_chaos_is_an_error_naming_the_known_ones(call, game_data):
-    with pytest.raises(Exception, match="Known: The Blue Pot$"):
+    with pytest.raises(Exception, match=r"Known: The Blue Pot$"):
         call("list_encounters", chaos="Nowhere At All")

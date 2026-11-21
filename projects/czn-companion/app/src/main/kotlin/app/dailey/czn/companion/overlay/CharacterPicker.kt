@@ -32,6 +32,12 @@ import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.graphics.BlendMode
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.CompositingStrategy
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.style.TextAlign
@@ -132,7 +138,7 @@ private fun CharacterCard(
         model = character.imageUrl,
         contentDescription = null,
         contentScale = ContentScale.Crop,
-        modifier = Modifier.fillMaxWidth().aspectRatio(CARD_ASPECT_RATIO),
+        modifier = Modifier.fillMaxWidth().aspectRatio(CARD_ASPECT_RATIO).vignette(),
     )
     Text(
         character.name,
@@ -141,6 +147,32 @@ private fun CharacterCard(
         modifier = Modifier.fillMaxWidth().padding(8.dp),
     )
 }
+
+/**
+ * Fades the portrait's left, right, and top edges to transparent so it blends into the card; the
+ * bottom edge stays hard against the name bar. The colors are only an alpha mask: opaque keeps
+ * the art, clear hides it.
+ */
+private fun Modifier.vignette() =
+    graphicsLayer(compositingStrategy = CompositingStrategy.Offscreen).drawWithContent {
+        drawContent()
+        drawRect(
+            Brush.horizontalGradient(
+                0f to Color.Transparent,
+                0.12f to Color.Black,
+                0.88f to Color.Black,
+                1f to Color.Transparent,
+            ),
+            blendMode = BlendMode.DstIn,
+        )
+        drawRect(
+            Brush.verticalGradient(
+                0f to Color.Transparent,
+                0.1f to Color.Black,
+            ),
+            blendMode = BlendMode.DstIn,
+        )
+    }
 
 private val INLINE_CARD_WIDTH = 112.dp
 

@@ -68,10 +68,13 @@ class OverlayService : AccessibilityService() {
     private val status by lazy { (application as CompanionApp).overlayStatus }
 
     /**
-     * Whether the game is the app in front. False until the first window change after the service
-     * starts: the service cannot read which app is already open.
+     * Whether the game is the app in front. The service cannot read which app is already open
+     * when it starts, so until the first window change it assumes what it last saw: after Android
+     * kills and restarts the service over the game, the tab comes back without an app switch.
      */
-    private val gameInFront = MutableStateFlow(false)
+    private val gameInFront by lazy {
+        MutableStateFlow(prefs.getBoolean(KEY_GAME_IN_FRONT, false))
+    }
 
     override fun onServiceConnected() {
         owner.start()
@@ -144,7 +147,9 @@ class OverlayService : AccessibilityService() {
         val className = event.className?.toString() ?: return
         val activity = isActivity(source, className)
         Log.d(TAG, "window change: $source $className, activity=$activity")
-        if (activity) gameInFront.value = source.startsWith(GAME_PACKAGE_PREFIX)
+        if (!activity) return
+        gameInFront.value = source.startsWith(GAME_PACKAGE_PREFIX)
+        prefs.edit { putBoolean(KEY_GAME_IN_FRONT, gameInFront.value) }
     }
 
     private fun isActivity(
@@ -374,6 +379,7 @@ class OverlayService : AccessibilityService() {
     private companion object {
         const val TAG = "CznOverlay"
         const val KEY_Y = "button_y"
+        const val KEY_GAME_IN_FRONT = "game_in_front"
         const val PANEL_MIN_WIDTH_DP = 420
         const val PANEL_WIDTH_FRACTION = 0.4f
         const val PANEL_MAX_WIDTH_FRACTION = 0.85f

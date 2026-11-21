@@ -214,7 +214,7 @@ fun MainScreen(
             )
             Card(Modifier.fillMaxWidth().widthIn(max = 640.dp)) {
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    Text("Floating button", style = MaterialTheme.typography.titleMedium)
+                    Text("Side tab", style = MaterialTheme.typography.titleMedium)
                     if (!state.overlayRunning) {
                         Text(
                             "Off. Turn on CZN Companion in Accessibility settings. If Android " +
@@ -227,12 +227,14 @@ fun MainScreen(
                         TextButton(onClick = onOpenAppInfo) { Text("Open App info") }
                     } else {
                         Text(
-                            "Shown while the game is open. Tap it to open the panel, long-press " +
-                                "it to read the screen, and drag it to move it.",
+                            "Shown on the right edge while the game is open. Tap it or pull it " +
+                                "toward the middle to open the panel. Hold it, then let go, to " +
+                                "read the screen. If a pull triggers Back, hold it first. Drag " +
+                                "it up or down to move it.",
                         )
                         if (!state.buttonVisible) {
                             Text("Hidden from its panel.")
-                            Button(onClick = onShowButton) { Text("Show floating button") }
+                            Button(onClick = onShowButton) { Text("Show side tab") }
                         }
                     }
                 }

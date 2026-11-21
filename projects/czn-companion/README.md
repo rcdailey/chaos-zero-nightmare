@@ -1,8 +1,8 @@
 # CZN Companion
 
-Android app that puts a floating button over Chaos Zero Nightmare, shown only while the game is
-in front. A tap opens a panel; a long press takes a screenshot and shows Claude's advice there,
-using the CZN data server for card and gear lookups.
+Android app that puts a tab on the right edge of Chaos Zero Nightmare, shown only while the game
+is in front. A tap or a pull opens a panel; a hold takes a screenshot and shows Claude's advice
+there, using the CZN data server for card and gear lookups.
 
 ## Setup
 

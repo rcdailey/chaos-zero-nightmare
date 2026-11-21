@@ -7,7 +7,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
 /**
- * Whether the floating button is shown. The panel's Hide button hides it; the app's main screen
+ * Whether the side tab is shown. The panel's Hide button hides it; the app's main screen
  * shows it again. Survives restarts.
  */
 class OverlaySettings(

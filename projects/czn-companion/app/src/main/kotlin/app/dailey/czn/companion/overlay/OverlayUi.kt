@@ -1,23 +1,27 @@
 package app.dailey.czn.companion.overlay
 
+import android.graphics.Region
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.core.MutableTransitionState
-import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectDragGestures
-import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.ZeroCornerSize
 import androidx.compose.foundation.text.input.TextFieldState
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
@@ -42,8 +46,17 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
-import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.graphics.toAndroidRect
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.input.pointer.AwaitPointerEventScope
+import androidx.compose.ui.input.pointer.PointerInputChange
+import androidx.compose.ui.input.pointer.PointerInputScope
+import androidx.compose.ui.input.pointer.changedToUp
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.boundsInWindow
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
@@ -54,57 +67,197 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.PreviewFontScale
 import androidx.compose.ui.tooling.preview.PreviewLightDark
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.DpSize
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.roundToIntRect
 import app.dailey.czn.companion.CompanionTheme
 import app.dailey.czn.companion.R
 import app.dailey.czn.companion.run.EntryKind
 import app.dailey.czn.companion.run.RunEntry
 import com.mikepenz.markdown.m3.Markdown
 import com.mikepenz.markdown.model.rememberMarkdownState
+import kotlin.math.abs
 
-/** The floating button: tap toggles the panel, long press reads the screen, drag moves it. */
+/**
+ * The overlay window's content: the side tab with the panel to its right. Closed, the panel lies
+ * past the window's right edge, so only the tab shows; opening slides both in together. The window
+ * spans the tab and the open panel, so [onTouchableArea] reports where they are: touches anywhere
+ * else in the window must reach the game.
+ */
 @Composable
-fun FloatingButton(
-    onTap: () -> Unit,
-    onLongPress: () -> Unit,
-    onDrag: (Offset) -> Unit,
+fun SideOverlay(
+    open: Boolean,
+    tabY: Int,
+    panelWidth: Dp,
+    tabActions: SideTabActions,
+    onTouchableArea: (Region) -> Unit,
+    panel: @Composable () -> Unit,
 ) {
-    Surface(
-        shape = MaterialTheme.shapes.large,
-        color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.85f),
-        contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
-        shadowElevation = 6.dp,
+    val shift by animateDpAsState(
+        if (open) 0.dp else panelWidth,
+        MaterialTheme.motionScheme.defaultSpatialSpec(),
+    )
+    var tabBounds by remember { mutableStateOf(Rect.Zero) }
+    var panelBounds by remember { mutableStateOf(Rect.Zero) }
+    LaunchedEffect(tabBounds, panelBounds) {
+        onTouchableArea(
+            Region().apply {
+                union(tabBounds.roundToIntRect().toAndroidRect())
+                union(panelBounds.roundToIntRect().toAndroidRect())
+            },
+        )
+    }
+    Row(Modifier.fillMaxHeight().offset { IntOffset(shift.roundToPx(), 0) }) {
+        Box(
+            Modifier
+                .offset { IntOffset(0, tabY) }
+                .onGloballyPositioned { tabBounds = it.boundsInWindow() },
+        ) { SideTab(tabActions) }
+        Box(
+            Modifier
+                .width(panelWidth)
+                .fillMaxHeight()
+                .onGloballyPositioned { panelBounds = it.boundsInWindow() },
+        ) { panel() }
+    }
+}
+
+/** Touch area of the side tab; its visible part is narrower, against the panel or screen edge. */
+val SideTabSize = DpSize(48.dp, 72.dp)
+
+/**
+ * Side tab callbacks; [onMove] takes how far, in pixels, the tab must move down to stay under the
+ * finger.
+ */
+class SideTabActions(
+    val onTap: () -> Unit = {},
+    val onHold: () -> Unit = {},
+    val onOpen: () -> Unit = {},
+    val onClose: () -> Unit = {},
+    val onMove: (Float) -> Unit = {},
+)
+
+/**
+ * The tab on the screen's right edge, which rides on the panel's left edge while the panel is
+ * open, so it never covers the panel. Tap toggles the panel. Hold, then let go without moving,
+ * reads the screen. Dragging toward the middle of the screen opens the panel and dragging toward
+ * the edge closes it; holding first keeps Android's back gesture from taking the drag. Dragging up
+ * or down moves the tab.
+ */
+@Composable
+fun SideTab(actions: SideTabActions) {
+    val haptics = LocalHapticFeedback.current
+    Box(
+        contentAlignment = Alignment.CenterEnd,
         modifier =
             Modifier
-                .size(56.dp)
+                .size(SideTabSize)
                 .semantics {
                     role = Role.Button
                     contentDescription = "CZN Companion"
                     onClick("Show or hide the panel") {
-                        onTap()
+                        actions.onTap()
                         true
                     }
                     onLongClick("Read the screen") {
-                        onLongPress()
+                        actions.onHold()
                         true
                     }
-                }.pointerInput(Unit) {
-                    detectTapGestures(onTap = { onTap() }, onLongPress = { onLongPress() })
-                }.pointerInput(Unit) {
-                    detectDragGestures {
-                        change,
-                        amount,
-                        ->
-                        change.consume()
-                        onDrag(amount)
+                }.pointerInput(actions) {
+                    detectSideTabGestures(actions) {
+                        haptics.performHapticFeedback(HapticFeedbackType.LongPress)
                     }
                 },
     ) {
-        Box(contentAlignment = Alignment.Center) {
-            Icon(painterResource(R.drawable.ic_auto_awesome), contentDescription = null)
+        Surface(
+            shape =
+                MaterialTheme.shapes.large.copy(
+                    topEnd = ZeroCornerSize,
+                    bottomEnd = ZeroCornerSize,
+                ),
+            color = MaterialTheme.colorScheme.primaryContainer,
+            contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+            shadowElevation = 6.dp,
+            modifier = Modifier.size(width = 32.dp, height = SideTabSize.height),
+        ) {
+            Box(contentAlignment = Alignment.Center) {
+                Icon(
+                    painterResource(R.drawable.ic_auto_awesome),
+                    contentDescription = null,
+                    modifier = Modifier.size(20.dp),
+                )
+            }
         }
     }
 }
+
+private enum class Press { Tap, Drag, Hold }
+
+private suspend fun PointerInputScope.detectSideTabGestures(
+    actions: SideTabActions,
+    onHeld: () -> Unit,
+) = awaitEachGesture {
+    val down = awaitFirstDown()
+    when (withTimeoutOrNull(viewConfiguration.longPressTimeoutMillis) { awaitTapOrDrag(down) }) {
+        Press.Tap -> {
+            actions.onTap()
+        }
+
+        Press.Drag -> {
+            trackDrag(down, actions)
+        }
+
+        else -> {
+            onHeld()
+            when (awaitTapOrDrag(down)) {
+                Press.Drag -> trackDrag(down, actions)
+                else -> actions.onHold()
+            }
+        }
+    }
+}
+
+/** Waits until the finger lifts ([Press.Tap]) or moves past the touch slop ([Press.Drag]). */
+private suspend fun AwaitPointerEventScope.awaitTapOrDrag(down: PointerInputChange): Press {
+    while (true) {
+        val change =
+            awaitPointerEvent().changes.firstOrNull { it.id == down.id } ?: return Press.Tap
+        if (change.changedToUp()) return Press.Tap
+        val moved = change.position - down.position
+        if (moved.getDistance() > viewConfiguration.touchSlop) return Press.Drag
+    }
+}
+
+/**
+ * Follows a drag until the finger lifts. A mostly vertical drag moves the tab; a horizontal one
+ * opens or closes the panel once it passes [SWIPE_DISTANCE].
+ */
+private suspend fun AwaitPointerEventScope.trackDrag(
+    down: PointerInputChange,
+    actions: SideTabActions,
+) {
+    var vertical: Boolean? = null
+    var swiped = false
+    while (true) {
+        val change = awaitPointerEvent().changes.firstOrNull { it.id == down.id } ?: return
+        if (change.changedToUp()) return
+        val moved = change.position - down.position
+        val isVertical = vertical ?: (abs(moved.y) > abs(moved.x)).also { vertical = it }
+        change.consume()
+        if (isVertical) {
+            // The tab moves under the finger, so positions are relative to where it is now: the
+            // finger's offset from its starting point on the tab is how far the tab lags behind.
+            actions.onMove(moved.y)
+        } else if (!swiped && abs(moved.x) > SWIPE_DISTANCE.toPx()) {
+            swiped = true
+            if (moved.x < 0) actions.onOpen() else actions.onClose()
+        }
+    }
+}
+
+private val SWIPE_DISTANCE = 24.dp
 
 /** Panel callbacks; [onSend] reads the screen, with the typed text or an empty string. */
 class PanelActions(
@@ -117,25 +270,21 @@ class PanelActions(
     val onSend: (String) -> Unit = {},
 )
 
-/** The side panel; slides in from the screen edge when its window is added. */
+/** The side panel, in the side tab's color so the two read as one piece. */
 @Composable
 fun Panel(
     state: PanelState,
     draft: TextFieldState,
     actions: PanelActions,
+) = Surface(
+    color = MaterialTheme.colorScheme.primaryContainer,
+    contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+    shadowElevation = 8.dp,
+    modifier = Modifier.fillMaxSize(),
 ) {
-    val visible = remember { MutableTransitionState(false).apply { targetState = true } }
-    AnimatedVisibility(visibleState = visible, enter = slideInHorizontally { it }) {
-        Surface(
-            color = MaterialTheme.colorScheme.surfaceContainer,
-            shadowElevation = 8.dp,
-            modifier = Modifier.fillMaxSize(),
-        ) {
-            Column {
-                PanelTopBar(state, actions)
-                PanelBody(state, draft, actions)
-            }
-        }
+    Column {
+        PanelTopBar(state, actions)
+        PanelBody(state, draft, actions)
     }
 }
 
@@ -152,7 +301,7 @@ private fun PanelTopBar(
         IconButton(onClick = actions.onHideButton) {
             Icon(
                 painterResource(R.drawable.ic_visibility_off),
-                contentDescription = "Hide floating button",
+                contentDescription = "Hide side tab",
             )
         }
         IconButton(onClick = actions.onClose) {
@@ -162,7 +311,9 @@ private fun PanelTopBar(
     windowInsets = WindowInsets(0),
     colors =
         TopAppBarDefaults.topAppBarColors(
-            containerColor = MaterialTheme.colorScheme.surfaceContainer,
+            containerColor = MaterialTheme.colorScheme.primaryContainer,
+            titleContentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+            actionIconContentColor = MaterialTheme.colorScheme.onPrimaryContainer,
         ),
 )
 
@@ -260,7 +411,6 @@ private fun ToolCalls(tools: List<String>) =
             Text(
                 "Looked up $label",
                 style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
@@ -273,7 +423,8 @@ private fun SeenBlock(text: String) {
     Surface(
         onClick = { expanded = !expanded },
         shape = MaterialTheme.shapes.small,
-        color = MaterialTheme.colorScheme.surfaceContainerHighest,
+        color = MaterialTheme.colorScheme.secondaryContainer,
+        contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
     ) {
         Column(Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
             Row(
@@ -283,14 +434,12 @@ private fun SeenBlock(text: String) {
                 Text(
                     "Seen on screen",
                     style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 Icon(
                     painterResource(
                         if (expanded) R.drawable.ic_expand_less else R.drawable.ic_expand_more,
                     ),
                     contentDescription = if (expanded) "Collapse" else "Expand",
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.size(18.dp),
                 )
             }
@@ -308,7 +457,7 @@ private fun Thinking() =
         horizontalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
-        Text("Reading the screen...", color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text("Reading the screen...")
     }
 
 /** A typed question, or a divider for a screen read sent without text. */
@@ -318,11 +467,7 @@ private fun Question(text: String) {
         HorizontalDivider(Modifier.padding(vertical = 4.dp))
         return
     }
-    Text(
-        text,
-        style = MaterialTheme.typography.labelLarge,
-        color = MaterialTheme.colorScheme.primary,
-    )
+    Text(text, style = MaterialTheme.typography.labelLarge)
 }
 
 /**
@@ -361,7 +506,15 @@ private fun AskRow(
 @Composable
 private fun PanelPreview() =
     CompanionTheme {
-        Box(Modifier.size(420.dp, 600.dp)) { PanelPreviewContent() }
+        Box(Modifier.size(468.dp, 600.dp)) {
+            SideOverlay(
+                open = true,
+                tabY = 0,
+                panelWidth = 420.dp,
+                tabActions = SideTabActions(),
+                onTouchableArea = {},
+            ) { PanelPreviewContent() }
+        }
     }
 
 @Composable
@@ -384,10 +537,3 @@ private fun PanelPreviewContent() =
         TextFieldState(),
         PanelActions(),
     )
-
-@PreviewLightDark
-@Composable
-private fun FloatingButtonPreview() =
-    CompanionTheme {
-        FloatingButton(onTap = {}, onLongPress = {}, onDrag = {})
-    }

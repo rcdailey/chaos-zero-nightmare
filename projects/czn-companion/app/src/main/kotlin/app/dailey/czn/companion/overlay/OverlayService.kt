@@ -7,7 +7,6 @@ import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
 import android.content.res.Configuration
 import android.graphics.PixelFormat
-import android.os.SystemClock
 import android.util.Log
 import android.view.Gravity
 import android.view.MotionEvent
@@ -18,6 +17,10 @@ import android.view.accessibility.AccessibilityEvent
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.platform.ComposeView
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.dp
 import androidx.core.content.edit
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import app.dailey.czn.companion.CompanionApp
@@ -34,8 +37,8 @@ import kotlin.math.max
 import kotlin.math.roundToInt
 
 /**
- * Accessibility service that owns the floating button, the side panel, and screenshots. It reads
- * only which app is in front, to show the button over the game alone. The game exposes no
+ * Accessibility service that owns the side tab, the side panel, and screenshots. It reads only
+ * which app is in front, to show the tab over the game alone. The game exposes no
  * accessibility content, so the screen image is the only input about it.
  */
 class OverlayService : AccessibilityService() {
@@ -47,18 +50,19 @@ class OverlayService : AccessibilityService() {
             (application as CompanionApp).conversation,
         )
     }
-    private var panelParams: LayoutParams? = null
     private val windowManager by lazy { getSystemService(WindowManager::class.java) }
     private val prefs by lazy { getSharedPreferences("overlay", MODE_PRIVATE) }
-    private var button: ComposeView? = null
-    private var buttonParams: LayoutParams? = null
-    private var panel: ComposeView? = null
+
+    /** The one window that holds the side tab and the panel. */
+    private var overlay: ComposeView? = null
+    private var overlayParams: LayoutParams? = null
+    private val panelOpen = MutableStateFlow(false)
+
+    /** The tab's distance from the top of the screen, in pixels. */
+    private val tabY by lazy { MutableStateFlow(prefs.getInt(KEY_Y, screenHeight() / 2)) }
 
     private val settings by lazy { (application as CompanionApp).overlaySettings }
     private val status by lazy { (application as CompanionApp).overlayStatus }
-
-    /** When an outside touch last closed the panel; a button tap right after it must not reopen. */
-    private var panelClosedAt = 0L
 
     /**
      * Whether the game is the app in front. False until the first window change after the service
@@ -72,7 +76,7 @@ class OverlayService : AccessibilityService() {
         scope.launch {
             combine(settings.buttonVisible, gameInFront) { visible, inGame -> visible && inGame }
                 .distinctUntilChanged()
-                .collect { show -> if (show) showButton() else hideButton() }
+                .collect { show -> if (show) showOverlay() else hideOverlay() }
         }
     }
 
@@ -102,34 +106,29 @@ class OverlayService : AccessibilityService() {
 
     override fun onInterrupt() = Unit
 
-    /** Keeps the button on screen when the screen size changes, for example on rotation. */
+    /** Keeps the tab and panel on screen when the screen size changes, for example on rotation. */
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
-        moveButton(0f, 0f)
+        moveTab(0f)
+        resizeOverlay()
     }
 
     override fun onDestroy() {
         status.setRunning(false)
-        button?.let(windowManager::removeView)
-        panel?.let(windowManager::removeView)
+        overlay?.let(windowManager::removeView)
         owner.destroy()
         scope.cancel()
         super.onDestroy()
     }
 
-    private fun onButtonTap() {
-        if (panel != null) {
-            closePanel()
-            return
-        }
-        if (SystemClock.uptimeMillis() - panelClosedAt < TAP_AFTER_CLOSE_MILLIS) return
-        Log.d(TAG, "button tap: open panel")
-        openPanel()
+    private fun onTabTap() {
+        Log.d(TAG, "tab tap, panelOpen=${panelOpen.value}")
+        if (panelOpen.value) closePanel() else openPanel()
     }
 
     /** Reads the screen without typed text and opens the panel to show the reply. */
-    private fun onButtonLongPress() {
-        Log.d(TAG, "button long press, busy=${advice.busy}, panelOpen=${panel != null}")
+    private fun onTabHold() {
+        Log.d(TAG, "tab hold, busy=${advice.busy}, panelOpen=${panelOpen.value}")
         // A reply still streaming is shown, not replaced.
         if (advice.busy) {
             openPanel()
@@ -149,19 +148,18 @@ class OverlayService : AccessibilityService() {
 
     /** Screenshot of the game alone: the app's windows are hidden while it is taken. */
     private suspend fun captureGame(): Result<ByteArray> {
-        val views = listOfNotNull(button, panel)
-        views.forEach { it.visibility = View.INVISIBLE }
+        overlay?.visibility = View.INVISIBLE
         delay(HIDE_SETTLE_MILLIS)
         val result = capture().map { it.toJpeg() }
-        views.forEach { it.visibility = View.VISIBLE }
+        overlay?.visibility = View.VISIBLE
         result.onSuccess { if (isDebuggable()) File(filesDir, "last-capture.jpg").writeBytes(it) }
         return result
     }
 
     /** The panel takes keyboard focus only while the user types a follow-up. */
     private fun setPanelFocusable(focusable: Boolean) {
-        val view = panel ?: return
-        val params = panelParams ?: return
+        val view = overlay ?: return
+        val params = overlayParams ?: return
         params.flags =
             if (focusable) {
                 // Touches outside a focusable window would otherwise stop reaching the game.
@@ -175,95 +173,93 @@ class OverlayService : AccessibilityService() {
         if (!focusable) advice.stopComposing()
     }
 
-    private fun showButton() {
-        if (button != null) return
-        val params =
-            overlayParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT).apply {
-                gravity = Gravity.TOP or Gravity.START
-                x = prefs.getInt(KEY_X, Int.MAX_VALUE).coerceAtMost(screenWidth() - buttonSizePx())
-                y = prefs.getInt(KEY_Y, screenHeight() / 2)
-            }
-        val view =
-            composeView {
-                FloatingButton(
-                    onTap = ::onButtonTap,
-                    onLongPress = ::onButtonLongPress,
-                    onDrag = { moveButton(it.x, it.y) },
-                )
-            }
-        windowManager.addView(view, params)
-        button = view
-        buttonParams = params
-    }
-
-    private fun hideButton() {
-        closePanel()
-        button?.let(windowManager::removeView)
-        button = null
-        buttonParams = null
-    }
-
-    private fun moveButton(
-        dx: Float,
-        dy: Float,
-    ) {
-        val params = buttonParams ?: return
-        params.x = (params.x + dx.roundToInt()).coerceIn(0, screenWidth() - buttonSizePx())
-        params.y = (params.y + dy.roundToInt()).coerceIn(0, screenHeight() - buttonSizePx())
-        windowManager.updateViewLayout(button, params)
-        prefs.edit {
-            putInt(KEY_X, params.x)
-            putInt(KEY_Y, params.y)
-        }
-    }
-
     /**
-     * The panel never covers the whole screen and takes focus only while the user types, so system
-     * gestures and the game stay usable. A touch outside it closes it, as does its close button.
+     * Adds the one overlay window, on the right edge and the screen's full height, wide enough for
+     * the tab and the open panel. Only the tab and the open panel take touches; the rest of the
+     * window passes them to the game. The panel never covers the whole screen and takes focus only
+     * while the user types, so system gestures and the game stay usable.
      */
-    private fun openPanel() {
-        if (panel != null) return
-        val width =
-            max((screenWidth() * PANEL_WIDTH_FRACTION).roundToInt(), dp(PANEL_MIN_WIDTH_DP))
-                .coerceAtMost((screenWidth() * PANEL_MAX_WIDTH_FRACTION).roundToInt())
+    private fun showOverlay() {
+        if (overlay != null) return
+        val panelWidth = panelWidthPx()
         val params =
-            overlayParams(width, LayoutParams.MATCH_PARENT).apply {
+            overlayParams(panelWidth + dp(SideTabSize.width), LayoutParams.MATCH_PARENT).apply {
                 flags = flags or LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH
                 gravity = Gravity.END or Gravity.TOP
             }
         val view =
             composeView {
+                val open by panelOpen.collectAsStateWithLifecycle()
+                val y by tabY.collectAsStateWithLifecycle()
                 val state by advice.state.collectAsStateWithLifecycle()
-                Panel(state, advice.draft, panelActions)
+                val window = LocalView.current
+                SideOverlay(
+                    open = open,
+                    tabY = y,
+                    panelWidth = with(LocalDensity.current) { panelWidth.toDp() },
+                    tabActions = tabActions,
+                    onTouchableArea = { window.rootSurfaceControl?.setTouchableRegion(it) },
+                ) { Panel(state, advice.draft, panelActions) }
             }
         closeOnOutsideTouch(view)
         windowManager.addView(view, params)
-        panel = view
-        panelParams = params
-        // Keep the button above the panel so the next tap can close it.
-        button?.let {
-            windowManager.removeView(it)
-            windowManager.addView(it, buttonParams)
-        }
+        overlay = view
+        overlayParams = params
     }
 
-    // An outside touch is not a click on this view; the Close button is the accessible path.
+    private fun hideOverlay() {
+        closePanel()
+        overlay?.let(windowManager::removeView)
+        overlay = null
+        overlayParams = null
+    }
+
+    /** Recreates the overlay so its size follows a new screen size, for example on rotation. */
+    private fun resizeOverlay() {
+        if (overlay == null) return
+        hideOverlay()
+        showOverlay()
+    }
+
+    private fun panelWidthPx() =
+        max((screenWidth() * PANEL_WIDTH_FRACTION).roundToInt(), dp(PANEL_MIN_WIDTH_DP.dp))
+            .coerceAtMost((screenWidth() * PANEL_MAX_WIDTH_FRACTION).roundToInt())
+
+    private fun moveTab(dy: Float) {
+        val maxY = screenHeight() - dp(SideTabSize.height)
+        tabY.value = (tabY.value + dy.roundToInt()).coerceIn(0, maxY)
+        prefs.edit { putInt(KEY_Y, tabY.value) }
+    }
+
+    private fun openPanel() {
+        panelOpen.value = true
+    }
+
+    /** An outside touch is not a click on this view; the Close button is the accessible path. */
     @SuppressLint("ClickableViewAccessibility")
     private fun closeOnOutsideTouch(view: View) {
         view.setOnTouchListener { _, event ->
             if (event.actionMasked != MotionEvent.ACTION_OUTSIDE) return@setOnTouchListener false
-            panelClosedAt = SystemClock.uptimeMillis()
             closePanel()
             true
         }
     }
 
     private fun closePanel() {
-        advice.stopComposing()
+        if (!panelOpen.value) return
+        setPanelFocusable(false)
         advice.cancelNewRun()
-        panel?.let(windowManager::removeView)
-        panel = null
-        panelParams = null
+        panelOpen.value = false
+    }
+
+    private val tabActions by lazy {
+        SideTabActions(
+            onTap = ::onTabTap,
+            onHold = ::onTabHold,
+            onOpen = ::openPanel,
+            onClose = ::closePanel,
+            onMove = ::moveTab,
+        )
     }
 
     private val panelActions by lazy {
@@ -302,26 +298,21 @@ class OverlayService : AccessibilityService() {
 
     private fun screenHeight() = windowManager.maximumWindowMetrics.bounds.height()
 
-    private fun buttonSizePx() = dp(BUTTON_SIZE_DP)
-
-    private fun dp(value: Int) = (value * resources.displayMetrics.density).roundToInt()
+    private fun dp(value: Dp) = (value.value * resources.displayMetrics.density).roundToInt()
 
     private fun isDebuggable() = applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0
 
     private companion object {
         const val TAG = "CznOverlay"
-        const val KEY_X = "button_x"
         const val KEY_Y = "button_y"
-        const val BUTTON_SIZE_DP = 56
         const val PANEL_MIN_WIDTH_DP = 420
         const val PANEL_WIDTH_FRACTION = 0.4f
         const val PANEL_MAX_WIDTH_FRACTION = 0.85f
-        const val TAP_AFTER_CLOSE_MILLIS = 400L
 
         /** Prefix of the game's package; store builds differ in the suffix. */
         const val GAME_PACKAGE_PREFIX = "com.smilegate.chaoszero"
 
-        /** Time for the hidden button to leave the composited frame before the screenshot. */
+        /** Time for the hidden tab to leave the composited frame before the screenshot. */
         const val HIDE_SETTLE_MILLIS = 150L
     }
 }

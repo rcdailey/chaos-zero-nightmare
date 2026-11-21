@@ -16,7 +16,7 @@ import psycopg
 from opentelemetry.metrics import Meter
 
 from . import metrics
-from .gender import TaggerUnavailable
+from .tagger import TaggerUnavailable
 
 log = logging.getLogger(__name__)
 
@@ -31,31 +31,51 @@ class EnrichResult:
 
 
 def tag_genders(conn: psycopg.Connection, gender: Callable[[bytes], str], result: EnrichResult):
-    """Assign a gender to every stored portrait that has none yet (see ``czn_data.gender``)."""
+    """Assign a gender to every stored portrait that has none yet (see ``czn_data.tagger``)."""
+    _tag(conn, "gender", "portrait_gender", "gender", gender, result)
+
+
+def tag_appearances(
+    conn: psycopg.Connection, appearance: Callable[[bytes], list[str]], result: EnrichResult
+):
+    """Describe every stored portrait that has no appearance yet (see ``czn_data.tagger``)."""
+    _tag(conn, "appearance", "portrait_appearance", "tags", appearance, result)
+
+
+def _tag(
+    conn: psycopg.Connection,
+    step: str,
+    table: str,
+    column: str,
+    tag: Callable[[bytes], object],
+    result: EnrichResult,
+):
+    """Store ``tag`` of each portrait missing from ``table``; a failure counts against ``step``."""
     portraits = conn.execute(
-        """
+        f"""
         SELECT image_url, image FROM prydwen.portrait
-        WHERE image_url NOT IN (SELECT image_url FROM prydwen.portrait_gender)
+        WHERE image_url NOT IN (SELECT image_url FROM prydwen.{table})
         ORDER BY image_url
         """
     ).fetchall()
     if portraits:
-        log.info("tagging portraits", extra={"count": len(portraits)})
+        log.info("tagging portraits", extra={"step": step, "count": len(portraits)})
     for url, image in portraits:
         try:
-            assigned = gender(image)
+            value = tag(image)
         except TaggerUnavailable as error:
             log.error("portrait tagger unavailable", extra={"error": str(error)})
-            result.failures["gender"] += 1
+            result.failures[step] += 1
             return
         except Exception as error:  # noqa: BLE001 - one bad portrait must not stop the rest
-            log.error("portrait tagging failed", extra={"url": url, "error": repr(error)})
-            result.failures["gender"] += 1
+            log.error(
+                "portrait tagging failed", extra={"step": step, "url": url, "error": repr(error)}
+            )
+            result.failures[step] += 1
             continue
         conn.execute(
-            "INSERT INTO prydwen.portrait_gender (image_url, gender, tagged_at)"
-            " VALUES (%s, %s, %s)",
-            (url, assigned, datetime.now(UTC)),
+            f"INSERT INTO prydwen.{table} (image_url, {column}, tagged_at) VALUES (%s, %s, %s)",
+            (url, value, datetime.now(UTC)),
         )
 
 
@@ -76,7 +96,7 @@ def export_metrics(result: EnrichResult, started: float) -> bool:
             )
         gauge("czn.enrich.duration", "Run duration", "s").set(now - started)
         failures = gauge("czn.enrich.failures", "Rows that failed, by step")
-        for step in ("gender",):
+        for step in ("gender", "appearance"):
             failures.set(result.failures[step], {"step": step})
 
     return metrics.export("czn_data.enrich", record)

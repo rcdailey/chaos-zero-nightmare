@@ -103,7 +103,7 @@ URLS = {
 # Merged table -> columns, in insert order. JSON columns are wrapped for psycopg.
 COLUMNS = {
     "character": (
-        "slug game_id name rarity element class gender image_url updated_text sections"
+        "slug game_id name rarity element class gender appearance image_url updated_text sections"
         " prydwen_url source url data_fetched_at"
     ),
     "card": (
@@ -234,6 +234,9 @@ class _Sources:
         self.genders = dict(
             conn.execute("SELECT image_url, gender FROM prydwen.portrait_gender").fetchall()
         )
+        self.appearances = dict(
+            conn.execute("SELECT image_url, tags FROM prydwen.portrait_appearance").fetchall()
+        )
         self.articles = cursor.execute(
             "SELECT article_id, board, title, content, created_at, fetched_at"
             " FROM stove.article ORDER BY article_id"
@@ -359,6 +362,7 @@ def _characters(sources: _Sources) -> tuple[list[dict], dict[str, str]]:
                 "element": ELEMENTS[entry["ego"]],
                 "class": entry["job"].title(),
                 "gender": GENDERS.get(entry["gender_type"]) or sources.genders.get(image_url),
+                "appearance": sources.appearances.get(image_url),
                 "image_url": image_url,
                 "updated_text": found.get("updated_text"),
                 "sections": found.get("sections") or [],
@@ -388,6 +392,7 @@ def _characters(sources: _Sources) -> tuple[list[dict], dict[str, str]]:
             | {
                 "game_id": None,
                 "gender": sources.genders.get(found["image_url"]),
+                "appearance": sources.appearances.get(found["image_url"]),
                 "prydwen_url": found["url"],
                 "source": "prydwen",
             }

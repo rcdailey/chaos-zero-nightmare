@@ -38,8 +38,8 @@ One container image (`ghcr.io/rcdailey/czn-data`) runs every workload:
   read every run; a post is fetched only when its edit time changed (about 120 posts, 2 minutes,
   on an empty database; seconds after).
 - `czn-data build`: merges the stored sources again without fetching anything.
-- `czn-data enrich`: derives data from what the Prydwen scrape stored (character gender),
-  without contacting Prydwen. A run that finds nothing new exits in seconds.
+- `czn-data enrich`: derives data from what the Prydwen scrape stored (character gender and
+  appearance), without contacting Prydwen. A run that finds nothing new exits in seconds.
 - `czn-data serve`: the MCP server (a Deployment), listening on port 8000.
 - `czn-data migrate`: upgrades the database schema, then exits. Every other command except
   `serve` runs it first on its own. Run it as an init container of the server Deployment, with
@@ -71,6 +71,13 @@ The scraper finds every page through robots.txt and the sitemaps, saves its HTML
   run that finds untagged art uses the model: it downloads the newest revision of the 467 MB
   model from Hugging Face into `CZN_TAGGER_DIR` when the stored copy is missing or outdated,
   then loads it (about 1 GB of memory). If Hugging Face is unreachable, the stored copy is used.
+- Character appearance, for every character with card art, set by `enrich` with the same
+  tagger: visible traits scoring at least 0.35, most certain first, without framing, pose,
+  expression, or body tags. Key traits (hair color and style, eye color, eyewear, horns, ears,
+  weapons) are always kept; other tags (outfit, accessories) fill up to 15 in total. When no
+  hair color reaches 0.35, the best one is kept if it scores at least 0.15. Claude matches it against portraits on game screens, which show no names. Each image
+  is tagged once, so a change to the trait filter applies only to new art until the
+  `prydwen.portrait_appearance` rows are deleted.
 - `neutral-cards`, `equipment` (stats per level, drop source), `memory-fragments`, `partners`
   (passive, EGO skill, base stats), and `guides/effects-dictionary` (keyword and status
   definitions).
@@ -168,7 +175,7 @@ failed rows are tried again on the next run:
 
 - `czn_enrich_success`, `czn_enrich_last_success_timestamp_seconds`,
   `czn_enrich_last_run_timestamp_seconds`, `czn_enrich_duration_seconds`: as for the scrape.
-- `czn_enrich_failures{step}`: rows that failed per step (`gender`).
+- `czn_enrich_failures{step}`: rows that failed per step (`gender`, `appearance`).
 
 ## Configuration
 
@@ -191,7 +198,7 @@ Environment variables:
 - `MCP_ALLOW_UNAUTHENTICATED` (serve): `true` runs without auth, for local use.
 - `CZN_TAGGER_DIR` (daily, enrich): writable directory, kept across runs (such as a PVC of at
   least 1 GB), where the portrait tagger stores its model. Without it, new characters get no
-  gender and the run fails. The scrape commands do not need it.
+  gender or appearance and the run fails. The scrape commands do not need it.
 - `FASTEMBED_CACHE_PATH` (build, serve): where the search embedding model is kept. The image
   ships the model there and sets `HF_HUB_OFFLINE=1`; outside it, the model downloads on first
   use.

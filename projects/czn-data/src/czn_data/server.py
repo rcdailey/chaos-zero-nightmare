@@ -46,9 +46,14 @@ partner rankings, synergies), and full-text search over every guide page.
 Start with `lookup` for any name seen on screen and `match_card_text` for card text seen on
 screen, then use the specific tools; `get_character` returns one section at a time.
 `list_characters` filters the roster; `synergies` answers who to use with a character.
+Screens show characters as portraits without names: identify each by matching the portrait to
+the `appearance` traits `list_characters` returns (filtered by the element shown), never by
+guessing.
 `list_banners` gives the live and upcoming gacha banners with dates. `search_posts` searches
 the official posts: events (active_on today for what is on now), season restrictions and
-shops, patch changes. Guide decks
+shops, patch changes, and season content the game data lacks (Environment Variables nodes,
+Chaos difficulty modifiers such as Gangrene, season Interaction Events); prefer the newest
+post, since values change between seasons. Guide decks
 (`get_character` section decks) carry deck codes players paste into the game's deck import.
 Players name cards by color ("her purple card"); `list_cards` filters by color.
 For a Chaos run: players build one character's deck per run, because copy events are too rare
@@ -218,7 +223,8 @@ ORDER BY count(*) DESC, c.name
 RECOMMENDED_BY_SQL = RECOMMENDED_BY_SQL.format(match=NAME_MATCH, order=NAME_ORDER)
 
 LIST_CHARACTERS_SQL = """
-SELECT c.name, c.rarity, c.element, c.class, c.gender, c.image_url
+SELECT c.name, c.rarity, c.element, c.class, c.gender,
+       array_to_string(c.appearance, ', ') AS appearance, c.image_url
 FROM character c
 WHERE (%(gender)s::text IS NULL OR c.gender = lower(%(gender)s))
   AND (%(element)s::text IS NULL OR c.element ILIKE %(element)s)
@@ -481,6 +487,10 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
         a term without its own entry, such as Polarization, finds the effects whose description
         uses it. Card summaries start with the card's color (its rarity in game: White, Blue,
         Purple, Gold, Orange).
+        Season content is not in the game data this searches: season events and Interaction
+        Events (such as Elaborate Illusion), Chaos difficulty modifiers (such as Gangrene),
+        and Environment Variables nodes. When lookup finds nothing for such a name, use
+        search_posts, newest post first, since values change between seasons.
         """
         kind = LOOKUP_KIND_ALIASES.get(kind, kind) if kind else None
         return await _query(LOOKUP_SQL, {"name": name, "kind": kind, "limit": min(limit, 50)})
@@ -520,7 +530,8 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
     async def get_character(name: str, section: str | None = None) -> dict | None:
         """Profile of the best-matching character. Without section: rarity, element, class,
         gender (from the game data; for characters only Prydwen has, judged from the art by an
-        image tagger) and the list of available sections. With section, that part of
+        image tagger), appearance (visible traits of the portrait, by the same tagger), and the
+        list of available sections. With section, that part of
         Prydwen's guide: cards (without reviews; use get_card), potentials, manifest_egos,
         teams, decks (with the deck code players paste into the game's deck import, when
         Prydwen gives one, and the Chaos it farms), equipment (per season tab),
@@ -641,10 +652,14 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
         character_class: str | None = None,
         rarity: int | None = None,
     ) -> list[dict]:
-        """Every character, one short line each (name, rarity, element, class, gender, card art
-        image_url), optionally filtered: gender female or male, element (Passion, Justice, Order, Void,
-        Instinct), character_class (Striker, Vanguard, Ranger, Hunter, Controller, Psionic),
-        rarity 4 or 5."""
+        """Every character, one short line each (name, rarity, element, class, gender,
+        appearance, card art image_url), optionally filtered: gender female or male, element
+        (Passion, Justice, Order, Void, Instinct), character_class (Striker, Vanguard, Ranger,
+        Hunter, Controller, Psionic), rarity 4 or 5. appearance lists visible traits of the
+        character's portrait, most certain first (hair color and style, eye color, eyewear,
+        horns, weapons, outfit), as read by an image tagger: match it against portraits on a
+        game screen (team formation, roster) to tell who is shown. Filter by the element or
+        class icon the screen shows to narrow the candidates first."""
         return await _query(
             LIST_CHARACTERS_SQL,
             {"gender": gender, "element": element, "class": character_class, "rarity": rarity},

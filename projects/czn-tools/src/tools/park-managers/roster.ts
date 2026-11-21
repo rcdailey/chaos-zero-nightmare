@@ -74,8 +74,8 @@ export function bestRoster(park: Park): string[] {
   const everyone = new Set(candidates.map((m) => m.name))
   const index = new Map(candidates.map((m, i) => [m.name, i]))
   const n = candidates.length
-  const solo = new Array<number>(n).fill(0)
-  const link = candidates.map(() => new Array<number>(n).fill(0))
+  const solo = Array.from({ length: n }, () => 0)
+  const link = candidates.map(() => Array.from({ length: n }, () => 0))
 
   candidates.forEach((m, i) => {
     solo[i] += m.base / m.interval
@@ -92,7 +92,7 @@ export function bestRoster(park: Park): string[] {
   })
 
   const ceiling = solo.map((s, i) => s + link[i].reduce((a, b) => a + b, 0))
-  const order = [...ceiling.keys()].sort((a, b) => ceiling[b] - ceiling[a])
+  const order = [...ceiling.keys()].toSorted((a, b) => ceiling[b] - ceiling[a])
   const size = Math.min(park.slots, n)
   let bestRate = -1
   let best: number[] = []

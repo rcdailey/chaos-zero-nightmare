@@ -1,3 +1,11 @@
 [tools]
 bun = "1.4.4"
 node = "26.13.1"
+
+[tasks.format]
+description = "Apply lint fixes, then format; the given files, or the whole project"
+run = '''
+#!/usr/bin/env bash
+node_modules/.bin/oxlint --fix --quiet "$@"
+node_modules/.bin/oxfmt "$@"
+'''

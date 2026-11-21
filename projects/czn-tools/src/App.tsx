@@ -17,25 +17,36 @@ const GITHUB_MARK =
 export default function App() {
   return (
     <div className="flex min-h-screen flex-col md:flex-row">
-      <nav className="flex shrink-0 items-center gap-1 border-nord-2 bg-nord-1 p-4 md:sticky
-        md:top-0 md:h-screen md:w-56 md:flex-col md:items-stretch md:border-r">
-        <h1 className="mb-3 hidden px-3 text-sm font-semibold tracking-wide text-nord-8
-          uppercase md:block">
+      <nav
+        className="flex shrink-0 items-center gap-1 border-nord-2 bg-nord-1 p-4 md:sticky
+        md:top-0 md:h-screen md:w-56 md:flex-col md:items-stretch md:border-r"
+      >
+        <h1
+          className="mb-3 hidden px-3 text-sm font-semibold tracking-wide text-nord-8
+          uppercase md:block"
+        >
           CZN Tools
         </h1>
         {TOOLS.map((tool) => (
-          <NavLink key={tool.path} to={`/${tool.path}`}
-            className={({ isActive }) => `rounded-lg px-3 py-2 text-sm transition ${
-              isActive
-                ? 'bg-nord-2 font-semibold text-nord-6'
-                : 'text-nord-4 hover:bg-nord-2/50'
-            }`}>
+          <NavLink
+            key={tool.path}
+            to={`/${tool.path}`}
+            className={({ isActive }) =>
+              `rounded-lg px-3 py-2 text-sm transition ${
+                isActive ? 'bg-nord-2 font-semibold text-nord-6' : 'text-nord-4 hover:bg-nord-2/50'
+              }`
+            }
+          >
             {tool.name}
           </NavLink>
         ))}
-        <a href={REPO_URL} target="_blank" rel="noreferrer"
+        <a
+          href={REPO_URL}
+          target="_blank"
+          rel="noreferrer"
           className="ml-auto flex items-center gap-2 rounded-lg px-3 py-2 text-sm text-nord-4
-            transition hover:bg-nord-2/50 hover:text-nord-6 md:mt-auto md:ml-0">
+            transition hover:bg-nord-2/50 hover:text-nord-6 md:mt-auto md:ml-0"
+        >
           <svg viewBox="0 0 24 24" aria-hidden="true" className="size-5 fill-current">
             <path d={GITHUB_MARK} />
           </svg>

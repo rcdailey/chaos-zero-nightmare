@@ -261,14 +261,9 @@ def test_search_posts_needs_query_or_valid_date(call):
         call("search_posts", active_on="next week")
 
 
-def test_list_characters_filters_by_gender_and_describes_appearance(call, conn):
+def test_list_characters_filters_by_gender(call, conn):
     assert call("list_characters", gender="female") == []
     tag_female(conn)
-    conn.execute(
-        "INSERT INTO prydwen.portrait_appearance (image_url, tags, tagged_at)"
-        " VALUES (%s, %s, now())",
-        (MEI_LIN_PORTRAIT, ["pink hair", "twintails"]),
-    )
     assert call("list_characters", gender="Female") == [
         {
             "name": "Mei Lin",
@@ -276,11 +271,9 @@ def test_list_characters_filters_by_gender_and_describes_appearance(call, conn):
             "element": "Passion",
             "class": "Striker",
             "gender": "female",
-            "appearance": "pink hair, twintails",
             "image_url": MEI_LIN_PORTRAIT,
         }
     ]
-    assert call("get_character", name="mei lin")["appearance"] == ["pink hair", "twintails"]
     assert call("list_characters", gender="male") == []
 
 

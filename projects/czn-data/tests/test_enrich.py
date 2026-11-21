@@ -1,14 +1,14 @@
-"""Contract: enrich derives gender and appearance from stored portraits only, once per image,
-and reports and retries every portrait it could not tag. The tagger is replaced by a function; the database is
-real Postgres.
+"""Contract: enrich derives gender and identity prints from stored portraits only,
+once per image (and per identity model), and reports and retries every portrait it could not
+process. The models are replaced by functions; the database is real Postgres.
 """
 
 from datetime import UTC, datetime
 
 import pytest
 
-from czn_data.enrich import EnrichResult, tag_appearances, tag_genders
-from czn_data.tagger import TaggerUnavailable
+from czn_data.enrich import EnrichResult, compute_identities, tag_genders
+from czn_data.hub import ModelUnavailable
 
 PORTRAIT = "https://cdn.prydwen.gg/images/chaos/characters/mei-lin_card.webp"
 
@@ -42,29 +42,30 @@ def test_stored_portraits_get_a_gender_once(stored):
     assert genders(stored) == [(PORTRAIT, "female")]
 
 
-def test_stored_portraits_get_an_appearance_once_and_failures_retry(stored):
-    def broken(image: bytes) -> list[str]:
+def test_stored_portraits_get_an_identity_print_once_per_model_and_failures_retry(stored):
+    def broken(image: bytes) -> list[float]:
         raise ValueError("not an image")
 
     failed = EnrichResult()
-    tag_appearances(stored, broken, failed)
-    assert failed.failures == {"appearance": 1}
+    compute_identities(stored, "ccip-a", broken, failed)
+    assert failed.failures == {"identity": 1}
 
-    tagged = []
+    computed = []
 
-    def appearance(image: bytes) -> list[str]:
-        tagged.append(image)
-        return ["pink hair", "twintails"]
+    def identity_print(image: bytes) -> list[float]:
+        computed.append(image)
+        return [0.5, 0.25]
 
     result = EnrichResult()
-    tag_appearances(stored, appearance, result)
-    tag_appearances(stored, appearance, result)
+    compute_identities(stored, "ccip-a", identity_print, result)
+    compute_identities(stored, "ccip-a", identity_print, result)
+    compute_identities(stored, "ccip-b", identity_print, result)
 
     assert result.ok
-    assert tagged == [b"art"]
-    assert stored.execute("SELECT image_url, tags FROM prydwen.portrait_appearance").fetchall() == [
-        (PORTRAIT, ["pink hair", "twintails"])
-    ]
+    assert computed == [b"art", b"art"]
+    assert stored.execute(
+        "SELECT image_url, model, print FROM prydwen.portrait_identity ORDER BY model"
+    ).fetchall() == [(PORTRAIT, "ccip-a", [0.5, 0.25]), (PORTRAIT, "ccip-b", [0.5, 0.25])]
 
 
 def test_portrait_that_fails_is_reported_and_retried_next_run(stored):
@@ -87,7 +88,7 @@ def test_unavailable_tagger_is_reported_once(stored):
     )
 
     def unavailable(image: bytes) -> str:
-        raise TaggerUnavailable("model download failed")
+        raise ModelUnavailable("model download failed")
 
     result = EnrichResult()
     tag_genders(stored, unavailable, result)

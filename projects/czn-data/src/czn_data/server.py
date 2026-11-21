@@ -14,8 +14,10 @@ import json
 import logging
 import os
 import re
+import time
 import urllib.request
 from collections import Counter
+from dataclasses import asdict
 from datetime import UTC, date, datetime
 from typing import Literal
 
@@ -28,13 +30,18 @@ from mcp.server.auth.provider import AccessToken, TokenVerifier
 from mcp.server.auth.settings import AuthSettings
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.server.transport_security import TransportSecuritySettings
+from PIL import UnidentifiedImageError
 from psycopg.rows import dict_row
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from . import embed
+from .identity import MODEL as IDENTITY_MODEL
+from .identity import Identifier
 
 log = logging.getLogger(__name__)
+
+IDENTIFY_MAX_BYTES = 10 * 1024 * 1024
 
 LOOKUP_SQL = """
 SELECT entity.* FROM (
@@ -199,8 +206,7 @@ ORDER BY count(*) DESC, c.name
 RECOMMENDED_BY_SQL = RECOMMENDED_BY_SQL.format(match=NAME_MATCH, order=NAME_ORDER)
 
 LIST_CHARACTERS_SQL = """
-SELECT c.name, c.rarity, c.element, c.class, c.gender,
-       array_to_string(c.appearance, ', ') AS appearance, c.image_url
+SELECT c.name, c.rarity, c.element, c.class, c.gender, c.image_url
 FROM character c
 WHERE (%(gender)s::text IS NULL OR c.gender = lower(%(gender)s))
   AND (%(element)s::text IS NULL OR c.element ILIKE %(element)s)
@@ -458,6 +464,52 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
     async def healthz(request: Request) -> JSONResponse:
         return JSONResponse({"status": "ok"})
 
+    identifier = Identifier()
+    # One screenshot at a time: matching is CPU-bound, and parallel runs would each add the
+    # models' working memory.
+    identifying = anyio.Lock()
+
+    @mcp.custom_route("/identify", methods=["POST"])
+    async def identify(request: Request) -> JSONResponse:
+        """REST endpoint for the companion app: names the characters on a game screenshot (see
+        ``czn_data.identity``). The body is the JPEG or PNG; the Bearer token is the same one
+        the MCP endpoint takes. Custom routes are outside the MCP auth middleware, so the token
+        is checked here."""
+        if verifier is not None:
+            token = request.headers.get("authorization", "").removeprefix("Bearer ").strip()
+            if not token or await verifier.verify_token(token) is None:
+                return JSONResponse({"error": "invalid or missing Bearer token"}, 401)
+        if request.headers.get("content-type") not in ("image/jpeg", "image/png"):
+            return JSONResponse({"error": "send the screenshot as image/jpeg or image/png"}, 400)
+        image = await request.body()
+        if len(image) > IDENTIFY_MAX_BYTES:
+            return JSONResponse({"error": "screenshot larger than 10 MB"}, 413)
+        rows = await _query(
+            """
+            SELECT c.name, i.print FROM character c
+            JOIN prydwen.portrait_identity i ON i.image_url = c.image_url AND i.model = %(model)s
+            """,
+            {"model": IDENTITY_MODEL},
+        )
+        prints = {row["name"]: row["print"] for row in rows}
+        started = time.monotonic()
+        try:
+            async with identifying:
+                figures = await anyio.to_thread.run_sync(identifier.identify, image, prints)
+        except UnidentifiedImageError:
+            return JSONResponse({"error": "body is not a readable image"}, 400)
+        log.info(
+            "identified screenshot",
+            extra={
+                "figures": len(figures),
+                "seconds": round(time.monotonic() - started, 2),
+                "bytes": len(image),
+            },
+        )
+        return JSONResponse(
+            {"model": IDENTITY_MODEL, "characters": [asdict(figure) for figure in figures]}
+        )
+
     @mcp.tool()
     async def lookup(name: str, kind: LookupKind | None = None, limit: int = 10) -> list[dict]:
         """Fuzzy-find any named game entity, tolerant of typos and partial names. Use it first
@@ -515,8 +567,7 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
     async def get_character(name: str, section: str | None = None) -> dict | None:
         """Profile of the best-matching character. Without section: rarity, element, class,
         gender (from the game data; for characters only Prydwen has, judged from the art by an
-        image tagger), appearance (visible traits of the portrait, by the same tagger), and the
-        list of available sections. With section, that part of
+        image tagger), and the list of available sections. With section, that part of
         Prydwen's guide: cards (without reviews; use get_card), potentials, manifest_egos,
         teams, decks (with the deck code players paste into the game's deck import, when
         Prydwen gives one, and the Chaos it farms), equipment (per season tab),
@@ -647,14 +698,11 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
         character_class: str | None = None,
         rarity: int | None = None,
     ) -> list[dict]:
-        """Every character, one short line each (name, rarity, element, class, gender,
-        appearance, card art image_url), optionally filtered: gender female or male, element
-        (Passion, Justice, Order, Void, Instinct), character_class (Striker, Vanguard, Ranger,
-        Hunter, Controller, Psionic), rarity 4 or 5. appearance lists visible traits of the
-        character's portrait, most certain first (hair color and style, eye color, eyewear,
-        horns, weapons, outfit), as read by an image tagger: match it against portraits on a
-        game screen (team formation, roster) to tell who is shown. Filter by the element or
-        class icon the screen shows to narrow the candidates first."""
+        """Every character, one short line each (name, rarity, element, class, gender, card art
+        image_url), optionally filtered: gender female or male, element (Passion, Justice,
+        Order, Void, Instinct), character_class (Striker, Vanguard, Ranger, Hunter, Controller,
+        Psionic), rarity 4 or 5. It cannot tell who a portrait on a game screen shows; the
+        companion app names those from the screenshot."""
         return await _query(
             LIST_CHARACTERS_SQL,
             {"gender": gender, "element": element, "class": character_class, "rarity": rarity},

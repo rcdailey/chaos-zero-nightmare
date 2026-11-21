@@ -6,6 +6,8 @@ uv = "0.13.8"
 DATABASE_URL = "postgresql://postgres:dev@localhost:55432/postgres"
 # Where the portrait tagger downloads its model on first use.
 CZN_TAGGER_DIR = "{{env.HOME}}/.cache/czn-data/wd-tagger"
+# Where the screenshot identity models are downloaded on first use (about 250 MB).
+CZN_IDENTITY_DIR = "{{env.HOME}}/.cache/czn-data/identity"
 # Where fastembed keeps the search embedding model (67 MB, downloaded on first use).
 FASTEMBED_CACHE_PATH = "{{env.HOME}}/.cache/czn-data/fastembed"
 

@@ -44,7 +44,7 @@ One container image (`ghcr.io/rcdailey/czn-data`) runs every workload:
   on an empty database; seconds after).
 - `czn-data build`: merges the stored sources again without fetching anything.
 - `czn-data enrich`: derives data from what the Prydwen scrape stored (character gender and
-  appearance), without contacting Prydwen. A run that finds nothing new exits in seconds.
+  identity prints), without contacting Prydwen. A run that finds nothing new exits in seconds.
 - `czn-data serve`: the MCP server (a Deployment), listening on port 8000.
 - `czn-data migrate`: upgrades the database schema, then exits. Every other command except
   `serve` runs it first on its own. Run it as an init container of the server Deployment, with
@@ -83,13 +83,9 @@ parses every stored page, so a parser change applies on the next run without dow
   run that finds untagged art uses the model: it downloads the newest revision of the 467 MB
   model from Hugging Face into `CZN_TAGGER_DIR` when the stored copy is missing or outdated,
   then loads it (about 1 GB of memory). If Hugging Face is unreachable, the stored copy is used.
-- Character appearance, for every character with card art, set by `enrich` with the same tagger:
-  visible traits scoring at least 0.35, most certain first, without framing, pose, expression, or
-  body tags. Key traits (hair color and style, eye color, eyewear, horns, ears, weapons) are always
-  kept; other tags (outfit, accessories) fill up to 15 in total. When no hair color reaches 0.35,
-  the best one is kept if it scores at least 0.15. Claude matches it against portraits on game
-  screens, which show no names. Each image is tagged once, so a change to the trait filter applies
-  only to new art until the `prydwen.portrait_appearance` rows are deleted.
+- Character identity prints, for every character with card art, set by `enrich`: the CCIP
+  model's 768-number print of each card art (see "Naming characters on a screenshot"). Each
+  image is printed once per model.
 - `neutral-cards`, `equipment` (stats per level, drop source), `memory-fragments`, `partners`
   (passive, EGO skill, base stats), and `guides/effects-dictionary` (keyword and status
   definitions).
@@ -190,7 +186,7 @@ failed rows are tried again on the next run:
 
 - `czn_enrich_success`, `czn_enrich_last_success_timestamp_seconds`,
   `czn_enrich_last_run_timestamp_seconds`, `czn_enrich_duration_seconds`: as for the scrape.
-- `czn_enrich_failures{step}`: rows that failed per step (`gender`, `appearance`).
+- `czn_enrich_failures{step}`: rows that failed per step (`gender`, `identity`).
 
 ## Configuration
 
@@ -213,7 +209,10 @@ Environment variables:
 - `MCP_ALLOW_UNAUTHENTICATED` (serve): `true` runs without auth, for local use.
 - `CZN_TAGGER_DIR` (daily, enrich): writable directory, kept across runs (such as a PVC of at
   least 1 GB), where the portrait tagger stores its model. Without it, new characters get no
-  gender or appearance and the run fails. The scrape commands do not need it.
+  gender and the run fails. The scrape commands do not need it.
+- `CZN_IDENTITY_DIR` (daily, enrich, serve): where the screenshot identity models are kept
+  (about 250 MB). The image ships them there, pinned to one revision; outside it, they
+  download on first use.
 - `FASTEMBED_CACHE_PATH` (build, serve): where the search embedding model is kept. The image
   ships the model there and sets `HF_HUB_OFFLINE=1`; outside it, the model downloads on first
   use.
@@ -237,6 +236,33 @@ in the connector's advanced settings. Its access tokens must be JWTs whose `aud`
 `OIDC_AUDIENCE`.
 
 `/healthz` answers without a token, for probes.
+
+## Naming characters on a screenshot
+
+`POST /identify` names the characters on a game screenshot, for the companion app. Send the
+screenshot as the body (`Content-Type: image/jpeg` or `image/png`, at most 10 MB) with the same
+Bearer token the MCP endpoint takes. It answers 401 without a valid token and 400 for a body that
+is not a JPEG or PNG image.
+
+The answer lists each character figure found, top row first and left to right within a row:
+
+```json
+{"model": "ccip-caformer-24-randaug-pruned", "characters": [
+  {"box": [42, 165, 278, 647], "result": "match", "names": ["Rossweisse"],
+   "candidates": ["Rossweisse", "Tressa", "Chizuru"], "differences": [0.012, 0.156, 0.194]}
+]}
+```
+
+- `match`: one character's card art matches; `names` holds it.
+- `close`: the best two are within 0.05 of each other; `names` holds both.
+- `unknown`: nothing matches (difference 0.1785 or more, CCIP's published threshold), such as a
+  monster icon; `names` is empty.
+
+An anime person detector (`deepghs/anime_person_detection`) finds the figures; CCIP
+(`deepghs/ccip_onnx`), a model trained to tell anime characters apart, compares each figure with
+the prints `enrich` stored. Characters added since the last `enrich` cannot be named. The server
+handles one screenshot at a time: about 0.5 seconds per figure on 8 free cores, and about 1 GB
+of memory with the models loaded. Art unlike the card art (battle screens) is untested.
 
 ## Development
 

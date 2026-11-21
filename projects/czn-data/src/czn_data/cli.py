@@ -227,17 +227,17 @@ def _export(send) -> bool:
 
 
 def _enrich() -> bool:
-    from .enrich import EnrichResult, export_metrics, tag_appearances, tag_genders
+    from .enrich import EnrichResult, compute_identities, export_metrics, tag_genders
+    from .identity import MODEL, Identifier
     from .tagger import Tagger
 
     log = logging.getLogger("czn_data")
     started = time.time()
     log.info("run started", extra={"command": "enrich"})
     result = EnrichResult()
-    tagger = Tagger()
     with _connect() as conn:
-        tag_genders(conn, tagger.gender, result)
-        tag_appearances(conn, tagger.appearance, result)
+        tag_genders(conn, Tagger().gender, result)
+        compute_identities(conn, MODEL, Identifier().print_of, result)
     log.info(
         "run finished",
         extra={"command": "enrich", "ok": result.ok, "failures": dict(result.failures)},

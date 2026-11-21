@@ -36,7 +36,7 @@ build-backend = "uv_build"
 [dependency-groups]
 dev = [
     "pytest>=9.2",
-    "pyyaml>=6.0.3",
+    "pytest-socket>=0.8.1",
     "ruff>=0.17",
 ]
 
@@ -50,3 +50,5 @@ allowed-confusables = ["–", "‘", "’"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Tests reach only the throwaway Postgres; any other connection, such as a model download, fails.
+addopts = "--disable-socket --allow-unix-socket --allow-hosts=127.0.0.1,::1,localhost"

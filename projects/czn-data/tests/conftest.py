@@ -3,7 +3,15 @@ import os
 import psycopg
 import pytest
 
+from czn_data import embed
 from czn_data.migrate import migrate
+
+
+@pytest.fixture(autouse=True)
+def same_meaning_for_every_text(monkeypatch):
+    """Replaces the embedding model: every text gets one vector, so search ranks by words."""
+    monkeypatch.setattr(embed, "passages", lambda texts: [[1.0] for _ in texts])
+    monkeypatch.setattr(embed, "query", lambda text: [1.0])
 
 
 @pytest.fixture

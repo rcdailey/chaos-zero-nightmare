@@ -268,7 +268,7 @@ of memory with the models loaded. Art unlike the card art (battle screens) is un
 
 ```sh
 mise run lint
-mise run test   # starts throwaway Postgres and VictoriaMetrics containers
+mise run test   # starts a throwaway Postgres container
 mise run db     # starts the development Postgres from docker-compose.yml
 ```
 

@@ -1,9 +1,13 @@
 # czn-data
 
-- Run tests with `mise run test [pytest args]`; it starts throwaway Postgres and VictoriaMetrics
-  containers. Plain `uv run pytest` silently skips every database, metrics, and tagger test.
-- Tagger tests download a 467 MB model into `CZN_TAGGER_DIR` on first run; post search tests
-  download a 67 MB model into `FASTEMBED_CACHE_PATH`.
+- Run tests with `mise run test [pytest args]`; it starts a throwaway Postgres container. Plain
+  `uv run pytest` silently skips every database test.
+- Durable tests cover this app's own behavior only. A real Postgres is the one allowed external
+  system, because the app's logic lives in SQL. pytest-socket blocks every other connection.
+  Replace a model, site, or other service with a fake at the app's boundary to it. Do not test
+  how well a model performs, how a third-party service behaves, or cluster configuration (metric
+  storage, alert rules, deployment); check those by hand. A test that takes over a second needs
+  a reason.
 - Scrapes fetch live sites: `scrape` (Prydwen, one request per 10 seconds; a few minutes, about 20
   when every page is due: empty database or weekly refresh), `scrape-e7bot` (seconds to 2 minutes;
   about 8 on an empty database), `scrape-stove` (seconds; about 2 minutes on an empty database). To

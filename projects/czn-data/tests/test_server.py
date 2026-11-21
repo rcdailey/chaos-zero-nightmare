@@ -220,26 +220,6 @@ def test_search_posts_by_words_typo_title_and_active_date(call, conn):
     ]
 
 
-def test_search_posts_finds_sections_in_players_words(call, conn):
-    """Runs the real embedding model (downloaded into FASTEMBED_CACHE_PATH on first use)."""
-    add_post(
-        conn,
-        "1",
-        "10/21(Wed) Update Notice",
-        "<p>■ Celestial Bulwark Opens</p>"
-        "<p>◆ Season Restrictions</p><p>Cards: Acid Gas. Equipment: Lead-Colored Holy Water.</p>"
-        "<p>◆ Supply Store</p><p>Item | Limit</p><p>Aether | 5</p>"
-        "<p>■ Bug Fixes</p><p>Fixed Celestial Bulwark boss icons.</p>"
-        "<p>■ Spectral Cube Improvements</p><p>New products for Spectral Cubes.</p>",
-    )
-
-    def top(query: str) -> str:
-        return call("search_posts", query=query)["results"][0]["heading"]
-
-    assert top("what is banned in Celestial Bulwark?").endswith("Season Restrictions")
-    assert top("what's in the Celestial Bulwark shop?").endswith("Supply Store")
-
-
 def test_search_posts_pages_through_every_match(call, conn):
     sections = "".join(f"<p>◆ Event {n} Period: 11/01/2026 – 11/30/2026</p>" for n in range(3))
     add_post(conn, "1", "Events", sections)

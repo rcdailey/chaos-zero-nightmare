@@ -9,13 +9,13 @@ import time
 from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import psycopg
 from opentelemetry.metrics import Meter
 
 from . import metrics, store
-from .fetch import Blocked, FetchFailed, sitemap_urls
+from .fetch import Blocked, FetchFailed, Listing, sitemap_pages
 from .parse import ParseError, page_kind, parse_page
 
 log = logging.getLogger(__name__)
@@ -26,11 +26,14 @@ PROGRESS_INTERVAL_SECONDS = 60
 
 # Pages the sitemaps leave out; robots.txt allows them.
 UNLISTED_PAGES = ("https://www.prydwen.gg/chaos-zero-nightmare/banners",)
+# A stored page is downloaded again after this long even when its sitemap date has not moved.
+MAX_AGE = timedelta(days=7)
 
 
 @dataclass
 class RunResult:
-    pages: Counter = field(default_factory=Counter)  # result -> count
+    pages: Counter = field(default_factory=Counter)  # ok, parse_error, fetch_error -> count
+    fetches: Counter = field(default_factory=Counter)  # fetched, unchanged -> count
     validation_failures: Counter = field(default_factory=Counter)  # (kind, field) -> count
     blocked: bool = False
     discovery_failed: bool = False
@@ -46,9 +49,18 @@ class RunResult:
 
 
 def scrape(conn: psycopg.Connection, get: Callable[[str], str], allow_shrink: bool) -> RunResult:
+    """Download the pages that may have changed (see ``_due``), then parse every stored page,
+    so a parser change reaches pages that were not downloaded."""
     result = RunResult()
+    stored = {
+        url: (lastmod, fetched_at, sitemap)
+        for url, lastmod, fetched_at, sitemap in conn.execute(
+            "SELECT url, lastmod, fetched_at, sitemap FROM prydwen.page"
+        )
+    }
+    remembered = {sitemap for _, _, sitemap in stored.values() if sitemap}
     try:
-        urls = sorted({*sitemap_urls(get), *UNLISTED_PAGES})
+        listed = sitemap_pages(get, remembered)
     except Blocked as error:
         log.error("blocked by Cloudflare", extra={"error": str(error)})
         result.blocked = True
@@ -57,8 +69,28 @@ def scrape(conn: psycopg.Connection, get: Callable[[str], str], allow_shrink: bo
         log.error("page discovery failed", extra={"error": str(error)})
         result.discovery_failed = True
         return result
-    log.info("discovered pages", extra={"count": len(urls)})
+    listed |= dict.fromkeys(UNLISTED_PAGES)
+    now = datetime.now(UTC)
+    due = sorted(url for url, listing in listed.items() if _due(stored.get(url), listing, now))
+    result.fetches["unchanged"] = len(listed) - len(due)
+    log.info("discovered pages", extra={"count": len(listed), "due": len(due)})
+    if _fetch(conn, get, due, listed, result):
+        _parse_stored(conn, allow_shrink, result)
+    return result
 
+
+def _due(stored, listing: Listing | None, now: datetime) -> bool:
+    """Whether a page may have changed since its stored copy: there is none, the sitemap gives
+    no date, the date moved, or the copy is older than ``MAX_AGE`` (which bounds how long a
+    change the date missed goes unnoticed)."""
+    if stored is None or listing is None or listing.lastmod is None:
+        return True
+    lastmod, fetched_at, _ = stored
+    return lastmod != listing.lastmod or fetched_at < now - MAX_AGE
+
+
+def _fetch(conn, get, urls: list[str], listed: dict, result: RunResult) -> bool:
+    """Download and store ``urls``; False when Cloudflare blocked the run."""
     last_progress = time.monotonic()
     for done, url in enumerate(urls):
         if time.monotonic() - last_progress >= PROGRESS_INTERVAL_SECONDS:
@@ -68,9 +100,8 @@ def scrape(conn: psycopg.Connection, get: Callable[[str], str], allow_shrink: bo
                 extra={
                     "done": done,
                     "total": len(urls),
-                    "ok": result.pages["ok"],
+                    "fetched": result.fetches["fetched"],
                     "fetch_error": result.pages["fetch_error"],
-                    "parse_error": result.pages["parse_error"],
                 },
             )
         try:
@@ -79,13 +110,15 @@ def scrape(conn: psycopg.Connection, get: Callable[[str], str], allow_shrink: bo
             # Every later request would be blocked too; stop and keep existing data.
             log.error("blocked by Cloudflare", extra={"url": url, "error": str(error)})
             result.blocked = True
-            return result
+            return False
         except FetchFailed as error:
+            # The stored copy and its date stay, so the next run downloads the page again.
             log.error("fetch failed", extra={"url": url, "error": str(error)})
             result.pages["fetch_error"] += 1
             continue
-        _process(conn, url, html, datetime.now(UTC), allow_shrink, result)
-    return result
+        store.save_html(conn, url, page_kind(url), html, datetime.now(UTC), listed[url])
+        result.fetches["fetched"] += 1
+    return True
 
 
 def fetch_portraits(
@@ -128,13 +161,17 @@ def fetch_portraits(
 def reparse(conn: psycopg.Connection, allow_shrink: bool) -> RunResult:
     """Parse the stored HTML again, for example after fixing a parser. Fetches nothing."""
     result = RunResult()
-    pages = conn.execute("SELECT url, html, fetched_at FROM prydwen.page ORDER BY url").fetchall()
-    for url, html, fetched_at in pages:
-        _process(conn, url, html, fetched_at, allow_shrink, result)
+    _parse_stored(conn, allow_shrink, result)
     return result
 
 
-def _process(conn, url, html, fetched_at, allow_shrink, result: RunResult) -> None:
+def _parse_stored(conn, allow_shrink: bool, result: RunResult) -> None:
+    for (url,) in conn.execute("SELECT url FROM prydwen.page ORDER BY url").fetchall():
+        (html,) = conn.execute("SELECT html FROM prydwen.page WHERE url = %s", (url,)).fetchone()
+        _process(conn, url, html, allow_shrink, result)
+
+
+def _process(conn, url, html, allow_shrink, result: RunResult) -> None:
     kind = page_kind(url)
     parsed, error = None, None
     try:
@@ -152,7 +189,7 @@ def _process(conn, url, html, fetched_at, allow_shrink, result: RunResult) -> No
         result.pages["parse_error"] += 1
     else:
         result.pages["ok"] += 1
-    store.save_page(conn, url, kind, html, fetched_at, parsed, error)
+    store.save_parse(conn, url, kind, parsed, error)
 
 
 def export_metrics(conn: psycopg.Connection, result: RunResult, started: float) -> bool:
@@ -178,6 +215,9 @@ def export_metrics(conn: psycopg.Connection, result: RunResult, started: float) 
         pages = gauge("czn.scrape.pages", "Pages by result")
         for outcome in ("ok", "fetch_error", "parse_error"):
             pages.set(result.pages[outcome], {"result": outcome})
+        fetches = gauge("czn.scrape.fetches", "Pages downloaded or skipped as unchanged")
+        for outcome in ("fetched", "unchanged"):
+            fetches.set(result.fetches[outcome], {"result": outcome})
         failures = gauge(
             "czn.scrape.validation_failures", "Pages that no longer parse, by page kind and field"
         )

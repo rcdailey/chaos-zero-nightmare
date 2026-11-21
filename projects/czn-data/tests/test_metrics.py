@@ -84,6 +84,7 @@ def test_every_metric_arrives_under_the_documented_names(conn, vm):
         ("czn_scrape_last_run_timestamp_seconds", ()),
         ("czn_scrape_duration_seconds", ()),
         ("czn_scrape_pages", ("result",)),
+        ("czn_scrape_fetches", ("result",)),
         ("czn_scrape_validation_failures", ("field", "kind")),
         ("czn_data_rows", ("table",)),
     }

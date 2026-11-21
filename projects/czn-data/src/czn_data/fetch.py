@@ -9,7 +9,10 @@ retrying cannot fix that, so the run stops and alerts.
 import logging
 import re
 import time
+from dataclasses import dataclass
+from datetime import UTC, datetime
 
+from bs4 import BeautifulSoup
 from curl_cffi import requests
 
 log = logging.getLogger(__name__)
@@ -70,21 +73,58 @@ class Fetcher:
         self._last_request = time.monotonic()
 
 
-def sitemap_urls(get) -> list[str]:
-    """Every Chaos Zero Nightmare page URL listed in the sitemaps named by robots.txt."""
+@dataclass(frozen=True)
+class Listing:
+    """A game page as a sitemap lists it: its last-modified date (None when the sitemap gives
+    none) and the sitemap URL that listed it."""
+
+    lastmod: datetime | None
+    sitemap: str
+
+
+def sitemap_pages(get, remembered: set[str]) -> dict[str, Listing]:
+    """Every Chaos Zero Nightmare page listed in the sitemaps named by robots.txt.
+
+    Prydwen keeps each game in its own sitemap, so the sitemaps in ``remembered`` (those that
+    listed game pages last run) are read first; all are read only when robots.txt no longer
+    names them or they list no game pages. Ceiling: if the game spread over a second sitemap,
+    pages there stay unseen until the remembered ones list none.
+    """
     log.info("reading robots.txt")
     robots = get(f"{SITE}/robots.txt")
     sitemaps = re.findall(r"(?im)^sitemap:\s*(\S+)", robots)
     if not sitemaps:
         raise FetchFailed("robots.txt lists no sitemaps")
-    urls = set()
+    known = [sitemap for sitemap in sitemaps if sitemap in remembered]
+    pages = _read_sitemaps(get, known) if known else {}
+    if not pages:
+        pages = _read_sitemaps(get, sitemaps)
+    if not pages:
+        raise FetchFailed("sitemaps list no Chaos Zero Nightmare pages")
+    return pages
+
+
+def _read_sitemaps(get, sitemaps: list[str]) -> dict[str, Listing]:
+    pages = {}
     for number, sitemap in enumerate(sitemaps, 1):
         log.info(
             "reading sitemap", extra={"url": sitemap, "number": number, "total": len(sitemaps)}
         )
-        for url in re.findall(r"<loc>\s*([^<\s]+)\s*</loc>", get(sitemap)):
-            if url.rstrip("/").startswith(f"{SITE}/chaos-zero-nightmare"):
-                urls.add(url.rstrip("/"))
-    if not urls:
-        raise FetchFailed("sitemaps list no Chaos Zero Nightmare pages")
-    return sorted(urls)
+        for entry in BeautifulSoup(get(sitemap), "xml").find_all("url"):
+            loc, lastmod = entry.find("loc"), entry.find("lastmod")
+            url = loc.get_text(strip=True).rstrip("/") if loc else ""
+            if url.startswith(f"{SITE}/chaos-zero-nightmare"):
+                pages[url] = Listing(
+                    _date(lastmod.get_text(strip=True)) if lastmod else None, sitemap
+                )
+    return pages
+
+
+def _date(text: str) -> datetime | None:
+    """A sitemap date, UTC when it names no zone; None (the page is downloaded every run) when
+    it does not parse."""
+    try:
+        date = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    return date if date.tzinfo else date.replace(tzinfo=UTC)

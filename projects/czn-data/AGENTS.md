@@ -4,11 +4,12 @@
   containers. Plain `uv run pytest` silently skips every database, metrics, and tagger test.
 - Tagger tests download a 467 MB model into `CZN_TAGGER_DIR` on first run; post search tests
   download a 67 MB model into `FASTEMBED_CACHE_PATH`.
-- Scrapes fetch live sites: `scrape` (Prydwen, one request per 10 seconds, about 20 minutes),
-  `scrape-e7bot` (seconds to 2 minutes; about 8 on an empty database), `scrape-stove` (seconds;
-  about 2 minutes on an empty database). To verify a change against stored data instead
-  (`mise run db` for the local database): `reparse` after a Prydwen parser change, `build` after
-  a change to `czn_data.build` (merging and Stove post sections).
+- Scrapes fetch live sites: `scrape` (Prydwen, one request per 10 seconds; a few minutes, about 20
+  when every page is due: empty database or weekly refresh), `scrape-e7bot` (seconds to 2 minutes;
+  about 8 on an empty database), `scrape-stove` (seconds; about 2 minutes on an empty database). To
+  verify a change against stored data instead (`mise run db` for the local database): `reparse`
+  after a Prydwen parser change, `build` after a change to `czn_data.build` (merging and Stove post
+  sections).
 - Migrations are hand-written SQL under `src/czn_data/migrations/versions`, forward only. A
   migration that changes tables built from page HTML MUST call `request_rebuild()`; one that
   changes the merged tables in `public` MUST call `request_build()`.

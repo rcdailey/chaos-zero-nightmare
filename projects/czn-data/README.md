@@ -35,8 +35,10 @@ One container image (`ghcr.io/rcdailey/czn-data`) runs every workload:
   details only when e7bot's diff timestamp shows new game data, or once a week (about 2 minutes
   then). Leaderboard saves never change, so each is fetched once; the first run fetches about 1,300
   (about 6 minutes).
-- `czn-data scrape`: the Prydwen scrape. A run takes about 20 minutes because it waits 10
-  seconds between requests, as Prydwen's robots.txt asks.
+- `czn-data scrape`: the Prydwen scrape. It waits 10 seconds between requests, as Prydwen's
+  robots.txt asks, so it downloads only pages that may have changed (see below) and then parses
+  every stored page again. A run takes a few minutes; one that downloads every page (the first,
+  and about once a week) takes about 20.
 - `czn-data scrape-stove`: the Stove scrape. It pauses one second between requests. Board lists are
   read every run; a post is fetched only when its edit time changed (about 120 posts, 2 minutes,
   on an empty database; seconds after).
@@ -58,7 +60,14 @@ neither source.
 
 ## What gets stored from Prydwen
 
-The scraper finds every page through robots.txt and the sitemaps, saves its HTML, and parses it:
+The scraper finds every page through robots.txt and the sitemaps. Prydwen keeps each game in its
+own sitemap, so a run reads only the sitemap that listed the game's pages last time, and reads all
+of them when robots.txt no longer names it or it lists no game pages. A page is downloaded when
+there is no stored copy, the sitemap gives it no date, its sitemap date differs from the stored
+copy's, or the copy is more than 7 days old (which bounds how long a change the date misses, such
+as a listing page gaining a character, goes unnoticed). A page that fails to download keeps its
+copy and date and is tried again next run. The scraper saves each downloaded page's HTML, then
+parses every stored page, so a parser change applies on the next run without downloading:
 
 - Character pages: rarity, element, class, cards and their Epiphany variants (I to V) with
   Prydwen's star ratings and per-variant reviews, Neutral and Divine advice, potentials,
@@ -143,9 +152,10 @@ listed are deleted.
 The scraper exits non-zero on any failure, including a failed metrics export. It writes JSON logs
 (`time`, `level`, `msg`, plus fields such as `url` and `error`) that vlagent maps to VictoriaLogs
 fields. A scrape logs `run started` first, then `reading robots.txt` and each `reading sitemap`,
-then a `fetch progress` line about once a minute (`done`, `total`, `ok`, `fetch_error`,
-`parse_error`), and finally `run finished` and the metrics export outcome. Successful pages get
-no line of their own. Alert rules for vmalert are in [deploy/alerts.yaml](deploy/alerts.yaml).
+then `discovered pages` (`count`, and `due` to download), a `fetch progress` line about once a
+minute (`done`, `total`, `fetched`, `fetch_error`), and finally `run finished` and the metrics
+export outcome. Successful pages get no line of their own. Alert rules for vmalert are in
+[deploy/alerts.yaml](deploy/alerts.yaml).
 
 At the end of each run the scraper sends its metrics once over OTLP/HTTP and waits for the
 receiver to accept them before it exits. The names below are the ones VictoriaMetrics stores
@@ -158,8 +168,10 @@ Every series also carries the OTLP resource attributes as labels, such as `servi
 - `czn_scrape_last_run_timestamp_seconds`, `czn_scrape_duration_seconds`: end and length of the
   run.
 - `czn_scrape_blocked`, `czn_scrape_discovery_failed`: 1 when the run stopped early.
-- `czn_scrape_pages{result}`: pages per result (`ok`, `fetch_error`, `parse_error`). Card
-  images that fail to download also count as `fetch_error`.
+- `czn_scrape_pages{result}`: pages per result. `ok` and `parse_error` count every stored page
+  parsed in the run, downloaded or not; `fetch_error` counts failed downloads, card images
+  included.
+- `czn_scrape_fetches{result}`: pages `fetched` and pages skipped as `unchanged`.
 - `czn_scrape_validation_failures{kind,field}`: page kind and field that stopped parsing.
 - `czn_data_rows{table}`: rows per table after the run (Prydwen tables from the scrape, merged
   tables from the build).

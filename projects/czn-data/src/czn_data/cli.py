@@ -266,6 +266,7 @@ def _prydwen(command: str, allow_shrink: bool) -> bool:
                 "command": command,
                 "ok": result.ok,
                 "pages": dict(result.pages),
+                "fetches": dict(result.fetches),
                 "blocked": result.blocked,
                 "validation_failures": [
                     {"kind": k, "field": f, "count": n}

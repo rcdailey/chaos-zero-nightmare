@@ -6,11 +6,13 @@ with ``czn-data reparse``) and the previous rows stay in place. The MCP server d
 these tables directly; ``czn_data.build`` merges them with e7bot's data.
 """
 
+from dataclasses import astuple
 from datetime import datetime
 
 import psycopg
 from psycopg.types.json import Jsonb
 
+from .fetch import Listing
 from .parse import ParsedPage, ParseError
 
 DERIVED_TABLES = (
@@ -58,14 +60,40 @@ def save_page(
 ) -> None:
     """Store the HTML; replace the page's rows only when ``parsed`` is given."""
     with conn.transaction():
+        save_html(conn, url, kind, html, fetched_at)
+        save_parse(conn, url, kind, parsed, error)
+
+
+def save_html(
+    conn: psycopg.Connection,
+    url: str,
+    kind: str,
+    html: str,
+    fetched_at: datetime,
+    listing: Listing | None = None,
+) -> None:
+    """Store a downloaded page with the sitemap listing it was downloaded for, leaving its
+    rows to ``save_parse``."""
+    conn.execute(
+        """
+        INSERT INTO prydwen.page (url, kind, html, fetched_at, lastmod, sitemap)
+        VALUES (%s, %s, %s, %s, %s, %s)
+        ON CONFLICT (url) DO UPDATE SET kind = excluded.kind, html = excluded.html,
+            fetched_at = excluded.fetched_at, lastmod = excluded.lastmod,
+            sitemap = excluded.sitemap
+        """,
+        (url, kind, html, fetched_at, *(astuple(listing) if listing else (None, None))),
+    )
+
+
+def save_parse(
+    conn: psycopg.Connection, url: str, kind: str, parsed: ParsedPage | None, error: str | None
+) -> None:
+    """Record how the stored HTML parsed; replace the page's rows only when ``parsed`` is given."""
+    with conn.transaction():
         conn.execute(
-            """
-            INSERT INTO prydwen.page (url, kind, html, fetched_at, parse_error)
-            VALUES (%s, %s, %s, %s, %s)
-            ON CONFLICT (url) DO UPDATE SET kind = excluded.kind, html = excluded.html,
-                fetched_at = excluded.fetched_at, parse_error = excluded.parse_error
-            """,
-            (url, kind, html, fetched_at, error),
+            "UPDATE prydwen.page SET kind = %s, parse_error = %s WHERE url = %s",
+            (kind, error, url),
         )
         if parsed is None:
             return

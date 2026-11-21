@@ -48,8 +48,9 @@ SELECT entity.* FROM (
     SELECT 'character' AS kind, name, concat_ws(' ', rarity || '*', element, class) AS summary,
            url, data_fetched_at FROM character
     UNION ALL
-    SELECT 'card', name, concat_ws(' | ', color, type, 'cost ' || cost, text), url,
-           data_fetched_at FROM card
+    -- A version's game name joins its card name, so "Flicker Blade (Unbound)" finds V first.
+    SELECT 'card', concat_ws(' ', name, '(' || nullif(alias, '') || ')'),
+           concat_ws(' | ', color, type, 'cost ' || cost, text), url, data_fetched_at FROM card
     UNION ALL
     SELECT 'equipment', name, concat_ws(' | ', rarity, slot, text), url, data_fetched_at
     FROM equipment
@@ -382,9 +383,9 @@ LIMIT 1
 LIST_LIMIT = 60
 # Characters of page text per get_page call; get_page's description states the number.
 PAGE_CHARS = 15_000
-# Divine Epiphanies per list_divine_epiphanies call (about 10,000 characters); its description
-# states the number.
-DIVINE_PAGE = 30
+# Rows per call of the list tools that page (a page of Divine Epiphanies is about 10,000
+# characters); their descriptions state the number.
+LIST_PAGE = 30
 
 # Sections closest in meaning that search_posts merges with its word matches.
 MEANING_CANDIDATES = 20
@@ -425,7 +426,7 @@ FROM encounter e
 WHERE {_IN_CHAOS} AND (%(reward)s::text IS NULL OR %(reward)s = ANY (e.reward_classes))
 ORDER BY 'copy' = ANY (e.reward_classes) DESC, 'removal' = ANY (e.reward_classes) DESC,
          e.any_chaos, e.name
-LIMIT {LIST_LIMIT}
+LIMIT {LIST_PAGE} OFFSET %(offset)s
 """
 CHAOS_MATCH_SQL = f"""
 SELECT name FROM chaos WHERE {NAME_MATCH} ORDER BY {NAME_ORDER} LIMIT 1
@@ -545,8 +546,8 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
     async def get_card(name: str) -> list[dict]:
         """Every version of the best-matching card: the base card and its Epiphany variants
         (I-V), each with full text, cost, tags, Prydwen's star rating (1 to 5) and its own
-        review. The
-        base card also carries the overall review, the recommended Neutral Epiphany
+        review; alias is the name the game shows for a version, when it has one (Unbound in
+        "Flicker Blade (Unbound)"). The base card also carries the overall review, the recommended Neutral Epiphany
         (target_neutral) and Prydwen's Neutral and Divine advice."""
         return await _query(
             f"""
@@ -568,7 +569,8 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
         """Profile of the best-matching character. Without section: rarity, element, class,
         gender (from the game data; for characters only Prydwen has, judged from the art by an
         image tagger), and the list of available sections. With section, that part of
-        Prydwen's guide: cards (without reviews; use get_card), potentials, manifest_egos,
+        Prydwen's guide: cards (without reviews, use get_card; alias is the name the game
+        shows for a version, when it has one), potentials, manifest_egos,
         teams, decks (with the deck code players paste into the game's deck import, when
         Prydwen gives one, and the Chaos it farms), equipment (per season tab),
         seasonal_powers, fragments, partners, synergies, or a prose section by title (Pros,
@@ -608,19 +610,28 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
 
     @mcp.tool()
     async def match_card_text(
-        text: str, character: str | None = None, limit: int = 5
+        texts: list[str], character: str | None = None, limit: int = 3
     ) -> list[dict]:
-        """Find the card and Epiphany variant whose effect text best matches text read from the
-        screen (the game shows Epiphany choices as text, without variant numbers). Numbers in
-        the text decide between versions that differ only in them. character narrows the
-        search to one character's cards (name or slug, typos tolerated). match is 0 to 1;
-        limit is at most 20."""
+        """Find the card and Epiphany variant whose effect text best matches each text read from
+        the screen (the game shows Epiphany choices as text, without variant numbers); send
+        every card's text on a screen in one call. Numbers in the text decide between versions
+        that differ only in them; a screen value raised by an upgrade (360% for a stored 300%)
+        lowers match. character narrows the search to one character's cards (name or slug,
+        typos tolerated). Returns one item per text, in order: the text and its matches, best
+        first, at most limit (up to 10) each. match is 0 to 1; alias is the name the game shows
+        for that version, when it has one (Unbound in "Flicker Blade (Unbound)")."""
         slug = None
         if character:
             found = await _find_character(character)
             if found is None:
-                return []
+                return [{"text": text, "matches": []} for text in texts]
             slug = found["slug"]
+        return [
+            {"text": text, "matches": await _match_card_text(text, slug, min(limit, 10))}
+            for text in texts
+        ]
+
+    async def _match_card_text(text: str, slug: str | None, limit: int) -> list[dict]:
         rows = await _query(
             """
             SELECT card.name, card.base_name, card.variant, card.alias, card.color, card.cost,
@@ -642,7 +653,7 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
             numbers = shared / max(sum(wanted.values()), sum(have.values())) if wanted else 1
             row["match"] = round(row["match"] * (0.5 + 0.5 * numbers), 2)
         rows.sort(key=lambda row: -row["match"])
-        return rows[: min(limit, 20)]
+        return rows[:limit]
 
     @mcp.tool()
     async def find_teams(character: str) -> list[dict]:
@@ -776,7 +787,7 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
         forbidden; type is Attack, Skill, Upgrade and so on; tag is a card tag such as
         Exhaust; color is the card's rarity color (White, Blue, Purple, Gold, Orange), which
         players use to name cards ("her purple card"). base_only skips Epiphany and other
-        versions."""
+        versions; alias is the name the game shows for a version, when it has one."""
         slug = None
         if character:
             found = await _find_character(character)
@@ -786,8 +797,9 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
         listing = await _listing(
             f"""
             SELECT card.name, card.category, card.color, card.cost, card.type, card.tags,
-                   card.text, card.variant, card.rating, character.name AS character,
-                   card.url, card.data_fetched_at, count(*) OVER () AS total
+                   card.text, card.variant, card.alias, card.rating,
+                   character.name AS character, card.url, card.data_fetched_at,
+                   count(*) OVER () AS total
             FROM card LEFT JOIN character ON character.slug = card.character_slug
             WHERE (%(slug)s::text IS NULL OR card.character_slug = %(slug)s)
               AND (%(category)s::text IS NULL OR card.category = lower(%(category)s))
@@ -817,13 +829,15 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
         rarity: str | None = None,
         name: str | None = None,
         chaos: str | None = None,
+        offset: int = 0,
     ) -> dict:
         """List equipment, optionally by slot (Weapon, Armor, Trinket; plurals work), rarity
         (Rare, Legendary, ...), name (typos tolerated) or chaos (a Chaos zone such as
         Celestial Bulwark, typos tolerated: only equipment that drops there), with effect text
-        and where it drops (obtained_from); total counts every match, and note says when
-        results shows only part of them. Stats per level are included when name is given. An
-        unknown Chaos name is an error that lists the known ones."""
+        and where it drops (obtained_from); total counts every match; results holds 30 from
+        offset, and note says how to read on. Stats per level are included when name is
+        given. An unknown Chaos name is an error that lists the known ones."""
+        offset = max(offset, 0)
         return await _listing(
             f"""
             SELECT name, rarity, slot, text, obtained_from,
@@ -841,9 +855,16 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
                   WHERE %(chaos)s ILIKE '%%' || place || '%%'))
             ORDER BY CASE WHEN %(name)s::text IS NOT NULL THEN word_similarity(%(name)s, name)
                      END DESC NULLS LAST, name
-            LIMIT {LIST_LIMIT * 2}
+            LIMIT {LIST_PAGE} OFFSET %(offset)s
             """,
-            {"slot": slot, "rarity": rarity, "name": name, "chaos": await _resolve_chaos(chaos)},
+            {
+                "slot": slot,
+                "rarity": rarity,
+                "name": name,
+                "chaos": await _resolve_chaos(chaos),
+                "offset": offset,
+            },
+            offset=offset,
         )
 
     @mcp.tool()
@@ -1139,17 +1160,18 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
         chaos: str | None = None,
         reward: Literal["copy", "removal", "epiphany", "divine_epiphany", "equipment", "card"]
         | None = None,
+        offset: int = 0,
     ) -> dict:
         """Chaos events, optionally only those that can appear in one Chaos (by name, typos
         tolerated; lookup kind chaos lists the names) and those with an answer giving one
         reward class. Events offering card copies come first, then removals, since those
         decide a one-character deck. Each row names the answers (with their stage) that give
-        the requested class (or copies and removals). total counts every match, and note says
-        when results shows only part of them. An unknown Chaos name is an error that lists the
-        known ones."""
-        return await _listing(
-            LIST_ENCOUNTERS_SQL, {"chaos": await _resolve_chaos(chaos), "reward": reward}
-        )
+        the requested class (or copies and removals). total counts every match; results holds
+        30 from offset, and note says how to read on. An unknown Chaos name is an error that
+        lists the known ones."""
+        offset = max(offset, 0)
+        params = {"chaos": await _resolve_chaos(chaos), "reward": reward, "offset": offset}
+        return await _listing(LIST_ENCOUNTERS_SQL, params, offset=offset)
 
     @mcp.tool()
     async def list_divine_epiphanies(
@@ -1176,7 +1198,7 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
                    OR cost_min IS NULL)
               AND (%(god)s::text IS NULL OR %(god)s ILIKE ANY (gods))
             ORDER BY text, applies_to
-            LIMIT {DIVINE_PAGE} OFFSET %(offset)s
+            LIMIT {LIST_PAGE} OFFSET %(offset)s
             """,
             {"type": card_type, "cost": cost, "god": god, "offset": offset},
             offset=offset,

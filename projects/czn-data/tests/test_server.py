@@ -269,13 +269,23 @@ def test_synergies_combine_synergy_lists_and_teams(call):
     assert (tiphera["name"], tiphera["sources"]) == ("Tiphera", ["team"])
 
 
-def test_match_card_text_finds_the_variant_from_screen_text(call):
-    best = call("match_card_text", text="For 1 turn each Passion Card used 1 extra Hit")[0]
+def test_match_card_text_finds_the_variant_of_each_screen_text(call):
+    texts = ["For 1 turn each Passion Card used 1 extra Hit", "no card says this zzz"]
+    spire, nothing = call("match_card_text", texts=texts)
+    assert spire["text"] == texts[0]
+    best = spire["matches"][0]
     assert (best["name"], best["variant"], best["alias"]) == (
         "Rising Dragon Spire V",
         "V",
         "Ascended",
     )
+    assert nothing["text"] == texts[1]
+    assert all(match["match"] < best["match"] for match in nothing["matches"])
+
+
+def test_lookup_finds_a_version_by_the_name_the_game_shows(call):
+    best = call("lookup", name="Rising Dragon Spire (Ascended)", kind="card")[0]
+    assert best["name"] == "Rising Dragon Spire V (Ascended)"
 
 
 def test_find_teams_by_member(call):

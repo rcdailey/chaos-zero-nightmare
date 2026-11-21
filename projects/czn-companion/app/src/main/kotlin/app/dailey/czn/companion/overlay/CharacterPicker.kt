@@ -1,9 +1,11 @@
 package app.dailey.czn.companion.overlay
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
@@ -11,13 +13,10 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
-import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
-import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
@@ -26,7 +25,6 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
@@ -64,6 +62,7 @@ class PickerActions(
 @Composable
 fun CharacterPicker(
     state: PickerState,
+    roster: RosterState,
     actions: PickerActions,
 ) = Surface(color = MaterialTheme.colorScheme.surface, modifier = Modifier.fillMaxSize()) {
     Column(Modifier.windowInsetsPadding(WindowInsets.safeDrawing)) {
@@ -87,12 +86,10 @@ fun CharacterPicker(
                     containerColor = MaterialTheme.colorScheme.surface,
                 ),
         )
-        val options = state.options
-        val roster = state.roster
-        when {
-            options.isNotEmpty() -> CharacterGrid(options, actions.onPick)
-            roster is RosterState.Failed -> RosterError(roster.message, actions.onRetry)
-            else -> Loading()
+        when (roster) {
+            is RosterState.Loaded -> CharacterGrid(roster.characters, actions.onPick)
+            is RosterState.Failed -> RosterError(roster.message, actions.onRetry)
+            RosterState.Loading -> Loading()
         }
     }
 }
@@ -111,41 +108,45 @@ private fun CharacterGrid(
 }
 
 /**
- * Claude's question with a few named characters, shown in the conversation under its reply: one
- * row that scrolls sideways when it overflows. The panel's Stop button stops the waiting reply.
+ * A character's card art and name; the picker's grid and character questions both use it.
+ * [selected] outlines the card and adds a check, so the pick does not rest on color alone.
  */
 @Composable
-fun InlineCharacterChoice(
-    state: PickerState,
-    actions: PickerActions,
-) = Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-    Text(PICKER_TITLE, style = MaterialTheme.typography.titleSmall)
-    LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        items(state.options, key = { it.name }) { character ->
-            CharacterCard(character, actions.onPick, Modifier.width(INLINE_CARD_WIDTH))
-        }
-    }
-    TextButton(onClick = actions.onClose) { Text("Skip") }
-}
-
-@Composable
-private fun CharacterCard(
+fun CharacterCard(
     character: RosterCharacter,
     onPick: (String) -> Unit,
     modifier: Modifier = Modifier,
-) = Card(onClick = { onPick(character.name) }, modifier = modifier) {
+    selected: Boolean = false,
+) = Card(
+    onClick = { onPick(character.name) },
+    border = if (selected) BorderStroke(2.dp, MaterialTheme.colorScheme.primary) else null,
+    modifier = modifier,
+) {
     AsyncImage(
         model = character.imageUrl,
         contentDescription = null,
         contentScale = ContentScale.Crop,
         modifier = Modifier.fillMaxWidth().aspectRatio(CARD_ASPECT_RATIO).vignette(),
     )
-    Text(
-        character.name,
-        style = MaterialTheme.typography.titleSmall,
-        textAlign = TextAlign.Center,
-        modifier = Modifier.fillMaxWidth().padding(8.dp),
-    )
+    Row(
+        Modifier.fillMaxWidth().padding(8.dp),
+        horizontalArrangement = Arrangement.spacedBy(4.dp, Alignment.CenterHorizontally),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        if (selected) {
+            Icon(
+                painterResource(R.drawable.ic_check),
+                contentDescription = "Picked",
+                tint = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.size(18.dp),
+            )
+        }
+        Text(
+            character.name,
+            style = MaterialTheme.typography.titleSmall,
+            textAlign = TextAlign.Center,
+        )
+    }
 }
 
 /**
@@ -173,8 +174,6 @@ private fun Modifier.vignette() =
             blendMode = BlendMode.DstIn,
         )
     }
-
-private val INLINE_CARD_WIDTH = 112.dp
 
 private const val PICKER_TITLE = "Pick the run's character"
 
@@ -207,13 +206,10 @@ private fun CharacterPickerPreview() =
     CompanionTheme(dark = true) {
         Box(Modifier.size(900.dp, 600.dp)) {
             CharacterPicker(
-                PickerState(
-                    forReply = true,
-                    roster =
-                        RosterState.Loaded(
-                            listOf("Adelheid", "Mei Lin", "Mika", "Tiphera", "Veronica")
-                                .map(::RosterCharacter),
-                        ),
+                PickerState(forReply = true),
+                RosterState.Loaded(
+                    listOf("Adelheid", "Mei Lin", "Mika", "Tiphera", "Veronica")
+                        .map(::RosterCharacter),
                 ),
                 PickerActions(),
             )

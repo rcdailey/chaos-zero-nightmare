@@ -35,7 +35,6 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
@@ -49,8 +48,6 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.focus.FocusRequester
-import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.toAndroidRect
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
@@ -79,6 +76,10 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.roundToIntRect
 import app.dailey.czn.companion.CompanionTheme
 import app.dailey.czn.companion.R
+import app.dailey.czn.companion.ask.Answer
+import app.dailey.czn.companion.ask.AnsweredAsk
+import app.dailey.czn.companion.ask.Option
+import app.dailey.czn.companion.ask.Question
 import app.dailey.czn.companion.run.EntryKind
 import app.dailey.czn.companion.run.RunEntry
 import com.mikepenz.markdown.m3.Markdown
@@ -280,6 +281,9 @@ class PanelActions(
 /** Below this height the top bar would leave the conversation almost no room. */
 private val TOP_BAR_MIN_PANEL_HEIGHT = 240.dp
 
+/** Below this height a question card hides its options while the player types an answer. */
+private val SHORT_PANEL_HEIGHT = 400.dp
+
 /**
  * The side panel, in the side tab's neutral surface so the two read as one piece; the theme's
  * accent color marks only actions and highlights.
@@ -289,7 +293,7 @@ fun Panel(
     state: PanelState,
     draft: TextFieldState,
     actions: PanelActions,
-    pickerActions: PickerActions,
+    askActions: AskActions,
 ) = Surface(
     color = MaterialTheme.colorScheme.surfaceContainer,
     contentColor = MaterialTheme.colorScheme.onSurface,
@@ -300,9 +304,10 @@ fun Panel(
     // it and drops the top bar when that space is too short for it.
     BoxWithConstraints(Modifier.imePadding()) {
         val roomForTopBar = maxHeight >= TOP_BAR_MIN_PANEL_HEIGHT
+        val short = maxHeight < SHORT_PANEL_HEIGHT
         Column {
             if (roomForTopBar) PanelTopBar(state, actions)
-            PanelBody(state, draft, actions, pickerActions)
+            PanelBody(state, draft, actions, askActions, short)
         }
     }
 }
@@ -312,7 +317,7 @@ private fun PanelTopBar(
     state: PanelState,
     actions: PanelActions,
 ) = TopAppBar(
-    title = { Text("CZN Companion", maxLines = 1, overflow = TextOverflow.Ellipsis) },
+    title = { RunCharacterChip(state.character, actions.onChangeCharacter) },
     actions = {
         IconButton(onClick = actions.onNewRun, enabled = !state.busy) {
             Icon(painterResource(R.drawable.ic_add), contentDescription = "New run")
@@ -336,57 +341,64 @@ private fun PanelTopBar(
         ),
 )
 
-@Composable
-private fun PanelBody(
-    state: PanelState,
-    draft: TextFieldState,
-    actions: PanelActions,
-    pickerActions: PickerActions,
-) = Column(
-    Modifier.padding(start = 16.dp, end = 16.dp, bottom = 16.dp),
-    verticalArrangement = Arrangement.spacedBy(8.dp),
-) {
-    RunCharacterChip(state.character, actions.onChangeCharacter)
-    if (state.confirmingNewRun) {
-        Text("Start a new run? This clears the conversation.")
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button(onClick = actions.onConfirmNewRun) { Text("New run") }
-            OutlinedButton(onClick = actions.onCancelNewRun) { Text("Keep this run") }
-        }
-    }
-    Conversation(state, pickerActions, Modifier.weight(1f))
-    state.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
-    AskRow(state, draft, actions)
-}
-
-/** The run's character, which Claude's advice assumes; a tap opens the picker to change it. */
+/**
+ * The run's character, which Claude's advice assumes, in the top bar's title spot: a person icon
+ * with the name, or "None" until one is set. A tap opens the picker.
+ */
 @Composable
 private fun RunCharacterChip(
     character: String?,
     onClick: () -> Unit,
 ) = AssistChip(
     onClick = onClick,
-    label = { Text(character?.let { "Run: $it" } ?: "Set run character") },
+    label = { Text(character ?: "None", maxLines = 1, overflow = TextOverflow.Ellipsis) },
     leadingIcon = {
         Icon(
             painterResource(R.drawable.ic_person),
-            contentDescription = null,
+            contentDescription = "Run character",
             modifier = Modifier.size(AssistChipDefaults.IconSize),
         )
     },
 )
 
 @Composable
+private fun PanelBody(
+    state: PanelState,
+    draft: TextFieldState,
+    actions: PanelActions,
+    askActions: AskActions,
+    short: Boolean,
+) = Column(
+    Modifier.padding(start = 16.dp, end = 16.dp, bottom = 16.dp),
+    verticalArrangement = Arrangement.spacedBy(8.dp),
+) {
+    // While the player types an answer, the question card has its own buttons; the rest of the
+    // panel steps aside to leave the card the room above the keyboard.
+    val typingAnswer = state.typing == Typing.Answer
+    if (state.confirmingNewRun && !typingAnswer) {
+        Text("Start a new run? This clears the conversation.")
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Button(onClick = actions.onConfirmNewRun) { Text("New run") }
+            OutlinedButton(onClick = actions.onCancelNewRun) { Text("Keep this run") }
+        }
+    }
+    Conversation(state, askActions, short, Modifier.weight(1f))
+    state.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+    if (!typingAnswer) AskRow(state, draft, actions)
+}
+
+@Composable
 private fun Conversation(
     state: PanelState,
-    pickerActions: PickerActions,
+    askActions: AskActions,
+    short: Boolean,
     modifier: Modifier,
 ) {
     val listState = rememberLazyListState()
     // A new question jumps to the newest message even if the user had scrolled back.
-    // So does Claude's inline question, which is the newest item while it waits.
-    val inlinePicker = state.picker?.takeIf { it.inline }
-    LaunchedEffect(state.pendingQuestion, inlinePicker != null) {
+    // So do Claude's questions, the newest item while they wait, and each of their steps.
+    val ask = state.ask
+    LaunchedEffect(state.pendingQuestion, ask?.step, ask != null) {
         if (state.pendingQuestion != null) listState.scrollToItem(0)
     }
     // Reversed layout anchors the list at its bottom, so a growing reply stays in view while
@@ -397,13 +409,27 @@ private fun Conversation(
         reverseLayout = true,
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        inlinePicker?.let { picker ->
-            item(key = "inline-picker") { InlineCharacterChoice(picker, pickerActions) }
+        ask?.let { progress ->
+            item(key = "ask") {
+                AskCard(
+                    progress,
+                    state.roster,
+                    typing = state.typing == Typing.Answer,
+                    short = short,
+                    askActions,
+                )
+            }
         }
         state.pendingQuestion?.let { question ->
             item(key = "pending-reply") {
-                // The spinner would claim Claude is working while it waits for the player.
-                Reply(state.streaming, state.pendingTools, complete = inlinePicker != null)
+                Reply(
+                    state.streaming,
+                    state.pendingTools,
+                    state.pendingAsks,
+                    complete = false,
+                    // The spinner would claim Claude is working while it waits for the player.
+                    working = ask == null,
+                )
             }
             item(key = "pending-question") { Question(question) }
         }
@@ -411,31 +437,34 @@ private fun Conversation(
             if (entry.kind == EntryKind.User) {
                 Question(entry.text)
             } else {
-                Reply(entry.text, entry.tools, complete = true)
+                Reply(entry.text, entry.tools, entry.asks, complete = true, working = false)
             }
         }
     }
 }
 
 /**
- * A reply: the CZN data lookups behind it, its collapsed seen block, then the advice; a spinner
- * while no advice is shown yet.
+ * A reply: the CZN data lookups behind it, its collapsed seen block, then the advice with each
+ * set of questions Claude asked where it asked them; a spinner while Claude is [working] and no
+ * advice follows the last question yet.
  */
 @Composable
 private fun Reply(
     text: String,
     tools: List<String>,
+    asks: List<AnsweredAsk>,
     complete: Boolean,
+    working: Boolean,
 ) {
-    val parts = ReplyParts.parse(text, complete)
+    val parts = ReplyParts.parse(text, complete, asks.map { it.offset })
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         if (tools.isNotEmpty()) ToolCalls(tools)
         parts.seen?.let { SeenBlock(it) }
-        if (parts.advice.isNotEmpty()) {
-            SteadyMarkdown(parts.advice)
-        } else if (!complete) {
-            Thinking()
+        parts.advice.forEachIndexed { index, advice ->
+            if (advice.isNotEmpty()) SteadyMarkdown(advice)
+            asks.getOrNull(index)?.let { AnsweredAskCard(it) }
         }
+        if (working && parts.advice.last().isEmpty()) Thinking()
     }
 }
 
@@ -525,19 +554,14 @@ private fun AskRow(
     draft: TextFieldState,
     actions: PanelActions,
 ) {
-    val focus = remember { FocusRequester() }
-    LaunchedEffect(state.composing) { if (state.composing) focus.requestFocus() }
     Row(verticalAlignment = Alignment.CenterVertically) {
-        Box(Modifier.weight(1f)) {
-            OutlinedTextField(
-                state = draft,
-                placeholder = { Text("Optional question") },
-                modifier = Modifier.fillMaxWidth().focusRequester(focus),
-            )
-            if (!state.composing) {
-                Box(Modifier.matchParentSize().clickable(onClick = actions.onCompose))
-            }
-        }
+        TypingField(
+            draft,
+            "Optional question",
+            typing = state.typing == Typing.Question,
+            onStartTyping = actions.onCompose,
+            modifier = Modifier.weight(1f),
+        )
         AskButton(state.busy, draft, actions)
     }
 }
@@ -594,13 +618,23 @@ private fun PanelPreviewContent() =
             streaming = "<seen>Same offer.</seen>\n\nRadiant Sword Flow needs more Justice",
             busy = true,
             character = "Rossweisse",
-            picker =
-                PickerState(
-                    candidates = listOf("Mei Lin", "Veronica", "Tiphera"),
-                    forReply = true,
+            pendingAsks =
+                listOf(
+                    AnsweredAsk(
+                        offset = 24,
+                        questions =
+                            listOf(
+                                Question(
+                                    "Do you own Radiant Sword Flow's Epiphany?",
+                                    "Epiphany",
+                                    listOf(Option("Yes"), Option("No")),
+                                ),
+                            ),
+                        answers = listOf(Answer(picked = listOf("No"))),
+                    ),
                 ),
         ),
         TextFieldState(),
         PanelActions(),
-        PickerActions(),
+        AskActions(),
     )

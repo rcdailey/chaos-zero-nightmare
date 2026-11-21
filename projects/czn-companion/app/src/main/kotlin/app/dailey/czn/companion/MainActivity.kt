@@ -32,11 +32,16 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.dynamicDarkColorScheme
 import androidx.compose.material3.dynamicLightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.Immutable
+import androidx.compose.runtime.ReadOnlyComposable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.tooling.preview.PreviewFontScale
 import androidx.compose.ui.tooling.preview.PreviewLightDark
@@ -177,8 +182,30 @@ fun CompanionTheme(
         } else {
             dynamicLightColorScheme(context)
         }
-    MaterialExpressiveTheme(colorScheme = colors, content = content)
+    val extra = if (dark) DarkExtraColors else LightExtraColors
+    CompositionLocalProvider(LocalExtraColors provides extra) {
+        MaterialExpressiveTheme(colorScheme = colors, content = content)
+    }
 }
+
+/**
+ * Color roles Material 3 lacks. [recommended] is the green that marks Claude's suggested
+ * option; dynamic color has no green role, so it is fixed per light and dark theme.
+ */
+@Immutable
+data class ExtraColors(
+    val recommended: Color,
+)
+
+private val DarkExtraColors = ExtraColors(recommended = Color(0xFF81C995))
+private val LightExtraColors = ExtraColors(recommended = Color(0xFF188038))
+
+private val LocalExtraColors = staticCompositionLocalOf { DarkExtraColors }
+
+/** The app theme's extra color roles; read inside [CompanionTheme]. */
+val extraColors: ExtraColors
+    @Composable @ReadOnlyComposable
+    get() = LocalExtraColors.current
 
 @Composable
 fun MainScreen(

@@ -1,5 +1,7 @@
 package app.dailey.czn.companion.claude
 
+import app.dailey.czn.companion.ask.AnsweredAsk
+import app.dailey.czn.companion.ask.PlayerAsks
 import app.dailey.czn.companion.run.EntryKind
 import app.dailey.czn.companion.run.RunEntry
 import com.anthropic.core.JsonValue
@@ -35,6 +37,7 @@ object MessagesRequest {
     /** Tools the app runs itself, in [ClaudeConversation]. */
     const val SET_RUN_CHARACTER = "set_run_character"
     const val ASK_RUN_CHARACTER = "ask_run_character"
+    const val ASK_PLAYER = "ask_player"
 
     /**
      * @param turn messages Claude and the app exchanged after [text] in this turn: Claude's
@@ -72,12 +75,13 @@ object MessagesRequest {
             ).addTool(BetaMcpToolset.builder().mcpServerName(CZN_SERVER).build())
             .addTool(SET_RUN_CHARACTER_TOOL)
             .addTool(ASK_RUN_CHARACTER_TOOL)
+            .addTool(ASK_PLAYER_TOOL)
             .apply {
                 history.forEachIndexed { index, entry ->
                     val block =
                         BetaContentBlockParam.ofText(
                             textBlock(
-                                entry.text.ifBlank { SCREEN_ONLY },
+                                withAsks(entry.text, entry.asks).ifBlank { SCREEN_ONLY },
                                 index == history.lastIndex,
                             ),
                         )
@@ -95,6 +99,28 @@ object MessagesRequest {
                 )
                 turn.forEach(::addMessage)
             }.build()
+
+    /**
+     * A saved reply as Claude reads it later: each ask it made, with the answers, as an
+     * `<asked>` block where it was asked. Only saved data goes in, so the text stays identical
+     * across turns and keeps the cache.
+     */
+    private fun withAsks(
+        text: String,
+        asks: List<AnsweredAsk>,
+    ): String {
+        if (asks.isEmpty()) return text
+        val parts = mutableListOf<String>()
+        var start = 0
+        asks.sortedBy { it.offset }.forEach { ask ->
+            val at = ask.offset.coerceIn(start, text.length)
+            parts += text.substring(start, at).trim()
+            parts += "<asked>\n${PlayerAsks.describe(ask.questions, ask.answers)}\n</asked>"
+            start = at
+        }
+        parts += text.substring(start).trim()
+        return parts.filter(String::isNotEmpty).joinToString("\n\n")
+    }
 
     private fun textBlock(
         text: String,
@@ -169,6 +195,79 @@ object MessagesRequest {
             emptyList(),
         )
 
+    // Declared before ASK_PLAYER_TOOL, which reads it while the object initializes.
+    private val OPTION_SCHEMA =
+        mapOf(
+            "type" to "object",
+            "properties" to
+                mapOf(
+                    "label" to
+                        mapOf(
+                            "type" to "string",
+                            "description" to "A few words; what is sent back",
+                        ),
+                    "description" to
+                        mapOf("type" to "string", "description" to "One short line on its effect"),
+                    "recommended" to
+                        mapOf("type" to "boolean", "description" to "The option you advise"),
+                ),
+            "required" to listOf("label"),
+        )
+
+    private val ASK_PLAYER_TOOL =
+        tool(
+            ASK_PLAYER,
+            """
+            Shows the player questions with options in the conversation and waits for the
+            answers. The player picks one option, or several when multi_select is true, and can
+            always type their own answer instead. Several questions are answered one after
+            another and sent together. Returns each question with its answer, or that the player
+            skipped them.
+            """,
+            mapOf(
+                "questions" to
+                    mapOf(
+                        "type" to "array",
+                        "minItems" to 1,
+                        "maxItems" to PlayerAsks.MAX_QUESTIONS,
+                        "items" to
+                            mapOf(
+                                "type" to "object",
+                                "properties" to
+                                    mapOf(
+                                        "question" to
+                                            mapOf(
+                                                "type" to "string",
+                                                "description" to
+                                                    "The complete question, ending with ?",
+                                            ),
+                                        "header" to
+                                            mapOf(
+                                                "type" to "string",
+                                                "description" to
+                                                    "Label of at most 3 words, for example Path",
+                                            ),
+                                        "options" to
+                                            mapOf(
+                                                "type" to "array",
+                                                "minItems" to PlayerAsks.MIN_OPTIONS,
+                                                "maxItems" to PlayerAsks.MAX_OPTIONS,
+                                                "items" to OPTION_SCHEMA,
+                                            ),
+                                        "multi_select" to
+                                            mapOf(
+                                                "type" to "boolean",
+                                                "description" to
+                                                    "Allow picking several options",
+                                            ),
+                                    ),
+                                "required" to listOf("question", "header", "options"),
+                            ),
+                    ),
+            ),
+            listOf("questions"),
+        )
+
     private val APP_PROMPT =
         """
         You advise a player of the gacha deckbuilder Chaos Zero Nightmare (CZN) through a small
@@ -205,5 +304,12 @@ object MessagesRequest {
           call ask_run_character, offering only the plausible characters (for example the team
           of three seen earlier). You MUST NOT ask again once it is known unless the screen
           contradicts it.
+        - When the best action depends on something only the player knows (their goal for the
+          run, what they own, a preference) and neither the screen nor the history settles it,
+          you MAY call ask_player, batching every open question into one call. You SHOULD
+          advise instead when a reasonable guess exists, and MUST NOT ask what a screenshot
+          could show; name what to tap instead.
+        - The app shows earlier questions you asked, with the player's answers, as <asked>
+          blocks in your past replies. You MUST NOT write <asked> blocks yourself.
         """.trimIndent()
 }

@@ -84,17 +84,23 @@ class OverlayService : AccessibilityService() {
         }
         // The full-screen picker shows over the game alone; it waits while another app is in front.
         scope.launch {
-            combine(overGame, advice.state) { show, state ->
-                show && state.picker?.inline == false
-            }.distinctUntilChanged()
+            combine(overGame, advice.state) { show, state -> show && state.picker != null }
+                .distinctUntilChanged()
                 .collect { show -> if (show) showPicker() else hidePicker() }
         }
-        // Claude's inline question shows in the panel, so the panel opens for it.
+        // Claude's questions show in the panel, so the panel opens for them.
         scope.launch {
             advice.state
-                .map { it.picker?.inline == true }
+                .map { it.ask != null }
                 .distinctUntilChanged()
-                .collect { inline -> if (inline && overlay != null) openPanel() }
+                .collect { asking -> if (asking && overlay != null) openPanel() }
+        }
+        // The keyboard goes when no text box wants it, for example after a question is answered.
+        scope.launch {
+            advice.state
+                .map { it.typing }
+                .distinctUntilChanged()
+                .collect { typing -> if (typing == null) setPanelFocusable(false) }
         }
     }
 
@@ -103,7 +109,7 @@ class OverlayService : AccessibilityService() {
         val view =
             composeView {
                 val state by advice.state.collectAsStateWithLifecycle()
-                state.picker?.let { CharacterPicker(it, pickerActions) }
+                state.picker?.let { CharacterPicker(it, state.roster, pickerActions) }
             }
         windowManager.addView(
             view,
@@ -217,7 +223,7 @@ class OverlayService : AccessibilityService() {
             }
         params.softInputMode = LayoutParams.SOFT_INPUT_ADJUST_RESIZE
         windowManager.updateViewLayout(view, params)
-        if (!focusable) advice.stopComposing()
+        if (!focusable) advice.stopTyping()
     }
 
     /**
@@ -246,7 +252,7 @@ class OverlayService : AccessibilityService() {
                     panelWidth = with(LocalDensity.current) { panelWidth.toDp() },
                     tabActions = tabActions,
                     onTouchableArea = { window.rootSurfaceControl?.setTouchableRegion(it) },
-                ) { Panel(state, advice.draft, panelActions, pickerActions) }
+                ) { Panel(state, advice.draft, panelActions, askActions) }
             }
         closeOnOutsideTouch(view)
         windowManager.addView(view, params)
@@ -316,14 +322,24 @@ class OverlayService : AccessibilityService() {
             onNewRun = advice::requestNewRun,
             onConfirmNewRun = advice::confirmNewRun,
             onCancelNewRun = advice::cancelNewRun,
-            onCompose = {
-                advice.startComposing()
-                setPanelFocusable(true)
-            },
+            onCompose = { startTyping(Typing.Question) },
             onSend = ::onSend,
             onStop = advice::stop,
             onChangeCharacter = advice::openCharacterPicker,
         )
+    }
+
+    private val askActions by lazy {
+        AskActions(
+            onChange = advice::updateAsk,
+            onSkip = advice::skipAsk,
+            onStartTyping = { startTyping(Typing.Answer) },
+        )
+    }
+
+    private fun startTyping(target: Typing) {
+        advice.startTyping(target)
+        setPanelFocusable(true)
     }
 
     private fun composeView(content: @Composable () -> Unit) =

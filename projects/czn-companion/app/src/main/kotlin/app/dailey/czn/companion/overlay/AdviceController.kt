@@ -4,10 +4,15 @@ import android.util.Log
 import androidx.compose.foundation.text.input.TextFieldState
 import androidx.compose.foundation.text.input.clearText
 import androidx.compose.foundation.text.input.setTextAndPlaceCursorAtEnd
+import app.dailey.czn.companion.ask.Answer
+import app.dailey.czn.companion.ask.AnsweredAsk
+import app.dailey.czn.companion.ask.AskProgress
+import app.dailey.czn.companion.ask.Question
 import app.dailey.czn.companion.characters.CharacterRoster
 import app.dailey.czn.companion.characters.RosterCharacter
 import app.dailey.czn.companion.claude.ClaudeConversation
 import app.dailey.czn.companion.claude.FailureKind
+import app.dailey.czn.companion.claude.PlayerInput
 import app.dailey.czn.companion.claude.ReplyEvent
 import app.dailey.czn.companion.run.RunEntry
 import kotlinx.coroutines.CancellationException
@@ -26,47 +31,37 @@ data class PanelState(
     val entries: List<RunEntry> = emptyList(),
     /** The run's character; null until Claude or the player sets it. */
     val character: String? = null,
-    /** The character picker, while it is open. */
+    /** The full-screen character picker, while it is open. */
     val picker: PickerState? = null,
+    /** Every character with card art, for the picker and character questions. */
+    val roster: RosterState = RosterState.Loading,
     /** The question being answered, until its reply completes. */
     val pendingQuestion: String? = null,
     /** Reply text streamed so far for [pendingQuestion]. */
     val streaming: String = "",
     /** CZN data tool calls made so far for [pendingQuestion]. */
     val pendingTools: List<String> = emptyList(),
+    /** Questions Claude asked so far for [pendingQuestion], with the answers. */
+    val pendingAsks: List<AnsweredAsk> = emptyList(),
+    /** Questions Claude asked that wait for the player, shown in the conversation. */
+    val ask: AskProgress? = null,
     val busy: Boolean = false,
     val error: String? = null,
-    val composing: Boolean = false,
+    /** Which text box has the keyboard; null while none does. */
+    val typing: Typing? = null,
     val confirmingNewRun: Boolean = false,
 )
 
+/** A text box in the panel: the question for Claude, or a typed answer to Claude's question. */
+enum class Typing { Question, Answer }
+
 /**
- * The character picker. [candidates] limits the choice when Claude names them (for example the
- * team of three it saw); empty offers the whole roster.
+ * The full-screen character picker over the whole roster. [forReply] means a reply waits for the
+ * pick; the picker then also offers to stop the reply.
  */
 data class PickerState(
-    val candidates: List<String> = emptyList(),
-    /** Whether a reply waits for the pick; the picker then also offers to stop the reply. */
     val forReply: Boolean = false,
-    val roster: RosterState = RosterState.Loading,
-) {
-    /**
-     * Whether the picker shows in the conversation: Claude asks with a few named characters. The
-     * whole roster needs the full-screen grid.
-     */
-    val inline get() = forReply && candidates.isNotEmpty()
-
-    /** The cards to show: the candidates, or every character, with art where the roster has it. */
-    val options: List<RosterCharacter>
-        get() {
-            val loaded = (roster as? RosterState.Loaded)?.characters.orEmpty()
-            if (candidates.isEmpty()) return loaded
-            return candidates.map { name ->
-                loaded.firstOrNull { it.name.equals(name, ignoreCase = true) }
-                    ?: RosterCharacter(name)
-            }
-        }
-}
+)
 
 sealed interface RosterState {
     data object Loading : RosterState
@@ -80,10 +75,19 @@ sealed interface RosterState {
     ) : RosterState
 }
 
+/** The roster entries for [names], with card art where the roster has it. */
+fun RosterState.characters(names: List<String>): List<RosterCharacter> {
+    val loaded = (this as? RosterState.Loaded)?.characters.orEmpty()
+    return names.map { name ->
+        loaded.firstOrNull { it.name.equals(name, ignoreCase = true) } ?: RosterCharacter(name)
+    }
+}
+
 /**
  * Panel state holder: sends questions with a screenshot, streams replies, stops them, handles New
- * run, and runs the character picker for Claude and the player. A request keeps running when the
- * panel closes; its reply is saved to the run when it completes.
+ * run, runs the character picker for Claude and the player, and walks the player through
+ * Claude's questions. A request keeps running when the panel closes; its reply is saved to the
+ * run when it completes.
  */
 class AdviceController(
     private val scope: CoroutineScope,
@@ -97,8 +101,39 @@ class AdviceController(
 
     private var reply: Job? = null
 
-    /** A reply waiting for the player to pick the run's character. */
+    /** A reply waiting for the player to pick the run's character from the whole roster. */
     private val replyPick = PlayerWait<String>()
+
+    /** A reply waiting for the player to answer Claude's questions. */
+    private val replyAsk = PlayerWait<List<Answer>>()
+
+    private val playerInput =
+        object : PlayerInput {
+            override suspend fun pickCharacter() =
+                replyPick.await(
+                    show = { openPicker(PickerState(forReply = true)) },
+                    hide = { local.update { it.copy(picker = null) } },
+                )
+
+            override suspend fun ask(questions: List<Question>) =
+                replyAsk.await(
+                    show = {
+                        local.update { it.copy(ask = AskProgress(questions)) }
+                        if (questions.any { it.characters }) loadRoster()
+                    },
+                    hide = {
+                        local.update {
+                            it.copy(
+                                ask = null,
+                                typing =
+                                    it.typing.takeIf { t ->
+                                        t != Typing.Answer
+                                    },
+                            )
+                        }
+                    },
+                )
+        }
 
     // A completed reply stays shown as pending until the saved run includes it, so the list never
     // briefly drops both items and jumps.
@@ -112,6 +147,7 @@ class AdviceController(
                     pendingQuestion = null,
                     streaming = "",
                     pendingTools = emptyList(),
+                    pendingAsks = emptyList(),
                 )
             } else {
                 panel.copy(entries = entries, character = character)
@@ -149,14 +185,15 @@ class AdviceController(
                 pendingQuestion = question,
                 streaming = "",
                 pendingTools = emptyList(),
+                pendingAsks = emptyList(),
                 busy = true,
                 error = null,
-                composing = false,
+                typing = null,
             )
         }
         reply =
             scope.launch {
-                conversation.ask(question, jpeg, ::pickForReply).collect { event ->
+                conversation.ask(question, jpeg, playerInput).collect { event ->
                     if (event is ReplyEvent.Failed && draft.text.isEmpty()) {
                         draft.setTextAndPlaceCursorAtEnd(question)
                     }
@@ -173,6 +210,11 @@ class AdviceController(
                             is ReplyEvent.ToolCall -> {
                                 Log.d(TAG, "tool call ${event.label}")
                                 state.copy(pendingTools = state.pendingTools + event.label)
+                            }
+
+                            is ReplyEvent.Asked -> {
+                                Log.d(TAG, "ask answered, skipped=${event.ask.answers == null}")
+                                state.copy(pendingAsks = state.pendingAsks + event.ask)
                             }
 
                             ReplyEvent.Done -> {
@@ -220,16 +262,43 @@ class AdviceController(
         replyPick.answer(null)
     }
 
-    fun retryRoster() = local.value.picker?.let { openPicker(it) }
+    /** Changes the shown question's answer; sends the answers once the player completes them. */
+    fun updateAsk(change: (AskProgress) -> AskProgress) {
+        val progress = local.value.ask?.let(change) ?: return
+        if (progress.complete) {
+            replyAsk.answer(progress.answers())
+            return
+        }
+        // The keyboard stays only while the shown question still has its text box; otherwise
+        // a short panel would keep hiding the options of the question Next or Back moved to.
+        val keepTyping = progress.step == local.value.ask?.step && progress.draft?.other == true
+        local.update {
+            it.copy(
+                ask = progress,
+                typing =
+                    it.typing.takeIf { t ->
+                        t != Typing.Answer ||
+                            keepTyping
+                    },
+            )
+        }
+    }
 
-    private suspend fun pickForReply(candidates: List<String>): String? =
-        replyPick.await(
-            show = { openPicker(PickerState(candidates, forReply = true)) },
-            hide = { local.update { it.copy(picker = null) } },
-        )
+    fun skipAsk() {
+        replyAsk.answer(null)
+    }
+
+    fun retryRoster() = loadRoster()
 
     private fun openPicker(picker: PickerState) {
-        local.update { it.copy(picker = picker.copy(roster = RosterState.Loading)) }
+        local.update { it.copy(picker = picker) }
+        loadRoster()
+    }
+
+    /** Loads the roster unless it is loaded; a failure shows in the picker with a retry. */
+    private fun loadRoster() {
+        if (local.value.roster is RosterState.Loaded) return
+        local.update { it.copy(roster = RosterState.Loading) }
         scope.launch {
             val loaded =
                 try {
@@ -240,13 +309,13 @@ class AdviceController(
                     Log.w(TAG, "roster failed", e)
                     RosterState.Failed(e.message ?: "Could not load the characters.")
                 }
-            local.update { state -> state.copy(picker = state.picker?.copy(roster = loaded)) }
+            local.update { it.copy(roster = loaded) }
         }
     }
 
-    fun startComposing() = local.update { it.copy(composing = true) }
+    fun startTyping(target: Typing) = local.update { it.copy(typing = target) }
 
-    fun stopComposing() = local.update { it.copy(composing = false) }
+    fun stopTyping() = local.update { it.copy(typing = null) }
 
     fun requestNewRun() = local.update { it.copy(confirmingNewRun = true) }
 
@@ -259,7 +328,13 @@ class AdviceController(
     }
 
     private fun PanelState.finished() =
-        copy(pendingQuestion = null, streaming = "", pendingTools = emptyList(), busy = false)
+        copy(
+            pendingQuestion = null,
+            streaming = "",
+            pendingTools = emptyList(),
+            pendingAsks = emptyList(),
+            busy = false,
+        )
 
     private fun describe(failure: ReplyEvent.Failed) =
         when (failure.kind) {

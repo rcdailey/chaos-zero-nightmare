@@ -38,6 +38,8 @@ data class RunEntryRow(
     val createdAt: Long,
     /** CZN data tool calls behind an assistant reply, one label per line; shown, never sent. */
     @ColumnInfo(defaultValue = "") val tools: String = "",
+    /** Questions Claude asked the player during an assistant reply, as `PlayerAsks.encode` JSON. */
+    @ColumnInfo(defaultValue = "") val asks: String = "",
 )
 
 @Dao
@@ -78,8 +80,12 @@ interface RunDao {
 
 @Database(
     entities = [RunRow::class, RunEntryRow::class],
-    version = 3,
-    autoMigrations = [AutoMigration(from = 1, to = 2), AutoMigration(from = 2, to = 3)],
+    version = 4,
+    autoMigrations = [
+        AutoMigration(from = 1, to = 2),
+        AutoMigration(from = 2, to = 3),
+        AutoMigration(from = 3, to = 4),
+    ],
 )
 abstract class RunDatabase : RoomDatabase() {
     abstract fun runDao(): RunDao

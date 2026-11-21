@@ -1,5 +1,9 @@
 package app.dailey.czn.companion.claude
 
+import app.dailey.czn.companion.ask.Answer
+import app.dailey.czn.companion.ask.AnsweredAsk
+import app.dailey.czn.companion.ask.Option
+import app.dailey.czn.companion.ask.Question
 import app.dailey.czn.companion.run.EntryKind
 import app.dailey.czn.companion.run.RunEntry
 import com.anthropic.core.JsonValue
@@ -153,6 +157,42 @@ class MessagesRequestTest {
         assertNull(messages[0].content()[0]["cache_control"])
         assertNotNull(messages[1].content()[0]["cache_control"])
         assertNull(messages[2].content().last()["cache_control"])
+    }
+
+    @Test
+    fun `a saved reply shows Claude its questions and the answers where it asked them`() {
+        val ask =
+            AnsweredAsk(
+                offset = "Two paths.".length,
+                questions = listOf(Question("Which path?", "Path", listOf(Option("Elite")))),
+                answers = listOf(Answer(listOf("Elite"))),
+            )
+        val params =
+            MessagesRequest.build(
+                listOf(
+                    RunEntry(EntryKind.User, ""),
+                    RunEntry(
+                        EntryKind.Assistant,
+                        "Two paths.\n\nTake the elite.",
+                        asks = listOf(ask),
+                    ),
+                ),
+                "Why?",
+                null,
+                "https://czn.example/mcp",
+                "czn-token",
+            )
+        val reply = wire(params)["messages"]!!.jsonArray[1].jsonObject
+        assertEquals(
+            "Two paths.\n\n<asked>\nQ: Which path?\nA: Elite\n</asked>\n\nTake the elite.",
+            reply.content().single().text(),
+        )
+    }
+
+    @Test
+    fun `Claude can ask the player questions`() {
+        val names = build()["tools"]!!.jsonArray.mapNotNull { it.jsonObject.string("name") }
+        assertTrue(MessagesRequest.ASK_PLAYER in names)
     }
 
     @Test

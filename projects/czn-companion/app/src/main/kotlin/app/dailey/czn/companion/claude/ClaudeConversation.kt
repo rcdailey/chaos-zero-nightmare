@@ -1,5 +1,10 @@
 package app.dailey.czn.companion.claude
 
+import app.dailey.czn.companion.ask.Answer
+import app.dailey.czn.companion.ask.AnsweredAsk
+import app.dailey.czn.companion.ask.Option
+import app.dailey.czn.companion.ask.PlayerAsks
+import app.dailey.czn.companion.ask.Question
 import app.dailey.czn.companion.auth.AnthropicAuth
 import app.dailey.czn.companion.auth.CznDataAuth
 import app.dailey.czn.companion.auth.SignInRequired
@@ -37,6 +42,11 @@ sealed interface ReplyEvent {
         val label: String,
     ) : ReplyEvent
 
+    /** The player answered or skipped questions Claude asked; the reply continues. */
+    data class Asked(
+        val ask: AnsweredAsk,
+    ) : ReplyEvent
+
     data object Done : ReplyEvent
 
     data class Failed(
@@ -51,12 +61,15 @@ enum class FailureKind { Network, AnthropicSignIn, CznSignIn, Api }
  * What Claude can ask of the player mid-reply. Each call suspends until the player answers; the
  * reply waits meanwhile, and cancelling the reply cancels the wait.
  */
-fun interface PlayerInput {
+interface PlayerInput {
+    /** Shows the whole roster and returns the pick, or null when the player closes it. */
+    suspend fun pickCharacter(): String?
+
     /**
-     * Shows the character picker, limited to [candidates] unless empty, and returns the pick, or
-     * null when the player closes the picker without choosing.
+     * Shows [questions] in the conversation and returns one answer per question, or null when
+     * the player skips them.
      */
-    suspend fun pickCharacter(candidates: List<String>): String?
+    suspend fun ask(questions: List<Question>): List<Answer>?
 }
 
 /**
@@ -94,6 +107,7 @@ class ClaudeConversation(
             val character = run.characterNow()
             val reply = StringBuilder()
             val tools = mutableListOf<String>()
+            val asks = mutableListOf<AnsweredAsk>()
             val turn = mutableListOf<BetaMessageParam>()
             val client = client(anthropicToken)
             try {
@@ -112,7 +126,8 @@ class ClaudeConversation(
                     when (message.stopReason().orElse(null)) {
                         BetaStopReason.TOOL_USE -> {
                             turn += message.toParam()
-                            turn += toolResults(message, player)
+                            turn +=
+                                toolResults(message) { use -> runTool(use, player, reply, asks) }
                         }
 
                         // A long server-side tool call paused the reply; resending resumes it.
@@ -121,7 +136,7 @@ class ClaudeConversation(
                         }
 
                         else -> {
-                            run.appendExchange(text, reply.toString(), tools)
+                            run.appendExchange(text, reply.toString(), tools, asks)
                             emit(ReplyEvent.Done)
                             return@flow
                         }
@@ -209,11 +224,11 @@ class ClaudeConversation(
     /** Runs every app tool Claude called in [message] and returns their results as one message. */
     private suspend fun toolResults(
         message: BetaMessage,
-        player: PlayerInput,
+        runTool: suspend (BetaToolUseBlock) -> Pair<String, Boolean>,
     ): BetaMessageParam {
         val results =
             message.content().mapNotNull { it.toolUse().orElse(null) }.map { use ->
-                val (content, isError) = runTool(use, player)
+                val (content, isError) = runTool(use)
                 BetaContentBlockParam.ofToolResult(
                     BetaToolResultBlockParam
                         .builder()
@@ -226,12 +241,36 @@ class ClaudeConversation(
         return BetaMessageParam.ofUserOfContentBlockParams(results)
     }
 
-    private suspend fun runTool(
+    /**
+     * Runs one app tool. Questions for the player are recorded in [asks] at the current end of
+     * [reply], so the saved reply shows each where Claude asked it.
+     */
+    private suspend fun FlowCollector<ReplyEvent>.runTool(
         use: BetaToolUseBlock,
         player: PlayerInput,
+        reply: StringBuilder,
+        asks: MutableList<AnsweredAsk>,
     ): Pair<String, Boolean> {
         val input = use._input().asObject().orElse(emptyMap())
+
+        suspend fun ask(questions: List<Question>): List<Answer>? {
+            val answers = player.ask(questions)
+            val ask = AnsweredAsk(reply.length, questions, answers)
+            asks += ask
+            emit(ReplyEvent.Asked(ask))
+            return answers
+        }
         return when (use.name()) {
+            MessagesRequest.ASK_PLAYER -> {
+                PlayerAsks.parse(JSON.writeValueAsString(use._input())).fold(
+                    onSuccess = { questions ->
+                        PlayerAsks.describe(questions, ask(questions)) to
+                            false
+                    },
+                    onFailure = { it.message.orEmpty() to true },
+                )
+            }
+
             MessagesRequest.SET_RUN_CHARACTER -> {
                 val character = input["name"]?.asString()?.orElse(null)?.trim()
                 if (character.isNullOrEmpty()) {
@@ -250,12 +289,28 @@ class ClaudeConversation(
                         ?.mapNotNull { it.asString().orElse(null)?.trim() }
                         ?.filter(String::isNotEmpty)
                         .orEmpty()
-                val picked = player.pickCharacter(candidates)
-                if (picked == null) {
-                    "The player skipped the choice." to false
-                } else {
-                    run.setCharacter(picked)
-                    "The player picked $picked; it is saved as the run's character." to false
+                val answer =
+                    if (candidates.isEmpty()) {
+                        player.pickCharacter()?.let { Answer(picked = listOf(it)) }
+                    } else {
+                        ask(listOf(characterQuestion(candidates)))?.single()
+                    }
+                val picked = answer?.picked?.singleOrNull()
+                val typed = answer?.typed
+                when {
+                    picked != null -> {
+                        run.setCharacter(picked)
+                        "The player picked $picked; it is saved as the run's character." to false
+                    }
+
+                    typed != null -> {
+                        "The player typed \"$typed\", which is not saved. Find the name as the " +
+                            "czn tools spell it and call set_run_character." to false
+                    }
+
+                    else -> {
+                        "The player skipped the choice." to false
+                    }
                 }
             }
 
@@ -303,6 +358,14 @@ class ClaudeConversation(
         val first = arguments?.values?.firstNotNullOfOrNull { it.asString().orElse(null) }
         return if (first == null) name else "$name: $first"
     }
+
+    private fun characterQuestion(candidates: List<String>) =
+        Question(
+            question = "Which character's deck does this run build?",
+            header = "Run character",
+            options = candidates.map { Option(it) },
+            characters = true,
+        )
 
     private companion object {
         val JSON = com.anthropic.core.jsonMapper()

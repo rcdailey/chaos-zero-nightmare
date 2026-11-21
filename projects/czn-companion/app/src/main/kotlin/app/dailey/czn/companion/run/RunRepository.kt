@@ -2,6 +2,8 @@ package app.dailey.czn.companion.run
 
 import androidx.room3.immediateTransaction
 import androidx.room3.useWriterConnection
+import app.dailey.czn.companion.ask.AnsweredAsk
+import app.dailey.czn.companion.ask.PlayerAsks
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flatMapLatest
@@ -15,6 +17,8 @@ data class RunEntry(
     val text: String,
     /** CZN data tool calls behind an assistant reply, for display only. */
     val tools: List<String> = emptyList(),
+    /** Questions Claude asked the player during an assistant reply, with the answers. */
+    val asks: List<AnsweredAsk> = emptyList(),
 )
 
 /** The active run's conversation. Survives restarts until [newRun]. */
@@ -58,6 +62,7 @@ class RunRepository(
         user: String,
         assistant: String,
         tools: List<String>,
+        asks: List<AnsweredAsk> = emptyList(),
     ) = db.useWriterConnection { connection ->
         connection.immediateTransaction {
             val runId = activeRunId()
@@ -79,6 +84,7 @@ class RunRepository(
                         text = assistant,
                         createdAt = time,
                         tools = tools.joinToString("\n") { it.replace('\n', ' ') },
+                        asks = PlayerAsks.encode(asks),
                     ),
                 ),
             )
@@ -102,6 +108,7 @@ class RunRepository(
             if (row.kind == USER) EntryKind.User else EntryKind.Assistant,
             row.text,
             row.tools.lines().filter(String::isNotBlank),
+            PlayerAsks.decode(row.asks),
         )
 
     private companion object {

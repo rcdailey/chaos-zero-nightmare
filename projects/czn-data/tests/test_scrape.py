@@ -285,6 +285,10 @@ def test_every_sitemap_is_read_when_the_game_moved(conn):
     assert sitemaps_read(get) == {f"{SITE}/sitemap/{n}.xml" for n in range(3)}
     assert CHARACTER_URL not in get.requested  # same dates, so still unchanged
 
+    after_move = site(BOTH_PAGES, DATED, sitemap=2, sitemaps=3)
+    scrape(conn, after_move, allow_shrink=False)
+    assert sitemaps_read(after_move) == {f"{SITE}/sitemap/2.xml"}
+
 
 def test_every_sitemap_is_read_when_robots_no_longer_names_the_remembered_one(conn):
     scrape(conn, site(BOTH_PAGES, DATED, sitemap=2, sitemaps=3), allow_shrink=False)

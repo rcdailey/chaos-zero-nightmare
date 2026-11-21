@@ -73,6 +73,12 @@ def scrape(conn: psycopg.Connection, get: Callable[[str], str], allow_shrink: bo
     now = datetime.now(UTC)
     due = sorted(url for url, listing in listed.items() if _due(stored.get(url), listing, now))
     result.fetches["unchanged"] = len(listed) - len(due)
+    for url, listing in listed.items():
+        if url in stored and listing and stored[url][2] != listing.sitemap:
+            # The game moved to another sitemap; remember it even for pages not downloaded.
+            conn.execute(
+                "UPDATE prydwen.page SET sitemap = %s WHERE url = %s", (listing.sitemap, url)
+            )
     log.info("discovered pages", extra={"count": len(listed), "due": len(due)})
     if _fetch(conn, get, due, listed, result):
         _parse_stored(conn, allow_shrink, result)

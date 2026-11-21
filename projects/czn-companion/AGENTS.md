@@ -32,6 +32,31 @@ Sideloaded app for Android 16+ (Lenovo Legion Y700 Gen 5 on a China ROM, Nothing
   changed it; keep it in one class. Images, tools, and the MCP connector work with these tokens
   (verified 2026-11-20).
 
+## UI design
+
+Follow Material 3 Expressive as the Compose Material 3 guide on developer.android.com describes
+it.
+
+- Wrap every window and `@Preview` in the app theme (`CompanionTheme`, `MainActivity.kt`), not a
+  bare `MaterialTheme`, so previews match the device. Take color, type, shape, and motion from
+  `MaterialTheme` roles, pairing each container with its `on` role; no literal colors, text sizes,
+  or shapes.
+- Use stock Material 3 components before custom ones, including the Expressive ones (toolbars,
+  button groups, flexible app bars). Opt into an experimental Material API only when no stable
+  component fits; the material3 release notes list which remain experimental.
+- Icons: Material Symbols vector drawables from fonts.google.com/icons in `res/drawable`;
+  `material-icons` is no longer published. Replace `?attr/` tints with `?android:attr/` (no
+  AppCompat).
+- Accessibility: touch targets at least 48dp; `contentDescription` on every non-text element that
+  conveys meaning or acts, `null` on decorative ones; layouts stay usable at 200% font scale;
+  never convey state by color alone.
+- Size layouts by window width, not device: the phone is compact (<600dp), the tablet medium or
+  expanded.
+- Activity screens are edge-to-edge (enforced at API 36): inset content with `Scaffold` padding or
+  `WindowInsets.safeDrawing`. Predictive back no longer calls `onBackPressed`; use `BackHandler`.
+- Annotate screen previews with `@PreviewLightDark` and `@PreviewFontScale` so `mise run preview`
+  renders each variant.
+
 ## Feedback loop
 
 Verify each change at the cheapest level that exercises it:

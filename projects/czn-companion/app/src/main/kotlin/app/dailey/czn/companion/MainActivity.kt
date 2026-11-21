@@ -22,6 +22,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
+import androidx.compose.material3.MaterialExpressiveTheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -37,7 +38,9 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.tooling.preview.Preview
+import androidx.compose.ui.tooling.preview.PreviewFontScale
+import androidx.compose.ui.tooling.preview.PreviewLightDark
+import androidx.compose.ui.tooling.preview.PreviewScreenSizes
 import androidx.compose.ui.unit.dp
 import androidx.core.net.toUri
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -170,7 +173,7 @@ fun CompanionTheme(content: @Composable () -> Unit) {
         } else {
             dynamicLightColorScheme(context)
         }
-    MaterialTheme(colorScheme = colors, content = content)
+    MaterialExpressiveTheme(colorScheme = colors, content = content)
 }
 
 @Composable
@@ -294,10 +297,12 @@ private class CodeFallback(
     val onSubmit: (String) -> Unit,
 )
 
-@Preview(widthDp = 800, heightDp = 480)
+@PreviewScreenSizes
+@PreviewLightDark
+@PreviewFontScale
 @Composable
 private fun MainScreenSignedOutPreview() =
-    MaterialTheme {
+    CompanionTheme {
         MainScreen(
             state =
                 MainUiState(
@@ -319,10 +324,11 @@ private fun MainScreenSignedOutPreview() =
         )
     }
 
-@Preview(widthDp = 800, heightDp = 480)
+@PreviewLightDark
+@PreviewFontScale
 @Composable
 private fun MainScreenSignedInPreview() =
-    MaterialTheme {
+    CompanionTheme {
         MainScreen(
             state = MainUiState(anthropic = SignInUiState(auth = AuthState.SignedIn)),
             onAnthropicSignIn = {},

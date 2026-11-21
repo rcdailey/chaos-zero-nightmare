@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -17,17 +18,19 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.input.TextFieldState
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
+import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -41,9 +44,19 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.onClick
+import androidx.compose.ui.semantics.onLongClick
+import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.tooling.preview.Preview
+import androidx.compose.ui.tooling.preview.PreviewFontScale
+import androidx.compose.ui.tooling.preview.PreviewLightDark
 import androidx.compose.ui.unit.dp
+import app.dailey.czn.companion.CompanionTheme
+import app.dailey.czn.companion.R
 import app.dailey.czn.companion.run.EntryKind
 import app.dailey.czn.companion.run.RunEntry
 import com.mikepenz.markdown.m3.Markdown
@@ -57,13 +70,25 @@ fun FloatingButton(
     onDrag: (Offset) -> Unit,
 ) {
     Surface(
-        shape = CircleShape,
-        color = MaterialTheme.colorScheme.primary.copy(alpha = 0.85f),
+        shape = MaterialTheme.shapes.large,
+        color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.85f),
+        contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
         shadowElevation = 6.dp,
         modifier =
             Modifier
                 .size(56.dp)
-                .pointerInput(Unit) {
+                .semantics {
+                    role = Role.Button
+                    contentDescription = "CZN Companion"
+                    onClick("Show or hide the panel") {
+                        onTap()
+                        true
+                    }
+                    onLongClick("Read the screen") {
+                        onLongPress()
+                        true
+                    }
+                }.pointerInput(Unit) {
                     detectTapGestures(onTap = { onTap() }, onLongPress = { onLongPress() })
                 }.pointerInput(Unit) {
                     detectDragGestures {
@@ -76,11 +101,7 @@ fun FloatingButton(
                 },
     ) {
         Box(contentAlignment = Alignment.Center) {
-            Text(
-                "CZN",
-                color = MaterialTheme.colorScheme.onPrimary,
-                style = MaterialTheme.typography.labelLarge,
-            )
+            Icon(painterResource(R.drawable.ic_auto_awesome), contentDescription = null)
         }
     }
 }
@@ -110,33 +131,60 @@ fun Panel(
             shadowElevation = 8.dp,
             modifier = Modifier.fillMaxSize(),
         ) {
-            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        "CZN Companion",
-                        style = MaterialTheme.typography.titleMedium,
-                        modifier = Modifier.weight(1f),
-                    )
-                    TextButton(
-                        onClick = actions.onNewRun,
-                        enabled = !state.busy,
-                    ) { Text("New run") }
-                    TextButton(onClick = actions.onHideButton) { Text("Hide button") }
-                    TextButton(onClick = actions.onClose) { Text("Close") }
-                }
-                if (state.confirmingNewRun) {
-                    Text("Start a new run? This clears the conversation.")
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Button(onClick = actions.onConfirmNewRun) { Text("New run") }
-                        OutlinedButton(onClick = actions.onCancelNewRun) { Text("Keep this run") }
-                    }
-                }
-                Conversation(state, Modifier.weight(1f))
-                state.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
-                AskRow(state, draft, actions)
+            Column {
+                PanelTopBar(state, actions)
+                PanelBody(state, draft, actions)
             }
         }
     }
+}
+
+@Composable
+private fun PanelTopBar(
+    state: PanelState,
+    actions: PanelActions,
+) = TopAppBar(
+    title = { Text("CZN Companion", maxLines = 1, overflow = TextOverflow.Ellipsis) },
+    actions = {
+        IconButton(onClick = actions.onNewRun, enabled = !state.busy) {
+            Icon(painterResource(R.drawable.ic_add), contentDescription = "New run")
+        }
+        IconButton(onClick = actions.onHideButton) {
+            Icon(
+                painterResource(R.drawable.ic_visibility_off),
+                contentDescription = "Hide floating button",
+            )
+        }
+        IconButton(onClick = actions.onClose) {
+            Icon(painterResource(R.drawable.ic_close), contentDescription = "Close panel")
+        }
+    },
+    windowInsets = WindowInsets(0),
+    colors =
+        TopAppBarDefaults.topAppBarColors(
+            containerColor = MaterialTheme.colorScheme.surfaceContainer,
+        ),
+)
+
+@Composable
+private fun PanelBody(
+    state: PanelState,
+    draft: TextFieldState,
+    actions: PanelActions,
+) = Column(
+    Modifier.padding(start = 16.dp, end = 16.dp, bottom = 16.dp),
+    verticalArrangement = Arrangement.spacedBy(8.dp),
+) {
+    if (state.confirmingNewRun) {
+        Text("Start a new run? This clears the conversation.")
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Button(onClick = actions.onConfirmNewRun) { Text("New run") }
+            OutlinedButton(onClick = actions.onCancelNewRun) { Text("Keep this run") }
+        }
+    }
+    Conversation(state, Modifier.weight(1f))
+    state.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+    AskRow(state, draft, actions)
 }
 
 @Composable
@@ -228,11 +276,24 @@ private fun SeenBlock(text: String) {
         color = MaterialTheme.colorScheme.surfaceContainerHighest,
     ) {
         Column(Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
-            Text(
-                if (expanded) "Seen on screen  \u25B4" else "Seen on screen  \u25BE",
-                style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                Text(
+                    "Seen on screen",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Icon(
+                    painterResource(
+                        if (expanded) R.drawable.ic_expand_less else R.drawable.ic_expand_more,
+                    ),
+                    contentDescription = if (expanded) "Collapse" else "Expand",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(18.dp),
+                )
+            }
             AnimatedVisibility(expanded) {
                 SteadyMarkdown(text, Modifier.padding(top = 4.dp))
             }
@@ -295,33 +356,38 @@ private fun AskRow(
     }
 }
 
-@Preview(widthDp = 420, heightDp = 600)
+@PreviewLightDark
+@PreviewFontScale
 @Composable
 private fun PanelPreview() =
-    MaterialTheme {
-        Panel(
-            PanelState(
-                entries =
-                    listOf(
-                        RunEntry(EntryKind.User, ""),
-                        RunEntry(
-                            EntryKind.Assistant,
-                            "<seen>Epiphany offer, 3 cards.</seen>\n\nPick **Blade of the Cycle**.",
-                        ),
-                    ),
-                pendingQuestion = "Why not Radiant Sword Flow?",
-                pendingTools = listOf("get_card: Radiant Sword Flow", "find_teams: Rossweisse"),
-                streaming = "<seen>Same offer.</seen>\n\nRadiant Sword Flow needs more Justice",
-                busy = true,
-            ),
-            TextFieldState(),
-            PanelActions(),
-        )
+    CompanionTheme {
+        Box(Modifier.size(420.dp, 600.dp)) { PanelPreviewContent() }
     }
 
-@Preview
+@Composable
+private fun PanelPreviewContent() =
+    Panel(
+        PanelState(
+            entries =
+                listOf(
+                    RunEntry(EntryKind.User, ""),
+                    RunEntry(
+                        EntryKind.Assistant,
+                        "<seen>Epiphany offer, 3 cards.</seen>\n\nPick **Blade of the Cycle**.",
+                    ),
+                ),
+            pendingQuestion = "Why not Radiant Sword Flow?",
+            pendingTools = listOf("get_card: Radiant Sword Flow", "find_teams: Rossweisse"),
+            streaming = "<seen>Same offer.</seen>\n\nRadiant Sword Flow needs more Justice",
+            busy = true,
+        ),
+        TextFieldState(),
+        PanelActions(),
+    )
+
+@PreviewLightDark
 @Composable
 private fun FloatingButtonPreview() =
-    MaterialTheme {
+    CompanionTheme {
         FloatingButton(onTap = {}, onLongPress = {}, onDrag = {})
     }

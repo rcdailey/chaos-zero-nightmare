@@ -121,6 +121,37 @@ def test_list_banners_shows_live_then_upcoming_and_hides_ended(call, conn):
     ]
 
 
+def test_search_guides_finds_pages_missing_some_query_words(call):
+    (page,) = call("search_guides", query="Mei Lin Policy Office")
+    assert page["url"] == CHARACTER_URL
+
+
+def test_search_guides_ranks_pages_with_more_query_words_first(call, conn):
+    url = "https://www.prydwen.gg/chaos-zero-nightmare/guides/team-building"
+    body = "Team building. " * 50
+    page = ParsedPage("Team Building", body)
+    store.save_page(conn, url, "guide", body, datetime.now(UTC), page, None)
+
+    pages = call("search_guides", query="Spire Fire team")
+
+    assert [p["url"] for p in pages] == [CHARACTER_URL, url]
+
+
+def test_search_guides_ranks_pages_with_every_word_by_closeness_not_repetition(call, conn):
+    guides = "https://www.prydwen.gg/chaos-zero-nightmare/guides"
+    pages = {
+        f"{guides}/close": "Zorblax quuxite guide.",
+        f"{guides}/repeated": "Zorblax intro. " + "Filler text. " * 200 + "Quuxite. " * 30,
+    }
+    for url, body in pages.items():
+        parsed = ParsedPage(url, body)
+        store.save_page(conn, url, "guide", body, datetime.now(UTC), parsed, None)
+
+    (top,) = call("search_guides", query="zorblax quuxite", limit=1)
+
+    assert top["url"] == f"{guides}/close"
+
+
 def add_post(conn, article_id: str, title: str, content: str):
     conn.execute(
         "INSERT INTO stove.article VALUES (%s, 142421, %s, %s, '2026-11-11', now(), now())",

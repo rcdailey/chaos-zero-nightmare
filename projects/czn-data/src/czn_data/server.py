@@ -782,12 +782,24 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
             SELECT url, title, page.data_fetched_at,
                    ts_headline('english', body, q,
                        'MaxFragments=3, MaxWords=40, MinWords=10') AS excerpt
+            -- Any query word matches (players name things the guides never do, such as the
+            -- Policy Office). Pages with more of the query's words come first; ts_rank alone
+            -- would put a page repeating one common word ("team") above one with every word.
+            -- Ties rank by the all-words query, which favors the words appearing close
+            -- together over one of them repeating.
             FROM prydwen.document JOIN prydwen.page USING (url),
-                 websearch_to_tsquery('english', %(q)s) q
+                 CAST(replace(plainto_tsquery('english', %(q)s)::text, '&', '|') AS tsquery) q,
+                 websearch_to_tsquery('english', %(q)s) every_word,
+                 LATERAL (
+                     SELECT count(*) AS matched
+                     FROM unnest(tsvector_to_array(to_tsvector('english', %(q)s))) word
+                     WHERE search @@ quote_literal(word)::tsquery
+                 ) m
             WHERE search @@ q
-            ORDER BY ts_rank(search, q) DESC LIMIT %(limit)s
+            ORDER BY matched DESC, ts_rank(search, every_word) DESC, ts_rank(search, q) DESC
+            LIMIT %(limit)s
             """,
-            {"q": query, "limit": min(limit, 20)},
+            {"q": query, "limit": max(1, min(limit, 20))},
         )
 
     @mcp.tool()

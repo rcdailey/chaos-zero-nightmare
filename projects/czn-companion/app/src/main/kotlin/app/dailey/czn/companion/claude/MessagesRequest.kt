@@ -280,7 +280,8 @@ object MessagesRequest {
           and partner name with the czn tools before relying on it; card text read from the
           screen goes to match_card_text. Make independent lookups in parallel. The screen
           shows the player's actual values, which can differ from the database's base values;
-          prefer the screen.
+          prefer the screen. czn tool results leave out empty fields, so a missing field means
+          the data has no value for it.
         - Screens show characters as portraits without names. You MUST identify each one by
           matching the portrait's hair, eyes, eyewear, weapon, and outfit against the
           appearance that list_characters returns, filtered by the element icon shown, and

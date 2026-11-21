@@ -483,13 +483,15 @@ def test_game_facts_come_from_e7bot_with_prydwen_ratings_attached(call, conn, ga
     assert versions[""]["cost"] == "3"
     assert versions[""]["text"] == "Game text\nline two"
     assert versions["V"]["text"] == "9 Hits"
-    assert (versions["V"]["source"], versions["V"]["rating"]) == ("e7bot", rating)
+    assert versions["V"]["rating"] == rating
+    assert "source" not in versions["V"]
     assert versions["V"]["prydwen_url"] == CHARACTER_URL
 
 
 def test_character_e7bot_lacks_is_served_from_prydwen(call):
     character = call("get_character", name="mei lin")
-    assert (character["source"], character["url"]) == ("prydwen", CHARACTER_URL)
+    assert character["url"] == CHARACTER_URL
+    assert "source" not in character
 
 
 def test_data_status_reports_both_sources(call, conn, game_data):

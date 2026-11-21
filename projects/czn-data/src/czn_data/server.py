@@ -2,8 +2,8 @@
 
 It only reads; give it a database role with SELECT rights. Tools read the merged tables that
 ``czn_data.build`` derives (plus Prydwen's stored pages for guide search), never a source schema
-directly. Every result carries its source, a URL, and the time that data was fetched, so answers
-can be cited and checked for staleness.
+directly. Results read from a stored record carry its URL and the time that data was fetched,
+so answers can be cited and checked for staleness.
 
 Auth: the server is an OAuth 2.1 resource server. It validates JWT access tokens issued by an
 OIDC provider (``OIDC_ISSUER``) and advertises that provider to MCP clients such as claude.ai,
@@ -36,74 +36,42 @@ from . import embed
 
 log = logging.getLogger(__name__)
 
-INSTRUCTIONS = """\
-Chaos Zero Nightmare (CZN) data. Game facts (characters, cards and Epiphany versions,
-potentials, partners, equipment, memory fragment sets, keywords, Chaos events, Divine
-Epiphanies, leaderboard decks) come from the game's own data via wiki.e7bot.top; where it lacks
-a record, prydwen.gg fills in (`source` says which). Opinions come from Prydwen: ratings,
-reviews, Manifest Ego reviews, per-character guides (teams, decks, equipment, fragment and
-partner rankings, synergies), and full-text search over every guide page.
-Start with `lookup` for any name seen on screen and `match_card_text` for card text seen on
-screen, then use the specific tools; `get_character` returns one section at a time.
-`list_characters` filters the roster; `synergies` answers who to use with a character.
-Screens show characters as portraits without names: identify each by matching the portrait to
-the `appearance` traits `list_characters` returns (filtered by the element shown), never by
-guessing.
-`list_banners` gives the live and upcoming gacha banners with dates. `search_posts` searches
-the official posts: events (active_on today for what is on now), season restrictions and
-shops, patch changes, and season content the game data lacks (Environment Variables nodes,
-Chaos difficulty modifiers such as Gangrene, season Interaction Events); prefer the newest
-post, since values change between seasons. Guide decks
-(`get_character` section decks) carry deck codes players paste into the game's deck import.
-Players name cards by color ("her purple card"); `list_cards` filters by color.
-For a Chaos run: players build one character's deck per run, because copy events are too rare
-for two. `plan_deck` gives that character's target deck, Epiphanies, removals, and equipment;
-`get_encounter` and `list_encounters` say what each answer of a question-mark event gives, with
-card copies and removals first; `list_divine_epiphanies` lists what can go on a given card.
-List tools return `total` and say when they show only part. Epiphanies a partner unlocks are
-not in either source.
-Fields that are empty are left out. Ratings are Prydwen's stars, 1 to 5. Cite `url` (and
-`prydwen_url` for opinions) and `data_fetched_at` when the answer depends on the data. Player
-state (owned characters, Codex upgrades, current run) is not stored here; read it from the
-user's screenshots.
-"""
-
 LOOKUP_SQL = """
 SELECT entity.* FROM (
     SELECT 'character' AS kind, name, concat_ws(' ', rarity || '*', element, class) AS summary,
-           source, url, data_fetched_at FROM character
+           url, data_fetched_at FROM character
     UNION ALL
-    SELECT 'card', name, concat_ws(' | ', color, type, 'cost ' || cost, text), source, url,
+    SELECT 'card', name, concat_ws(' | ', color, type, 'cost ' || cost, text), url,
            data_fetched_at FROM card
     UNION ALL
-    SELECT 'equipment', name, concat_ws(' | ', rarity, slot, text), source, url, data_fetched_at
+    SELECT 'equipment', name, concat_ws(' | ', rarity, slot, text), url, data_fetched_at
     FROM equipment
     UNION ALL
     SELECT 'fragment_set', name,
            (SELECT string_agg((b->>'pieces') || '-piece: ' || (b->>'text'), ' | ')
-            FROM jsonb_array_elements(bonuses) b), source, url, data_fetched_at
+            FROM jsonb_array_elements(bonuses) b), url, data_fetched_at
     FROM fragment_set
     UNION ALL
     SELECT 'partner', name, concat_ws(' | ', rarity || '*', class, passive_text,
-           'EGO ' || ego_name || ' (' || ego_cost || ' EP): ' || ego_text), source, url,
+           'EGO ' || ego_name || ' (' || ego_cost || ' EP): ' || ego_text), url,
            data_fetched_at FROM partner
     UNION ALL
-    SELECT 'effect', name, concat_ws(' | ', type, description), source, url, data_fetched_at
+    SELECT 'effect', name, concat_ws(' | ', type, description), url, data_fetched_at
     FROM effect
     UNION ALL
     SELECT 'encounter', name, concat_ws(' | ', pack, array_to_string(chaos, ', '),
            CASE WHEN any_chaos THEN 'any Chaos' END,
-           'gives ' || nullif(array_to_string(reward_classes, ', '), '')), 'e7bot', url,
+           'gives ' || nullif(array_to_string(reward_classes, ', '), '')), url,
            data_fetched_at
     FROM encounter
     UNION ALL
-    SELECT 'divine_epiphany', text, {divine_summary}, 'e7bot', url, data_fetched_at
+    SELECT 'divine_epiphany', text, {divine_summary}, url, data_fetched_at
     FROM divine_epiphany
     UNION ALL
     SELECT 'chaos', name,
            'Chaos (run map); list_encounters, get_encounter, and list_equipment take this'
            ' name as chaos',
-           'e7bot', NULL, NULL FROM chaos
+           NULL, NULL FROM chaos
 ) entity
 WHERE (%(kind)s::text IS NULL OR entity.kind = %(kind)s)
   AND ({match} OR entity.kind = 'effect'
@@ -456,18 +424,19 @@ async def _query(sql: str, params: dict | None = None) -> list[dict]:
 
 
 def _jsonable(row: dict) -> dict:
-    """Drop null and empty fields to save model tokens; keep 0 and False, which carry meaning."""
+    """Drop null and empty fields to save model tokens; keep 0 and False, which carry meaning.
+    Also drop source (which scraper a merged row came from): it is build bookkeeping that
+    tools selecting whole rows would otherwise pass to the model."""
     return {
         k: v.isoformat() if hasattr(v, "isoformat") else v
         for k, v in row.items()
-        if v is not None and v != "" and v != [] and v != {}
+        if k != "source" and v is not None and v != "" and v != [] and v != {}
     }
 
 
 def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> MCPServer:
     mcp = MCPServer(
         "czn-data",
-        instructions=INSTRUCTIONS,
         auth=auth,
         token_verifier=verifier,
     )
@@ -478,7 +447,8 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
 
     @mcp.tool()
     async def lookup(name: str, kind: LookupKind | None = None, limit: int = 10) -> list[dict]:
-        """Fuzzy-find any named game entity, tolerant of typos and partial names.
+        """Fuzzy-find any named game entity, tolerant of typos and partial names. Use it first
+        for any name read from the screen, then the specific tools for details.
 
         kind narrows the search: character, card, equipment, fragment_set, partner, effect
         (keyword, status and tag are other names for it), encounter (Chaos event),
@@ -486,7 +456,7 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
         Effects are keywords, statuses and card tags (for example Exhaust, Retain, Vulnerable);
         a term without its own entry, such as Polarization, finds the effects whose description
         uses it. Card summaries start with the card's color (its rarity in game: White, Blue,
-        Purple, Gold, Orange).
+        Purple, Gold, Orange). limit is at most 50.
         Season content is not in the game data this searches: season events and Interaction
         Events (such as Elaborate Illusion), Chaos difficulty modifiers (such as Gangrene),
         and Environment Variables nodes. When lookup finds nothing for such a name, use
@@ -498,7 +468,8 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
     @mcp.tool()
     async def get_partner(name: str) -> dict | None:
         """The best-matching partner: rarity, class, passive, EGO skill (name, EP cost, text)
-        and base stats. Use recommended_by for which characters' guides rank it."""
+        and base stats. Use recommended_by for which characters' guides rank it. The
+        Epiphanies a partner unlocks are in neither source."""
         found = await _query(
             f"SELECT * FROM partner WHERE {NAME_MATCH} ORDER BY {NAME_ORDER} LIMIT 1",
             {"name": name},
@@ -508,7 +479,8 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
     @mcp.tool()
     async def get_card(name: str) -> list[dict]:
         """Every version of the best-matching card: the base card and its Epiphany variants
-        (I-V), each with full text, cost, tags, Prydwen's star rating and its own review. The
+        (I-V), each with full text, cost, tags, Prydwen's star rating (1 to 5) and its own
+        review. The
         base card also carries the overall review, the recommended Neutral Epiphany
         (target_neutral) and Prydwen's Neutral and Divine advice."""
         return await _query(
@@ -535,9 +507,11 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
         Prydwen's guide: cards (without reviews; use get_card), potentials, manifest_egos,
         teams, decks (with the deck code players paste into the game's deck import, when
         Prydwen gives one, and the Chaos it farms), equipment (per season tab),
-        seasonal_powers, fragments, partners,
-        synergies, or a prose section by title (Pros, Cons, Introduction, Key Mechanics, Stats,
-        Potential Priority, ...). A section reply names the character but repeats no profile.
+        seasonal_powers, fragments, partners, synergies, or a prose section by title (Pros,
+        Cons, Introduction, Key Mechanics, Stats, Potential Priority, ...). The teams and
+        synergies sections hold only this character's own guide page; synergies also gathers
+        other guide pages, and find_teams other guide pages and the leaderboard. A section
+        reply names the character but repeats no profile.
         note explains missing data, such as a character neither source covers yet."""
         character = await _find_character(name)
         if character is None:
@@ -555,7 +529,7 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
             return character | {"sections": available + [s["title"] for s in prose]}
         header = {
             k: character[k]
-            for k in ("name", "slug", "source", "prydwen_url", "data_fetched_at", "note")
+            for k in ("name", "slug", "prydwen_url", "data_fetched_at", "note")
             if k in character
         }
         key = section.strip().lower()
@@ -570,7 +544,8 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
         """Find the card and Epiphany variant whose effect text best matches text read from the
         screen (the game shows Epiphany choices as text, without variant numbers). Numbers in
         the text decide between versions that differ only in them. character narrows the
-        search to one character's cards (name or slug, typos tolerated). match is 0 to 1."""
+        search to one character's cards (name or slug, typos tolerated). match is 0 to 1;
+        limit is at most 20."""
         slug = None
         if character:
             found = await _find_character(character)
@@ -580,7 +555,7 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
         rows = await _query(
             """
             SELECT card.name, card.base_name, card.variant, card.alias, card.color, card.cost,
-                   card.type, card.text, card.rating, character.name AS character, card.source,
+                   card.type, card.text, card.rating, character.name AS character,
                    card.url, card.prydwen_url, card.data_fetched_at,
                    word_similarity(%(text)s, card.text)::float8 AS match
             FROM card LEFT JOIN character ON character.slug = card.character_slug
@@ -602,10 +577,12 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
 
     @mcp.tool()
     async def find_teams(character: str) -> list[dict]:
-        """Every team that includes the best-matching character: teams in Prydwen's guides
-        (source prydwen: name, tier, members, the characters whose pages list it), then the
-        lineups of the newest leaderboard season (source leaderboard: members, how many
-        ranked teams used the lineup, and its best rank), most used first."""
+        """Up to 30 teams that include the best-matching character: first teams in Prydwen's
+        guides (name, tier, members, listed_for: the characters whose pages list it), then
+        lineups of the newest leaderboard season (season, members, teams: how many ranked teams
+        used the lineup, best_rank), most used first. Use it for "which
+        team should X be in"; synergies ranks single characters to pair with X, with reasons;
+        get_character section teams lists only the teams on X's own guide page."""
         return await _query(
             f"""
             WITH member AS (
@@ -671,7 +648,7 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
         supported first. sources says where each is named: the character's own synergy list
         (reasons gives Prydwen's explanation), the other character's synergy list
         (their_reasons), or recommended teams (teams, with tier). Use it for "who should I
-        use with X"."""
+        use with X"; find_teams gives whole lineups, including leaderboard ones."""
         return await _query(SYNERGIES_SQL, {"name": character})
 
     @mcp.tool()
@@ -712,13 +689,14 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
         base_only: bool = True,
     ) -> dict:
         """List cards with optional filters; total counts every match, and note says when
-        results shows only part of them. character is a name or slug (typos tolerated); category is starting (in
-        the starting deck), unique (gained in a run), ego (the Ego skill, cast with EP, not in
-        the deck), collapse (replaces a card when the character's Collapse triggers),
-        generated (created by other cards), neutral, monster or forbidden; type is Attack,
-        Skill, Upgrade and so on; tag is a card tag such as Exhaust; color is the card's rarity
-        color (White, Blue, Purple, Gold, Orange), which players use to name cards ("her purple
-        card"). base_only skips Epiphany and other versions."""
+        results shows only part of them. character is a name or slug (typos tolerated);
+        category is starting (in the starting deck), unique (gained in a run), ego (the Ego
+        skill, cast with EP, not in the deck), collapse (replaces a card when the character's
+        Collapse triggers), generated (created by other cards), neutral, monster or
+        forbidden; type is Attack, Skill, Upgrade and so on; tag is a card tag such as
+        Exhaust; color is the card's rarity color (White, Blue, Purple, Gold, Orange), which
+        players use to name cards ("her purple card"). base_only skips Epiphany and other
+        versions."""
         slug = None
         if character:
             found = await _find_character(character)
@@ -729,7 +707,7 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
             f"""
             SELECT card.name, card.category, card.color, card.cost, card.type, card.tags,
                    card.text, card.variant, card.rating, character.name AS character,
-                   card.source, card.url, card.data_fetched_at, count(*) OVER () AS total
+                   card.url, card.data_fetched_at, count(*) OVER () AS total
             FROM card LEFT JOIN character ON character.slug = card.character_slug
             WHERE (%(slug)s::text IS NULL OR card.character_slug = %(slug)s)
               AND (%(category)s::text IS NULL OR card.category = lower(%(category)s))
@@ -770,7 +748,7 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
             f"""
             SELECT name, rarity, slot, text, obtained_from,
                    CASE WHEN %(name)s::text IS NOT NULL THEN stats END AS stats,
-                   prydwen_name, source, url, data_fetched_at, count(*) OVER () AS total
+                   prydwen_name, url, data_fetched_at, count(*) OVER () AS total
             FROM equipment
             WHERE (%(slot)s::text IS NULL OR slot ILIKE regexp_replace(%(slot)s, 's$', ''))
               AND (%(rarity)s::text IS NULL OR rarity ILIKE %(rarity)s)
@@ -791,7 +769,9 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
     @mcp.tool()
     async def search_guides(query: str, limit: int = 5) -> list[dict]:
         """Full-text search over every scraped Prydwen page (guides, tier list, team database,
-        character reviews). Returns the best pages with highlighted excerpts."""
+        character reviews). Returns the best pages with highlighted excerpts; get_page gives
+        a page's full text. Use it for strategy and opinions the other tools do not cover;
+        official news, events and patch notes are in search_posts. limit is at most 20."""
         return await _query(
             """
             SELECT url, title, page.data_fetched_at,
@@ -840,13 +820,14 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
         """Search the game's official Stove posts (update notices, news and event overviews,
         current community events), split into sections. Use it for events, season content
         (Season Restrictions, Supply Store, Environment Variables), rate-up periods and
-        rewards. query: a question or words; matches the posts' words, titles and headings
-        (typos tolerated), and sections close in meaning. active_on: a date (YYYY-MM-DD, or today) to get only sections whose period
+        rewards; list_banners gives the banner schedule itself. query: a question or words;
+        matches the posts' words, titles and headings (typos tolerated), and sections close in
+        meaning. active_on: a date (YYYY-MM-DD, or today) to get only sections whose period
         covers it, which answers "what events are on now". Give either or both. Each result
         has the post title, board, posted_at, the section heading ("■ Section > ◆
         Subsection"), its full text, its period (starts_on, ends_on) when the post gives one,
-        and the post url. Images in posts (some calendars) are not included. total counts every
-        match; offset pages through them (at most 20 per call)."""
+        and the post url. Images in posts (some calendars) are not included. total counts
+        every match; offset pages through them (at most 20 per call)."""
         if query is None and active_on is None:
             raise ToolError("Give query, active_on, or both.")
         day = None
@@ -938,7 +919,8 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
 
     @mcp.tool()
     async def get_page(url: str) -> dict | None:
-        """Full text of one scraped Prydwen page, by URL from search_guides or lookup."""
+        """Full text of one scraped Prydwen page, by a prydwen.gg URL from search_guides or
+        another tool (url or prydwen_url). Other URLs return nothing."""
         rows = await _query(
             "SELECT url, title, body, page.data_fetched_at"
             " FROM prydwen.document JOIN prydwen.page USING (url) WHERE url = %(url)s",

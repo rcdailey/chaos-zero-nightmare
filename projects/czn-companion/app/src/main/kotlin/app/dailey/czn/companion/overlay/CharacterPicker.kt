@@ -63,11 +63,7 @@ fun CharacterPicker(
     Column(Modifier.windowInsetsPadding(WindowInsets.safeDrawing)) {
         TopAppBar(
             title = {
-                Text(
-                    state.reason ?: "Which character is this run for?",
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis,
-                )
+                Text(PICKER_TITLE, maxLines = 1, overflow = TextOverflow.Ellipsis)
             },
             actions = {
                 if (state.forReply) {
@@ -117,10 +113,7 @@ fun InlineCharacterChoice(
     state: PickerState,
     actions: PickerActions,
 ) = Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-    Text(
-        state.reason ?: "Which character is this run for?",
-        style = MaterialTheme.typography.titleSmall,
-    )
+    Text(PICKER_TITLE, style = MaterialTheme.typography.titleSmall)
     LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         items(state.options, key = { it.name }) { character ->
             CharacterCard(character, actions.onPick, Modifier.width(INLINE_CARD_WIDTH))
@@ -151,6 +144,8 @@ private fun CharacterCard(
 
 private val INLINE_CARD_WIDTH = 112.dp
 
+private const val PICKER_TITLE = "Pick the run's character"
+
 @Composable
 private fun Loading() =
     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -177,11 +172,10 @@ private const val CARD_ASPECT_RATIO = 262f / 358f
 @PreviewFontScale
 @Composable
 private fun CharacterPickerPreview() =
-    CompanionTheme {
+    CompanionTheme(dark = true) {
         Box(Modifier.size(900.dp, 600.dp)) {
             CharacterPicker(
                 PickerState(
-                    reason = "Whose deck are you building?",
                     forReply = true,
                     roster =
                         RosterState.Loaded(

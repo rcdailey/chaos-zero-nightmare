@@ -47,6 +47,6 @@ class CompanionApp : Application() {
     }
     val characterRoster by lazy { CharacterRoster(http, cznDataAuth) }
     val conversation by lazy {
-        ClaudeConversation(http, anthropicAuth, cznDataAuth, RunRepository(runDatabase))
+        ClaudeConversation(anthropicAuth, cznDataAuth, RunRepository(runDatabase))
     }
 }

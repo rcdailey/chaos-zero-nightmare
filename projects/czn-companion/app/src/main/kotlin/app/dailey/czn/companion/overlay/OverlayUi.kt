@@ -182,8 +182,8 @@ fun SideTab(actions: SideTabActions) {
                     topEnd = ZeroCornerSize,
                     bottomEnd = ZeroCornerSize,
                 ),
-            color = MaterialTheme.colorScheme.primaryContainer,
-            contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+            color = MaterialTheme.colorScheme.surfaceContainer,
+            contentColor = MaterialTheme.colorScheme.primary,
             shadowElevation = 6.dp,
             modifier = Modifier.size(width = 32.dp, height = SideTabSize.height),
         ) {
@@ -280,7 +280,10 @@ class PanelActions(
 /** Below this height the top bar would leave the conversation almost no room. */
 private val TOP_BAR_MIN_PANEL_HEIGHT = 240.dp
 
-/** The side panel, in the side tab's color so the two read as one piece. */
+/**
+ * The side panel, in the side tab's neutral surface so the two read as one piece; the theme's
+ * accent color marks only actions and highlights.
+ */
 @Composable
 fun Panel(
     state: PanelState,
@@ -288,8 +291,8 @@ fun Panel(
     actions: PanelActions,
     pickerActions: PickerActions,
 ) = Surface(
-    color = MaterialTheme.colorScheme.primaryContainer,
-    contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+    color = MaterialTheme.colorScheme.surfaceContainer,
+    contentColor = MaterialTheme.colorScheme.onSurface,
     shadowElevation = 8.dp,
     modifier = Modifier.fillMaxSize(),
 ) {
@@ -327,9 +330,9 @@ private fun PanelTopBar(
     windowInsets = WindowInsets(0),
     colors =
         TopAppBarDefaults.topAppBarColors(
-            containerColor = MaterialTheme.colorScheme.primaryContainer,
-            titleContentColor = MaterialTheme.colorScheme.onPrimaryContainer,
-            actionIconContentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+            containerColor = MaterialTheme.colorScheme.surfaceContainer,
+            titleContentColor = MaterialTheme.colorScheme.onSurface,
+            actionIconContentColor = MaterialTheme.colorScheme.onSurfaceVariant,
         ),
 )
 
@@ -381,7 +384,9 @@ private fun Conversation(
 ) {
     val listState = rememberLazyListState()
     // A new question jumps to the newest message even if the user had scrolled back.
-    LaunchedEffect(state.pendingQuestion) {
+    // So does Claude's inline question, which is the newest item while it waits.
+    val inlinePicker = state.picker?.takeIf { it.inline }
+    LaunchedEffect(state.pendingQuestion, inlinePicker != null) {
         if (state.pendingQuestion != null) listState.scrollToItem(0)
     }
     // Reversed layout anchors the list at its bottom, so a growing reply stays in view while
@@ -392,12 +397,13 @@ private fun Conversation(
         reverseLayout = true,
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        state.picker?.takeIf { it.inline }?.let { picker ->
+        inlinePicker?.let { picker ->
             item(key = "inline-picker") { InlineCharacterChoice(picker, pickerActions) }
         }
         state.pendingQuestion?.let { question ->
             item(key = "pending-reply") {
-                Reply(state.streaming, state.pendingTools, complete = false)
+                // The spinner would claim Claude is working while it waits for the player.
+                Reply(state.streaming, state.pendingTools, complete = inlinePicker != null)
             }
             item(key = "pending-question") { Question(question) }
         }
@@ -462,8 +468,8 @@ private fun SeenBlock(text: String) {
     Surface(
         onClick = { expanded = !expanded },
         shape = MaterialTheme.shapes.small,
-        color = MaterialTheme.colorScheme.secondaryContainer,
-        contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
+        color = MaterialTheme.colorScheme.surfaceContainerHighest,
+        contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
     ) {
         Column(Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
             Row(
@@ -559,7 +565,7 @@ private fun AskButton(
 @PreviewFontScale
 @Composable
 private fun PanelPreview() =
-    CompanionTheme {
+    CompanionTheme(dark = true) {
         Box(Modifier.size(468.dp, 600.dp)) {
             SideOverlay(
                 open = true,

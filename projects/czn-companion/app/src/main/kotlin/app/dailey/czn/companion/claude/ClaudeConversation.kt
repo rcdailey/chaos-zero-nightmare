@@ -4,34 +4,27 @@ import app.dailey.czn.companion.auth.AnthropicAuth
 import app.dailey.czn.companion.auth.CznDataAuth
 import app.dailey.czn.companion.auth.SignInRequired
 import app.dailey.czn.companion.run.RunRepository
-import io.ktor.client.HttpClient
-import io.ktor.client.request.header
-import io.ktor.client.request.preparePost
-import io.ktor.client.request.setBody
-import io.ktor.client.statement.bodyAsChannel
-import io.ktor.client.statement.bodyAsText
-import io.ktor.http.ContentType
-import io.ktor.http.HttpHeaders
-import io.ktor.http.HttpStatusCode
-import io.ktor.http.contentType
-import io.ktor.utils.io.readUTF8Line
+import com.anthropic.client.AnthropicClient
+import com.anthropic.client.okhttp.AnthropicOkHttpClient
+import com.anthropic.core.JsonValue
+import com.anthropic.errors.AnthropicIoException
+import com.anthropic.errors.AnthropicServiceException
+import com.anthropic.errors.UnauthorizedException
+import com.anthropic.helpers.BetaMessageAccumulator
+import com.anthropic.models.beta.messages.BetaContentBlockParam
+import com.anthropic.models.beta.messages.BetaMessage
+import com.anthropic.models.beta.messages.BetaMessageParam
+import com.anthropic.models.beta.messages.BetaStopReason
+import com.anthropic.models.beta.messages.BetaToolResultBlockParam
+import com.anthropic.models.beta.messages.BetaToolUseBlock
+import com.anthropic.models.beta.messages.MessageCreateParams
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.FlowCollector
 import kotlinx.coroutines.flow.flow
-import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.JsonArray
-import kotlinx.serialization.json.JsonElement
-import kotlinx.serialization.json.JsonNull
-import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.JsonPrimitive
-import kotlinx.serialization.json.add
-import kotlinx.serialization.json.buildJsonObject
-import kotlinx.serialization.json.contentOrNull
-import kotlinx.serialization.json.intOrNull
-import kotlinx.serialization.json.jsonObject
-import kotlinx.serialization.json.jsonPrimitive
-import kotlinx.serialization.json.put
-import kotlinx.serialization.json.putJsonArray
+import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.job
 import java.io.IOException
 
 sealed interface ReplyEvent {
@@ -63,10 +56,7 @@ fun interface PlayerInput {
      * Shows the character picker, limited to [candidates] unless empty, and returns the pick, or
      * null when the player closes the picker without choosing.
      */
-    suspend fun pickCharacter(
-        candidates: List<String>,
-        reason: String?,
-    ): String?
+    suspend fun pickCharacter(candidates: List<String>): String?
 }
 
 /**
@@ -77,13 +67,10 @@ fun interface PlayerInput {
  * conversation unchanged, though a character set before the failure stays set.
  */
 class ClaudeConversation(
-    private val http: HttpClient,
     private val anthropic: AnthropicAuth,
     private val cznData: CznDataAuth,
     private val run: RunRepository,
 ) {
-    private val json = Json { ignoreUnknownKeys = true }
-
     val entries get() = run.entries
 
     val character get() = run.character
@@ -107,10 +94,11 @@ class ClaudeConversation(
             val character = run.characterNow()
             val reply = StringBuilder()
             val tools = mutableListOf<String>()
-            val turn = mutableListOf<JsonObject>()
+            val turn = mutableListOf<BetaMessageParam>()
+            val client = client(anthropicToken)
             try {
                 repeat(MAX_ROUNDS) {
-                    val body =
+                    val params =
                         MessagesRequest.build(
                             history,
                             text,
@@ -120,17 +108,16 @@ class ClaudeConversation(
                             character,
                             turn,
                         )
-                    val round = stream(anthropicToken, body, reply, tools) ?: return@flow
-                    val assistant = assistantMessage(round.blocks)
-                    when (round.stopReason) {
-                        "tool_use" -> {
-                            turn += assistant
-                            turn += toolResults(round.blocks, player)
+                    val message = stream(client, params, reply, tools)
+                    when (message.stopReason().orElse(null)) {
+                        BetaStopReason.TOOL_USE -> {
+                            turn += message.toParam()
+                            turn += toolResults(message, player)
                         }
 
                         // A long server-side tool call paused the reply; resending resumes it.
-                        "pause_turn" -> {
-                            turn += assistant
+                        BetaStopReason.PAUSE_TURN -> {
+                            turn += message.toParam()
                         }
 
                         else -> {
@@ -141,158 +128,112 @@ class ClaudeConversation(
                     }
                 }
                 emit(ReplyEvent.Failed(FailureKind.Api, "Claude kept calling tools; try again."))
+            } catch (e: UnauthorizedException) {
+                emit(ReplyEvent.Failed(FailureKind.AnthropicSignIn, e.message.orEmpty()))
+            } catch (e: AnthropicServiceException) {
+                emit(serviceFailure(e))
+            } catch (e: AnthropicIoException) {
+                emit(ReplyEvent.Failed(FailureKind.Network, e.message ?: "Network error."))
             } catch (e: IOException) {
                 emit(ReplyEvent.Failed(FailureKind.Network, e.message ?: "Network error."))
+            } finally {
+                client.close()
             }
-        }
-
-    /** One response's content blocks, as the API streamed them, and why it stopped. */
-    private class Round(
-        val blocks: List<JsonObject>,
-        val stopReason: String?,
-    )
+        }.flowOn(Dispatchers.IO)
 
     /**
-     * Sends one request and streams its text into [reply]; null after emitting a failure. Blocks
-     * are rebuilt from the stream so they can be sent back verbatim when Claude calls an app tool.
+     * A client for one reply: the subscription token rotates, and the SDK takes it when the client
+     * is built. The identity line, betas, and these headers are what subscription tokens need.
+     */
+    private fun client(token: String): AnthropicClient =
+        AnthropicOkHttpClient
+            .builder()
+            .authToken(token)
+            .putHeader("User-Agent", "claude-cli/2.1.322 (external, cli)")
+            .putHeader("x-app", "cli")
+            .build()
+
+    /**
+     * Sends one request and streams its text into [reply] and its CZN data lookups into [tools].
+     * The SDK's stream blocks a thread, so the flow runs on [Dispatchers.IO], and cancelling the
+     * reply closes the stream to stop the read.
      */
     private suspend fun FlowCollector<ReplyEvent>.stream(
-        token: String,
-        body: JsonObject,
+        client: AnthropicClient,
+        params: MessageCreateParams,
         reply: StringBuilder,
         tools: MutableList<String>,
-    ): Round? =
-        http
-            .preparePost(MESSAGES_URL) {
-                header(HttpHeaders.Authorization, "Bearer $token")
-                header("anthropic-version", "2023-06-01")
-                header("anthropic-beta", MessagesRequest.BETAS.joinToString(","))
-                header(HttpHeaders.UserAgent, "claude-cli/2.1.322 (external, cli)")
-                header("x-app", "cli")
-                contentType(ContentType.Application.Json)
-                setBody(body.toString())
-            }.execute { response ->
-                if (response.status != HttpStatusCode.OK) {
-                    emit(httpFailure(response.status, response.bodyAsText()))
-                    return@execute null
-                }
-                val channel = response.bodyAsChannel()
-                val blocks = mutableListOf<MutableMap<String, JsonElement>>()
-                val texts = mutableMapOf<Int, StringBuilder>()
-                val inputs = mutableMapOf<Int, StringBuilder>()
-                var stopReason: String? = null
-                while (true) {
-                    val line = channel.readUTF8Line() ?: break
-                    if (!line.startsWith("data:")) continue
-                    val event =
-                        json
-                            .parseToJsonElement(
-                                line.removePrefix("data:").trim(),
-                            ).jsonObject
-                    val index = event["index"]?.jsonPrimitive?.intOrNull ?: -1
-                    when (event.string("type")) {
-                        "content_block_start" -> {
-                            val block = event.obj("content_block") ?: continue
-                            blocks += block.toMutableMap()
-                            if (block.string("type") == "text") {
-                                texts[index] = StringBuilder()
-                                if (reply.isNotEmpty()) {
-                                    reply.append("\n\n")
-                                    emit(ReplyEvent.TextDelta("\n\n"))
-                                }
-                            }
+    ): BetaMessage {
+        val accumulator = BetaMessageAccumulator.create()
+        // Name and streamed input of each CZN data lookup, by content block index, until it ends.
+        val lookups = mutableMapOf<Long, Pair<String, StringBuilder>>()
+        client.beta().messages().createStreaming(params).use { response ->
+            val closer = currentCoroutineContext().job.invokeOnCompletion { response.close() }
+            try {
+                for (event in response.stream().iterator()) {
+                    accumulator.accumulate(event)
+                    event.contentBlockStart().orElse(null)?.let { start ->
+                        val block = start.contentBlock()
+                        if (block.isText() && reply.isNotEmpty()) {
+                            reply.append("\n\n")
+                            emit(ReplyEvent.TextDelta("\n\n"))
                         }
-
-                        "content_block_delta" -> {
-                            val delta = event.obj("delta") ?: continue
-                            when (delta.string("type")) {
-                                "text_delta" -> {
-                                    val piece = delta.string("text").orEmpty()
-                                    texts[index]?.append(piece)
-                                    reply.append(piece)
-                                    emit(ReplyEvent.TextDelta(piece))
-                                }
-
-                                "input_json_delta" -> {
-                                    inputs
-                                        .getOrPut(index, ::StringBuilder)
-                                        .append(delta.string("partial_json").orEmpty())
-                                }
-                            }
+                        block.mcpToolUse().orElse(null)?.let {
+                            lookups[start.index()] = it.name() to StringBuilder()
                         }
-
-                        "content_block_stop" -> {
-                            val block = blocks.getOrNull(index) ?: continue
-                            texts[index]?.let { block["text"] = JsonPrimitive(it.toString()) }
-                            val input = inputs[index]?.toString()?.ifBlank { null }
-                            if (input != null) block["input"] = json.parseToJsonElement(input)
-                            if (block["type"]?.jsonPrimitive?.content == "mcp_tool_use") {
-                                val label = toolLabel(block)
-                                tools += label
-                                emit(ReplyEvent.ToolCall(label))
-                            }
+                    }
+                    event.contentBlockDelta().orElse(null)?.let { delta ->
+                        delta.delta().text().orElse(null)?.let {
+                            reply.append(it.text())
+                            emit(ReplyEvent.TextDelta(it.text()))
                         }
-
-                        "message_delta" -> {
-                            stopReason = event.obj("delta")?.string("stop_reason") ?: stopReason
+                        delta.delta().inputJson().orElse(null)?.let {
+                            lookups[delta.index()]?.second?.append(it.partialJson())
                         }
-
-                        "error" -> {
-                            val message = event.obj("error")?.string("message").orEmpty()
-                            emit(ReplyEvent.Failed(FailureKind.Api, message))
-                            return@execute null
-                        }
-
-                        "message_stop" -> {
-                            return@execute Round(blocks.map(::JsonObject), stopReason)
+                    }
+                    event.contentBlockStop().orElse(null)?.let { stop ->
+                        lookups.remove(stop.index())?.let { (name, input) ->
+                            val label = toolLabel(name, input.toString())
+                            tools += label
+                            emit(ReplyEvent.ToolCall(label))
                         }
                     }
                 }
-                emit(ReplyEvent.Failed(FailureKind.Network, "The reply was cut off."))
-                null
-            }
-
-    /** The response as an assistant message to send back; the API rejects empty text blocks. */
-    private fun assistantMessage(blocks: List<JsonObject>) =
-        buildJsonObject {
-            put("role", "assistant")
-            putJsonArray("content") {
-                blocks
-                    .filterNot { it.string("type") == "text" && it.string("text").isNullOrEmpty() }
-                    .forEach { block -> add(JsonObject(block.filterValues { it != JsonNull })) }
+            } finally {
+                closer.dispose()
             }
         }
+        return accumulator.message()
+    }
 
-    /** Runs every app tool Claude called in [blocks] and returns their results as one message. */
+    /** Runs every app tool Claude called in [message] and returns their results as one message. */
     private suspend fun toolResults(
-        blocks: List<JsonObject>,
+        message: BetaMessage,
         player: PlayerInput,
-    ): JsonObject {
+    ): BetaMessageParam {
         val results =
-            blocks.filter { it.string("type") == "tool_use" }.map { use ->
-                val input = use.obj("input") ?: JsonObject(emptyMap())
-                val (content, isError) = runTool(use.string("name"), input, player)
-                buildJsonObject {
-                    put("type", "tool_result")
-                    put("tool_use_id", use.string("id"))
-                    put("content", content)
-                    if (isError) put("is_error", true)
-                }
+            message.content().mapNotNull { it.toolUse().orElse(null) }.map { use ->
+                val (content, isError) = runTool(use, player)
+                BetaContentBlockParam.ofToolResult(
+                    BetaToolResultBlockParam
+                        .builder()
+                        .toolUseId(use.id())
+                        .content(content)
+                        .apply { if (isError) isError(true) }
+                        .build(),
+                )
             }
-        return buildJsonObject {
-            put("role", "user")
-            put("content", JsonArray(results))
-        }
+        return BetaMessageParam.ofUserOfContentBlockParams(results)
     }
 
     private suspend fun runTool(
-        name: String?,
-        input: JsonObject,
+        use: BetaToolUseBlock,
         player: PlayerInput,
-    ): Pair<String, Boolean> =
-        when (name) {
+    ): Pair<String, Boolean> {
+        val input = use._input().asObject().orElse(emptyMap())
+        return when (use.name()) {
             MessagesRequest.SET_RUN_CHARACTER -> {
-                val character = input.string("name")?.trim()
+                val character = input["name"]?.asString()?.orElse(null)?.trim()
                 if (character.isNullOrEmpty()) {
                     "name is required." to true
                 } else {
@@ -303,13 +244,15 @@ class ClaudeConversation(
 
             MessagesRequest.ASK_RUN_CHARACTER -> {
                 val candidates =
-                    (input["candidates"] as? JsonArray)
-                        ?.mapNotNull { (it as? JsonPrimitive)?.contentOrNull?.trim() }
+                    input["candidates"]
+                        ?.asArray()
+                        ?.orElse(null)
+                        ?.mapNotNull { it.asString().orElse(null)?.trim() }
                         ?.filter(String::isNotEmpty)
                         .orEmpty()
-                val picked = player.pickCharacter(candidates, input.string("reason"))
+                val picked = player.pickCharacter(candidates)
                 if (picked == null) {
-                    "The player closed the picker without choosing." to false
+                    "The player skipped the choice." to false
                 } else {
                     run.setCharacter(picked)
                     "The player picked $picked; it is saved as the run's character." to false
@@ -317,9 +260,10 @@ class ClaudeConversation(
             }
 
             else -> {
-                "Unknown tool: $name" to true
+                "Unknown tool: ${use.name()}" to true
             }
         }
+    }
 
     private suspend fun FlowCollector<ReplyEvent>.tokenOrNull(
         kind: FailureKind,
@@ -335,44 +279,33 @@ class ClaudeConversation(
             null
         }
 
-    private fun httpFailure(
-        status: HttpStatusCode,
-        body: String,
-    ): ReplyEvent.Failed {
-        val message =
-            runCatching {
-                json
-                    .parseToJsonElement(body)
-                    .jsonObject
-                    .obj("error")
-                    ?.string("message")
-            }.getOrNull() ?: body.take(300)
+    /** An API error; an MCP auth error means the CZN data token, not Claude's, was refused. */
+    private fun serviceFailure(e: AnthropicServiceException): ReplyEvent.Failed {
+        val message = e.message.orEmpty()
         val lower = message.lowercase()
         val kind =
-            when {
-                status == HttpStatusCode.Unauthorized -> FailureKind.AnthropicSignIn
-                "mcp" in lower && ("auth" in lower || "401" in lower) -> FailureKind.CznSignIn
-                else -> FailureKind.Api
+            if ("mcp" in lower && ("auth" in lower || "401" in lower)) {
+                FailureKind.CznSignIn
+            } else {
+                FailureKind.Api
             }
-        return ReplyEvent.Failed(kind, "${status.value}: $message")
+        return ReplyEvent.Failed(kind, "${e.statusCode()}: $message")
     }
 
     /** "get_card: Blade of the Cycle": the tool name and its first text argument, if any. */
-    private fun toolLabel(block: Map<String, JsonElement>): String {
-        val name = (block["name"] as? JsonPrimitive)?.content.orEmpty()
-        val first =
-            (block["input"] as? JsonObject)?.values?.firstNotNullOfOrNull { value ->
-                (value as? JsonPrimitive)?.takeIf { it.isString }?.content
-            }
+    private fun toolLabel(
+        name: String,
+        input: String,
+    ): String {
+        val arguments =
+            runCatching { JsonValue.from(JSON.readTree(input)).asObject().orElse(null) }
+                .getOrNull()
+        val first = arguments?.values?.firstNotNullOfOrNull { it.asString().orElse(null) }
         return if (first == null) name else "$name: $first"
     }
 
-    private fun JsonObject.string(key: String) = (this[key] as? JsonPrimitive)?.contentOrNull
-
-    private fun JsonObject.obj(key: String) = this[key] as? JsonObject
-
     private companion object {
-        const val MESSAGES_URL = "https://api.anthropic.com/v1/messages"
+        val JSON = com.anthropic.core.jsonMapper()
 
         /** Requests per reply; a reply that needs more is assumed stuck in a tool loop. */
         const val MAX_ROUNDS = 8

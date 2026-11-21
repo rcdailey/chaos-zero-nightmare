@@ -2,6 +2,13 @@ package app.dailey.czn.companion.claude
 
 import app.dailey.czn.companion.run.EntryKind
 import app.dailey.czn.companion.run.RunEntry
+import com.anthropic.core.JsonValue
+import com.anthropic.core.jsonMapper
+import com.anthropic.models.beta.messages.BetaContentBlockParam
+import com.anthropic.models.beta.messages.BetaMessageParam
+import com.anthropic.models.beta.messages.BetaToolResultBlockParam
+import com.anthropic.models.beta.messages.BetaToolUseBlockParam
+import com.anthropic.models.beta.messages.MessageCreateParams
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonArray
@@ -24,7 +31,23 @@ class MessagesRequestTest {
     private fun build(
         jpeg: ByteArray? = byteArrayOf(1, 2, 3),
         text: String = "Why B?",
-    ) = MessagesRequest.build(history, text, jpeg, "https://czn.example/mcp", "czn-token")
+        character: String? = null,
+        turn: List<BetaMessageParam> = emptyList(),
+    ) = wire(
+        MessagesRequest.build(
+            history,
+            text,
+            jpeg,
+            "https://czn.example/mcp",
+            "czn-token",
+            character,
+            turn,
+        ),
+    )
+
+    /** The request body as the SDK sends it. */
+    private fun wire(params: MessageCreateParams) =
+        Json.parseToJsonElement(jsonMapper().writeValueAsString(params._body())).jsonObject
 
     @Test
     fun `a screen read without text sends the default question, never empty text`() {
@@ -56,8 +79,7 @@ class MessagesRequestTest {
     @Test
     fun `the run's character reaches Claude in the system prompt`() {
         fun system(character: String?) =
-            MessagesRequest
-                .build(history, "", null, "u", "t", character)["system"]!!
+            build(jpeg = null, character = character)["system"]!!
                 .jsonArray
                 .joinToString { it.jsonObject.text().orEmpty() }
         assertTrue("Mika" in system("Mika"))
@@ -65,29 +87,34 @@ class MessagesRequestTest {
     }
 
     @Test
-    fun `tool exchanges of this turn follow the newest message and end on a cache breakpoint`() {
+    fun `tool exchanges of this turn follow the newest message`() {
         val toolUse =
-            Json
-                .parseToJsonElement(
-                    """{"role":"assistant","content":[{"type":"tool_use","id":"t1",""" +
-                        """"name":"ask_run_character","input":{}}]}""",
-                ).jsonObject
+            BetaMessageParam.ofAssistantOfContentBlockParams(
+                listOf(
+                    BetaContentBlockParam.ofToolUse(
+                        BetaToolUseBlockParam
+                            .builder()
+                            .id("t1")
+                            .name(MessagesRequest.ASK_RUN_CHARACTER)
+                            .input(JsonValue.from(emptyMap<String, Any>()))
+                            .build(),
+                    ),
+                ),
+            )
         val result =
-            Json
-                .parseToJsonElement(
-                    """{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1",""" +
-                        """"content":"Mika"}]}""",
-                ).jsonObject
+            BetaMessageParam.ofUserOfContentBlockParams(
+                listOf(
+                    BetaContentBlockParam.ofToolResult(
+                        BetaToolResultBlockParam
+                            .builder()
+                            .toolUseId("t1")
+                            .content("Mika")
+                            .build(),
+                    ),
+                ),
+            )
         val messages =
-            MessagesRequest
-                .build(
-                    history,
-                    "Why B?",
-                    null,
-                    "u",
-                    "t",
-                    turn = listOf(toolUse, result),
-                )["messages"]!!
+            build(jpeg = null, turn = listOf(toolUse, result))["messages"]!!
                 .jsonArray
                 .map { it.jsonObject }
         assertEquals(
@@ -102,7 +129,6 @@ class MessagesRequestTest {
                 .single()
                 .string("type"),
         )
-        assertNotNull(messages.last().content().single()["cache_control"])
     }
 
     @Test

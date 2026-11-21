@@ -11,7 +11,6 @@ import app.dailey.czn.companion.claude.FailureKind
 import app.dailey.czn.companion.claude.ReplyEvent
 import app.dailey.czn.companion.run.RunEntry
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -47,8 +46,6 @@ data class PanelState(
  */
 data class PickerState(
     val candidates: List<String> = emptyList(),
-    /** Claude's title for the picker, if it gave one. */
-    val reason: String? = null,
     /** Whether a reply waits for the pick; the picker then also offers to stop the reply. */
     val forReply: Boolean = false,
     val roster: RosterState = RosterState.Loading,
@@ -100,8 +97,8 @@ class AdviceController(
 
     private var reply: Job? = null
 
-    /** The pick a waiting reply needs, while the picker is open for it. */
-    private var replyPick: CompletableDeferred<String?>? = null
+    /** A reply waiting for the player to pick the run's character. */
+    private val replyPick = PlayerWait<String>()
 
     // A completed reply stays shown as pending until the saved run includes it, so the list never
     // briefly drops both items and jumps.
@@ -212,38 +209,24 @@ class AdviceController(
     fun openCharacterPicker() = openPicker(PickerState())
 
     fun pickCharacter(name: String) {
-        Log.d(TAG, "picked $name, reply waiting=${replyPick != null}")
+        Log.d(TAG, "picked $name, reply waiting=${replyPick.waiting}")
         local.update { it.copy(picker = null) }
         // A waiting reply saves the pick itself, with the tool result.
-        val waiting = replyPick
-        if (waiting != null) {
-            waiting.complete(name)
-        } else {
-            scope.launch { conversation.setCharacter(name) }
-        }
+        if (!replyPick.answer(name)) scope.launch { conversation.setCharacter(name) }
     }
 
     fun closePicker() {
         local.update { it.copy(picker = null) }
-        replyPick?.complete(null)
+        replyPick.answer(null)
     }
 
     fun retryRoster() = local.value.picker?.let { openPicker(it) }
 
-    private suspend fun pickForReply(
-        candidates: List<String>,
-        reason: String?,
-    ): String? {
-        val pick = CompletableDeferred<String?>()
-        replyPick = pick
-        openPicker(PickerState(candidates, reason, forReply = true))
-        return try {
-            pick.await()
-        } finally {
-            replyPick = null
-            local.update { it.copy(picker = null) }
-        }
-    }
+    private suspend fun pickForReply(candidates: List<String>): String? =
+        replyPick.await(
+            show = { openPicker(PickerState(candidates, forReply = true)) },
+            hide = { local.update { it.copy(picker = null) } },
+        )
 
     private fun openPicker(picker: PickerState) {
         local.update { it.copy(picker = picker.copy(roster = RosterState.Loading)) }

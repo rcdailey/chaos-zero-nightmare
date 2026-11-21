@@ -162,11 +162,15 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+/** @param dark the overlay passes true: it sits over the game's dark art in any system theme. */
 @Composable
-fun CompanionTheme(content: @Composable () -> Unit) {
+fun CompanionTheme(
+    dark: Boolean = isSystemInDarkTheme(),
+    content: @Composable () -> Unit,
+) {
     val context = LocalContext.current
     val colors =
-        if (isSystemInDarkTheme()) {
+        if (dark) {
             dynamicDarkColorScheme(
                 context,
             )

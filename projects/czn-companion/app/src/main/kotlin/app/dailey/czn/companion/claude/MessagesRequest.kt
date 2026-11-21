@@ -2,21 +2,21 @@ package app.dailey.czn.companion.claude
 
 import app.dailey.czn.companion.run.EntryKind
 import app.dailey.czn.companion.run.RunEntry
-import kotlinx.serialization.json.JsonArray
-import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.JsonObjectBuilder
-import kotlinx.serialization.json.add
-import kotlinx.serialization.json.addJsonObject
-import kotlinx.serialization.json.buildJsonObject
-import kotlinx.serialization.json.jsonArray
-import kotlinx.serialization.json.jsonObject
-import kotlinx.serialization.json.put
-import kotlinx.serialization.json.putJsonArray
-import kotlinx.serialization.json.putJsonObject
+import com.anthropic.core.JsonValue
+import com.anthropic.models.beta.messages.BetaBase64ImageSource
+import com.anthropic.models.beta.messages.BetaCacheControlEphemeral
+import com.anthropic.models.beta.messages.BetaContentBlockParam
+import com.anthropic.models.beta.messages.BetaMcpToolset
+import com.anthropic.models.beta.messages.BetaMessageParam
+import com.anthropic.models.beta.messages.BetaOutputConfig
+import com.anthropic.models.beta.messages.BetaRequestMcpServerUrlDefinition
+import com.anthropic.models.beta.messages.BetaTextBlockParam
+import com.anthropic.models.beta.messages.BetaTool
+import com.anthropic.models.beta.messages.MessageCreateParams
 import kotlin.io.encoding.Base64
 
 /**
- * Builds the Messages API request body. Wire rules that subscription tokens and caching depend on:
+ * Builds Messages API requests. Wire rules that subscription tokens and caching depend on:
  * - The first system block is exactly [IDENTITY]; any other first block gets a bare 429.
  * - Only the newest user message carries an image, so everything before it stays byte-identical
  *   across turns and the cache breakpoint on the last history message can hit.
@@ -37,8 +37,8 @@ object MessagesRequest {
     const val ASK_RUN_CHARACTER = "ask_run_character"
 
     /**
-     * @param turn messages Claude and the app exchanged after [text] in this turn: assistant
-     *   content that stopped for an app tool, then the tool results.
+     * @param turn messages Claude and the app exchanged after [text] in this turn: Claude's
+     *   responses that stopped for a tool, each followed by the app's tool results if any.
      * @param character the run's character, or null while unknown.
      */
     fun build(
@@ -48,97 +48,88 @@ object MessagesRequest {
         cznUrl: String,
         cznToken: String,
         character: String? = null,
-        turn: List<JsonObject> = emptyList(),
-    ): JsonObject =
-        buildJsonObject {
-            put("model", MODEL)
-            put("max_tokens", 8192)
-            put("stream", true)
-            putJsonObject("output_config") { put("effort", "medium") }
-            putJsonArray("system") {
-                addJsonObject { text(IDENTITY) }
-                addJsonObject {
-                    text(APP_PROMPT)
-                    cacheControl()
-                }
-                addJsonObject {
-                    text("The run's character: ${character ?: "not known yet"}.")
-                }
-            }
-            putJsonArray("mcp_servers") {
-                addJsonObject {
-                    put("type", "url")
-                    put("url", cznUrl)
-                    put("name", CZN_SERVER)
-                    put("authorization_token", cznToken)
-                }
-            }
-            putJsonArray("tools") {
-                addJsonObject {
-                    put("type", "mcp_toolset")
-                    put("mcp_server_name", CZN_SERVER)
-                }
-                add(SET_RUN_CHARACTER_TOOL)
-                add(ASK_RUN_CHARACTER_TOOL)
-            }
-            putJsonArray("messages") {
+        turn: List<BetaMessageParam> = emptyList(),
+    ): MessageCreateParams =
+        MessageCreateParams
+            .builder()
+            .model(MODEL)
+            .maxTokens(8192)
+            .outputConfig(BetaOutputConfig.builder().effort(BetaOutputConfig.Effort.MEDIUM).build())
+            .apply { BETAS.forEach(::addBeta) }
+            .systemOfBetaTextBlockParams(
+                listOf(
+                    textBlock(IDENTITY),
+                    textBlock(APP_PROMPT, cached = true),
+                    textBlock("The run's character: ${character ?: "not known yet"}."),
+                ),
+            ).addMcpServer(
+                BetaRequestMcpServerUrlDefinition
+                    .builder()
+                    .name(CZN_SERVER)
+                    .url(cznUrl)
+                    .authorizationToken(cznToken)
+                    .build(),
+            ).addTool(BetaMcpToolset.builder().mcpServerName(CZN_SERVER).build())
+            .addTool(SET_RUN_CHARACTER_TOOL)
+            .addTool(ASK_RUN_CHARACTER_TOOL)
+            .apply {
                 history.forEachIndexed { index, entry ->
-                    addJsonObject {
-                        put("role", if (entry.kind == EntryKind.User) "user" else "assistant")
-                        putJsonArray("content") {
-                            addJsonObject {
-                                text(entry.text.ifBlank { SCREEN_ONLY })
-                                if (index == history.lastIndex) cacheControl()
-                            }
-                        }
+                    val block =
+                        BetaContentBlockParam.ofText(
+                            textBlock(
+                                entry.text.ifBlank { SCREEN_ONLY },
+                                index == history.lastIndex,
+                            ),
+                        )
+                    if (entry.kind == EntryKind.User) {
+                        addUserMessageOfContentBlockParams(listOf(block))
+                    } else {
+                        addAssistantMessageOfContentBlockParams(listOf(block))
                     }
                 }
-                addJsonObject {
-                    put("role", "user")
-                    putJsonArray("content") {
-                        if (jpeg != null) {
-                            addJsonObject {
-                                put("type", "image")
-                                putJsonObject("source") {
-                                    put("type", "base64")
-                                    put("media_type", "image/jpeg")
-                                    put("data", Base64.encode(jpeg))
-                                }
-                            }
-                        }
-                        addJsonObject { text(text.ifBlank { SCREEN_ONLY }) }
-                    }
-                }
-                turn.forEachIndexed { index, message ->
-                    add(if (index == turn.lastIndex) message.withCacheBreakpoint() else message)
-                }
-            }
-        }
+                addUserMessageOfContentBlockParams(
+                    listOfNotNull(
+                        jpeg?.let(::imageBlock),
+                        BetaContentBlockParam.ofText(text.ifBlank { SCREEN_ONLY }),
+                    ),
+                )
+                turn.forEach(::addMessage)
+            }.build()
 
-    /** [message] with a cache breakpoint on its last content block. */
-    private fun JsonObject.withCacheBreakpoint(): JsonObject {
-        val content = this["content"]?.jsonArray ?: return this
-        val last = content.lastOrNull()?.jsonObject ?: return this
-        val marked = JsonObject(last + ("cache_control" to EPHEMERAL))
-        return JsonObject(this + ("content" to JsonArray(content.dropLast(1) + marked)))
-    }
+    private fun textBlock(
+        text: String,
+        cached: Boolean = false,
+    ) = BetaTextBlockParam
+        .builder()
+        .text(text)
+        .apply { if (cached) cacheControl(BetaCacheControlEphemeral.builder().build()) }
+        .build()
 
-    private val EPHEMERAL = buildJsonObject { put("type", "ephemeral") }
+    private fun imageBlock(jpeg: ByteArray) =
+        BetaContentBlockParam.ofImage(
+            BetaBase64ImageSource
+                .builder()
+                .mediaType(BetaBase64ImageSource.MediaType.IMAGE_JPEG)
+                .data(Base64.encode(jpeg))
+                .build(),
+        )
 
     private fun tool(
         name: String,
         description: String,
-        properties: JsonObjectBuilder.() -> Unit,
+        properties: Map<String, Any>,
         required: List<String>,
-    ) = buildJsonObject {
-        put("name", name)
-        put("description", description.trimIndent().replace('\n', ' '))
-        putJsonObject("input_schema") {
-            put("type", "object")
-            putJsonObject("properties", properties)
-            putJsonArray("required") { required.forEach(::add) }
-        }
-    }
+    ) = BetaTool
+        .builder()
+        .name(name)
+        .description(description.trimIndent().replace('\n', ' '))
+        .inputSchema(
+            BetaTool.InputSchema
+                .builder()
+                .properties(JsonValue.from(properties))
+                .required(required)
+                .build(),
+        ).build()
 
     private val SET_RUN_CHARACTER_TOOL =
         tool(
@@ -147,12 +138,13 @@ object MessagesRequest {
             Saves the character whose deck this run builds, when the screen shows it beyond doubt.
             The player sees it and can change it. Use the name exactly as the czn tools spell it.
             """,
-            {
-                putJsonObject("name") {
-                    put("type", "string")
-                    put("description", "Character name as the czn tools spell it")
-                }
-            },
+            mapOf(
+                "name" to
+                    mapOf(
+                        "type" to "string",
+                        "description" to "Character name as the czn tools spell it",
+                    ),
+            ),
             listOf("name"),
         )
 
@@ -160,36 +152,22 @@ object MessagesRequest {
         tool(
             ASK_RUN_CHARACTER,
             """
-            Shows the player a full-screen grid of character cards and waits until they pick the
-            character whose deck this run builds; the pick is saved. Returns the name, or that
-            the player closed the grid without choosing.
+            Shows the player character cards and waits until they pick the character whose deck
+            this run builds; the pick is saved. Returns the name, or that the player skipped the
+            choice.
             """,
-            {
-                putJsonObject("candidates") {
-                    put("type", "array")
-                    putJsonObject("items") { put("type", "string") }
-                    put(
-                        "description",
-                        "Names to offer, as the czn tools spell them, for example the team of " +
-                            "three seen earlier; omit to offer every character",
-                    )
-                }
-                putJsonObject("reason") {
-                    put("type", "string")
-                    put("description", "Short title above the grid, for example why you ask")
-                }
-            },
+            mapOf(
+                "candidates" to
+                    mapOf(
+                        "type" to "array",
+                        "items" to mapOf("type" to "string"),
+                        "description" to
+                            "Names to offer, as the czn tools spell them, for example the team " +
+                            "of three seen earlier; omit to offer every character",
+                    ),
+            ),
             emptyList(),
         )
-
-    private fun JsonObjectBuilder.text(value: String) {
-        put("type", "text")
-        put("text", value)
-    }
-
-    private fun JsonObjectBuilder.cacheControl() {
-        putJsonObject("cache_control") { put("type", "ephemeral") }
-    }
 
     private val APP_PROMPT =
         """

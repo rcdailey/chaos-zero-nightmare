@@ -329,7 +329,7 @@ class OverlayService : AccessibilityService() {
     private fun composeView(content: @Composable () -> Unit) =
         ComposeView(this).apply {
             owner.attach(this)
-            setContent { CompanionTheme(content) }
+            setContent { CompanionTheme(dark = true, content = content) }
         }
 
     private fun overlayParams(

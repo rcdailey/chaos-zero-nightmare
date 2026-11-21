@@ -13,7 +13,7 @@ room3 {
 android {
     namespace = "app.dailey.czn.companion"
     compileSdk {
-        version = release(37) { minorApiLevel = 1 }
+        version = release(37) { minorApiLevel = 2 }
     }
 
     defaultConfig {

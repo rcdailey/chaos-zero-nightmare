@@ -1,11 +1,11 @@
 [tools]
 java = "temurin-25"
-android-sdk = "21.0"
+android-sdk = "23.0"
 android-cli = "1.1.16919734"
 
 [tasks.setup]
 description = "Install the Android SDK packages the build needs"
-run = "android --no-metrics sdk install platform-tools platforms/android-37.1 build-tools/36.0.0"
+run = "android --no-metrics sdk install platform-tools platforms/android-37.2 build-tools/36.0.0"
 
 [tasks.check]
 description = "Format check, lint, and unit tests"

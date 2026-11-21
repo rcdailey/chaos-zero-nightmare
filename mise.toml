@@ -1,0 +1,10 @@
+[tools]
+rumdl = "0.3.5"
+
+[tasks.lint]
+description = "Lint Markdown (MD013 wraps at 100 columns; see .markdownlint-cli2.yaml)"
+run = "rumdl check ."
+
+[tasks.format]
+description = "Fix Markdown, including rewrapping long lines"
+run = "rumdl check --fix ."

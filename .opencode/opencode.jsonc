@@ -1,5 +1,30 @@
 {
   "$schema": "https://opencode.ai/config.json",
+  // Each language lives in one project, so each command runs in that project's directory, where
+  // mise pins the tool and the tool finds its config. The format tasks apply lint fixes before
+  // formatting; problems with no automatic fix are left for each project's lint task to report.
+  "formatter": {
+    "ruff": { "disabled": true },
+    "uv": { "disabled": true },
+    "oxfmt": { "disabled": true },
+    "ktlint": { "disabled": true },
+    "czn-data": {
+      "command": ["mise", "-C", "projects/czn-data", "run", "-q", "format", "$FILE"],
+      "extensions": [".py", ".pyi"],
+    },
+    "czn-tools": {
+      "command": ["mise", "-C", "projects/czn-tools", "run", "-q", "format", "$FILE"],
+      "extensions": [".ts", ".tsx"],
+    },
+    "czn-companion": {
+      "command": ["mise", "-C", "projects/czn-companion", "exec", "--", "ktlint", "-F", "$FILE"],
+      "extensions": [".kt", ".kts"],
+    },
+    "markdown": {
+      "command": ["rumdl", "check", "--fix", "--quiet", "$FILE"],
+      "extensions": [".md"],
+    },
+  },
   "mcp": {
     "servers": {
       "czn-data": {

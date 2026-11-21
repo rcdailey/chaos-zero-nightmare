@@ -288,6 +288,110 @@ def test_lookup_finds_a_version_by_the_name_the_game_shows(call):
     assert best["name"] == "Rising Dragon Spire V (Ascended)"
 
 
+GAME8_URL = "https://game8.co/games/Chaos-Zero-Nightmare/archives/578215"
+GAME8_HTML = """
+<html><body><h1 class="p-archiveHeader__title">Distortion Adaptation Explained</h1>
+<div class="archive-style-wrapper">
+  <p>Distortion Adaptation adjusts characters to a Chaos's recommended level.</p>
+  <div><h2 class="a-header--2">Distortion Adaptation Effects</h2></div>
+  <div><h3 class="a-header--3">Keep The Save Data From Runs</h3></div>
+  <p>You keep the Save Data you obtain while it is on.</p>
+  <div><h2 class="a-header--2">How to Get</h2></div>
+  <p>Available after Chapter 1 Episode 10.</p>
+</div></body></html>
+"""
+
+
+def add_game8(conn, html: str = GAME8_HTML, url: str = GAME8_URL):
+    conn.execute(
+        "INSERT INTO game8.page (url, html, lastmod, fetched_at)"
+        " VALUES (%s, %s, '2026-08-05T06:52:35Z', now())",
+        (url, html),
+    )
+
+
+def game8_sections(call, query: str) -> list[dict]:
+    return call("search_game_systems", query=query, limit=20)["results"]
+
+
+def test_game8_sections_carry_parent_headings_and_table_rows_without_navigation(call, conn):
+    add_game8(
+        conn,
+        """
+        <html><body><h1 class="p-archiveHeader__title">Full-Scale Offensive Guide</h1>
+        <div class="archive-style-wrapper">
+          <p>A three-team boss mode.</p>
+          <div class="a-outline">List of Contents Bosses Best Teams</div>
+          <div><h2 class="a-header--2">Bosses</h2></div>
+          <div><h3 class="a-header--3">Aavarck</h3></div>
+          <table><tr><th>Effect</th><th>Value</th></tr>
+            <tr><td>DoT Amount</td><td>+50%</td></tr></table>
+          <div><h3 class="a-header--3">Woman Within the Fog</h3></div>
+          <p>TBD</p>
+          <div><h2 class="a-header--2">Best Teams</h2></div>
+          <div><h3 class="a-header--3">Aavarck Best Teams</h3></div>
+          <div><h4 class="a-header--4">Arabella Fracture Team</h4></div>
+          <p>Arabella, Mika, Khalipe.</p>
+          <div><h2 class="a-header--2">Chaos Zero Nightmare Related Guides</h2></div>
+          <div><h3 class="a-header--3">Current Events</h3></div>
+          <p>Link list</p>
+        </div></body></html>
+        """,
+    )
+
+    sections = game8_sections(call, "full-scale offensive aavarck")
+
+    assert sorted((s["heading"], s["text"]) for s in sections) == [
+        ("Best Teams > Aavarck Best Teams > Arabella Fracture Team", "Arabella, Mika, Khalipe."),
+        ("Bosses > Aavarck", "Effect | Value\nDoT Amount | +50%"),
+    ]
+    assert {s["page_summary"] for s in sections} == {"A three-team boss mode."}
+    body = call("get_page", url=GAME8_URL)["body"]
+    assert "List of Contents" not in body and "Link list" not in body and "TBD" not in body
+
+
+def test_long_game8_section_is_served_as_overlapping_pieces_located_in_the_page(call, conn):
+    lines = "".join(f"<p>Line {n} {'x' * 90}</p>" for n in range(60))
+    add_game8(
+        conn,
+        '<html><body><div class="archive-style-wrapper">'
+        f'<h2 class="a-header--2">Long Rules</h2>{lines}</div></body></html>',
+    )
+
+    pieces = sorted(game8_sections(call, "long rules"), key=lambda s: s["offset"])
+
+    assert len(pieces) > 2
+    assert all(s["heading"] == "Long Rules" and s["length"] <= 2000 for s in pieces)
+    assert pieces[1]["offset"] < pieces[0]["offset"] + pieces[0]["length"]  # pieces overlap
+    for piece in pieces:
+        page = call("get_page", url=GAME8_URL, offset=piece["offset"], length=piece["length"])
+        assert page["body"] == piece["text"]
+
+
+def test_search_game_systems_returns_matching_sections_with_their_page(call, conn):
+    add_game8(conn)
+
+    reply = call("search_game_systems", query="does distortion adaptation keep save data")
+
+    best = reply["results"][0]
+    assert best["heading"] == "Distortion Adaptation Effects > Keep The Save Data From Runs"
+    assert best["text"] == "You keep the Save Data you obtain while it is on."
+    assert best["page_title"] == "Distortion Adaptation Explained"
+    assert best["page_summary"].startswith("Distortion Adaptation adjusts")
+    assert (best["url"], best["updated_at"]) == (GAME8_URL, "2026-08-05T06:52:35+00:00")
+
+
+def test_get_page_reads_the_text_around_a_game8_section(call, conn):
+    add_game8(conn)
+    section = call("search_game_systems", query="Chapter 1 Episode 10")["results"][0]
+
+    page = call("get_page", url=GAME8_URL, offset=section["offset"], length=section["length"])
+
+    assert page["body"] == "Available after Chapter 1 Episode 10."
+    before = call("get_page", url=GAME8_URL, offset=section["offset"] - 11, length=11)
+    assert before["body"] == "How to Get\n"
+
+
 def test_find_teams_by_member(call):
     (team,) = call("find_teams", character="veronika")
     assert (team["name"], team["listed_for"]) == ("Spire Fire", ["Mei Lin"])

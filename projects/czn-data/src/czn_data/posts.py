@@ -87,7 +87,7 @@ def split_post(html: str, posted: datetime) -> list[Section]:
         if not body and (heading is None or not heading.strip(_LEVEL_ONE + _LEVEL_TWO + " >")):
             continue
         starts_on, ends_on = period or _group_period(heading, periods) or (None, None)
-        for chunk in _chunks(body) or [""]:
+        for chunk in chunk_lines(body) or [""]:
             sections.append(Section(len(sections), heading, chunk, starts_on, ends_on))
     return sections
 
@@ -111,7 +111,7 @@ def _group_period(
     return found.pop() if len(found) == 1 else None
 
 
-def _chunks(lines: list[str]) -> list[str]:
+def chunk_lines(lines: list[str]) -> list[str]:
     """The lines as one text, or as chunks of whole lines near ``MAX_CHARS`` when longer."""
     text = "\n".join(lines)
     if len(text) <= MAX_CHARS:

@@ -1,6 +1,6 @@
 # czn-data
 
-Collects Chaos Zero Nightmare data from three sources into Postgres and serves it to Claude (or
+Collects Chaos Zero Nightmare data from four sources into Postgres and serves it to Claude (or
 any MCP client) through an MCP server:
 
 - [wiki.e7bot.top](https://wiki.e7bot.top/#/czn/cards) serves the game's own data: characters,
@@ -13,17 +13,20 @@ any MCP client) through an MCP server:
 - The game's official [Stove community](https://page.onstove.com/chaoszeronightmare/en)
   supplies update notices (season content, restrictions, shops), news and event overviews, and
   current community events.
+- [Game8](https://game8.co/games/Chaos-Zero-Nightmare) explains how the game works: systems
+  (Save Data, Distortion Adaptation, stress), Chaos modes and areas, boss modes, Ark City,
+  events, and seasons.
 
 Each scrape only collects its source, in that source's own shape (schemas `e7bot`, `prydwen`,
-and `stove`). A build step then merges e7bot and Prydwen into the tables the MCP server reads
-(schema `public`), and splits the Stove posts into searchable sections. Where both sources
-describe the same fact, e7bot's value wins; Prydwen fills only the fields and records e7bot
-lacks, such as a character Prydwen covers first. Every merged row has `source` (`e7bot` or
+`stove`, and `game8`). A build step then merges e7bot and Prydwen into the tables the MCP server
+reads (schema `public`), and splits the Stove posts and Game8 pages into searchable sections. Where
+both sources describe the same fact, e7bot's value wins; Prydwen fills only the fields and records
+e7bot lacks, such as a character Prydwen covers first. Every merged row has `source` (`e7bot` or
 `prydwen`), `url`, and `data_fetched_at`; Prydwen opinions on it link to `prydwen_url`.
 
 One container image (`ghcr.io/rcdailey/czn-data`) runs every workload:
 
-- `czn-data daily`: the scheduled run (a daily Kubernetes CronJob). It runs the three scrapes below
+- `czn-data daily`: the scheduled run (a daily Kubernetes CronJob). It runs the four scrapes below
   at once, then `enrich`, then one build, so a run takes about as long as the Prydwen scrape. A
   failed step fails the run but never stops a later one; enrich and the build then use the last good
   data of that source. Each scrape and enrich also runs on its own (for a manual rerun after a
@@ -42,6 +45,9 @@ One container image (`ghcr.io/rcdailey/czn-data`) runs every workload:
 - `czn-data scrape-stove`: the Stove scrape. It pauses one second between requests. Board lists are
   read every run; a post is fetched only when its edit time changed (about 120 posts, 2 minutes,
   on an empty database; seconds after).
+- `czn-data scrape-game8`: the Game8 scrape. It pauses one second between requests. The game page
+  and sitemap are read every run; a page is fetched only when its sitemap date changed or its copy
+  is over 7 days old (about 90 pages, 2 minutes, on an empty database; seconds after).
 - `czn-data build`: merges the stored sources again without fetching anything.
 - `czn-data enrich`: derives data from what the Prydwen scrape stored (character gender and
   identity prints), without contacting Prydwen. A run that finds nothing new exits in seconds.
@@ -119,6 +125,25 @@ comes from a local embedding model (BAAI/bge-small-en-v1.5 through fastembed, 67
 on each section's title, heading, and first 300 characters. The build embeds only new or
 changed sections; the first build embeds all of them (about 15 seconds on a desktop CPU).
 
+## What gets stored from Game8
+
+Game8 covers every part of the game, but e7bot, Prydwen, and the official posts already serve
+characters, cards, equipment, partners, banners, and patch notes. `czn_data.game8` keeps only the
+pages Game8's game page links under its headings for Chaos modes and areas, Simulation,
+Challenges, Ark City, Tips and Tricks, the glossary, seasons, events, and missions, plus the
+current season's guide. Pages missing from Game8's sitemap (its premium opinion articles) are
+skipped. Each page is stored as received, with its date from Game8's sitemap.
+Game8's robots.txt blocks AI crawlers (GPTBot, Google-Extended) but not ordinary ones; this
+project uses Game8 by the owner's choice and keeps the load small.
+
+The build splits each page at its headings (h2 to h4) into sections whose heading names their
+parents ("Best Teams > Aavarck Best Teams"). Tables become one line per row, the table of
+contents and the related-guide link lists are dropped, images are lost, and long sections become
+overlapping pieces as the posts do. Each section records where its text sits in the page text, so
+`get_page` can read around it. Sections are searched like posts (words, names, and meaning),
+with newer pages winning close calls. Some pages are out of date; each result carries Game8's
+update date.
+
 ## How failures are handled
 
 An e7bot run replaces the stored responses only when every path fetched, decrypted, and kept
@@ -144,6 +169,12 @@ A Stove post that fails to fetch, or comes back without content, keeps its store
 the run fails. A board whose list fails, changes shape, or shrinks by more than 20% keeps all its
 stored posts; `czn-data scrape-stove --allow-shrink` accepts a real removal. Posts no longer
 listed are deleted.
+
+A Game8 page that fails to fetch, or comes back without its guide content, keeps its stored copy
+and date, and the run fails. A game page or sitemap that fails, a game page without the kept
+headings, or a selection that shrinks by more than 20% keeps every stored page;
+`czn-data scrape-game8 --allow-shrink` accepts a real removal. Pages no longer selected are
+deleted.
 
 The scraper exits non-zero on any failure, including a failed metrics export. It writes JSON logs
 (`time`, `level`, `msg`, plus fields such as `url` and `error`) that vlagent maps to VictoriaLogs
@@ -175,8 +206,9 @@ Every series also carries the OTLP resource attributes as labels, such as `servi
 The e7bot scrape sends the same kind of series under `czn_e7bot_`: `success`,
 `last_success_timestamp_seconds`, `last_run_timestamp_seconds`, `duration_seconds`, `blocked`,
 `requests{result}` (`ok`, `fetch_error`, `invalid`), and `validation_failures{field}`. The Stove
-scrape sends the same series under `czn_stove_`, plus `articles{result}` (`fetched`,
-`unchanged`, `removed`).
+scrape sends the same series under `czn_stove_`, plus `articles{result}` (`fetched`, `unchanged`,
+`removed`). The Game8 scrape sends the Stove series under `czn_game8_`, with `pages{result}`
+(`fetched`, `unchanged`, `removed`) in place of `articles`.
 
 Every command that builds also sends `czn_build_success`, `czn_build_last_run_timestamp_seconds`,
 and `czn_build_unmatched{entity}`.

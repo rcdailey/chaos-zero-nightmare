@@ -115,12 +115,12 @@ def _read_sitemaps(get, sitemaps: list[str]) -> dict[str, Listing]:
             url = loc.get_text(strip=True).rstrip("/") if loc else ""
             if url.startswith(f"{SITE}/chaos-zero-nightmare"):
                 pages[url] = Listing(
-                    _date(lastmod.get_text(strip=True)) if lastmod else None, sitemap
+                    sitemap_date(lastmod.get_text(strip=True)) if lastmod else None, sitemap
                 )
     return pages
 
 
-def _date(text: str) -> datetime | None:
+def sitemap_date(text: str) -> datetime | None:
     """A sitemap date, UTC when it names no zone; None (the page is downloaded every run) when
     it does not parse."""
     try:

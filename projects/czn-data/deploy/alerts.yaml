@@ -152,6 +152,40 @@ groups:
             `"post invalid"`), and in the MCP data_status tool. A `list.count` field means a
             board lost many posts, which `czn-data scrape-stove --allow-shrink` accepts.
 
+      - alert: CznGame8Stale
+        expr: >-
+          time() - max(last_over_time(czn_game8_last_success_timestamp_seconds[7d])) > 36 * 3600
+          or (
+            absent_over_time(czn_game8_last_success_timestamp_seconds[7d])
+            and on () count(last_over_time(czn_game8_last_run_timestamp_seconds[7d]))
+          )
+        labels:
+          severity: warning
+        annotations:
+          summary: No fully successful czn-data Game8 scrape in 36 hours
+          description: >-
+            The MCP keeps serving the stored Game8 pages. Check the daily CronJob and
+            CznGame8Failed for the cause.
+
+      - alert: CznGame8Failed
+        expr: >-
+          max(
+            last_over_time(czn_game8_success[26h])
+            and tlast_over_time(czn_game8_success[26h])
+              == scalar(max(tlast_over_time(czn_game8_success[26h])))
+          ) == 0
+        labels:
+          severity: warning
+        annotations:
+          summary: The last czn-data Game8 scrape failed
+          description: >-
+            Stored pages are kept. Failed fields are in the czn_game8_validation_failures series
+            (label field), in VictoriaLogs (`"listing failed"`, `"page fetch failed"`, `"page
+            has no guide content"`), and in the MCP data_status tool. A `selection.count` field
+            means Game8's game page lists many fewer kept pages, which `czn-data scrape-game8
+            --allow-shrink` accepts; a `selection.pages` field means its headings changed (see
+            INCLUDED_HEADINGS in czn_data.game8).
+
       - alert: CznBuildFailed
         expr: >-
           max(

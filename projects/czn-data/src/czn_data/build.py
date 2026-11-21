@@ -33,6 +33,7 @@ from psycopg.types.json import Jsonb
 
 from . import embed, metrics
 from .e7bot import SITE
+from .game8 import split_page
 from .posts import split_post
 from .stove import BOARDS, POST_URL
 
@@ -137,6 +138,8 @@ COLUMNS = {
         "article_id board post_title posted_at position heading text starts_on ends_on url"
         " data_fetched_at embedding"
     ),
+    "game8_page": "url title summary body updated_at data_fetched_at",
+    "game8_section": "url position heading text offset length embedding",
 }
 JSON_COLUMNS = {"sections", "stats", "bonuses", "rewards", "cards"}
 
@@ -246,8 +249,13 @@ class _Sources:
             for title, heading, text, vector in conn.execute(
                 "SELECT post_title, heading, text, embedding FROM post_section"
                 " WHERE embedding IS NOT NULL"
+                " UNION ALL SELECT title, heading, text, embedding"
+                " FROM game8_section JOIN game8_page USING (url) WHERE embedding IS NOT NULL"
             )
         }
+        self.game8_pages = conn.execute(
+            "SELECT url, html, lastmod, fetched_at FROM game8.page ORDER BY url"
+        ).fetchall()
 
     def items(self, path: str) -> tuple[list, datetime | None]:
         body, fetched_at = self.documents.get(path, ([], None))
@@ -270,6 +278,7 @@ def _merge(sources: _Sources, result: BuildResult) -> dict[str, list[dict]]:
         "leaderboard_entry": entries,
         "leaderboard_deck": decks,
         "post_section": _post_sections(sources),
+        **_game8(sources),
         "character": characters,
         "card": cards,
         "potential": _potentials(sources, slugs),
@@ -320,12 +329,39 @@ def _post_sections(sources: _Sources) -> list[dict]:
             post | vars(section)
             for section in split_post(article["content"], article["created_at"])
         )
-    texts = [embed.passage_text(r["post_title"], r["heading"], r["text"]) for r in rows]
+    _embed(sources, rows, [(r["post_title"], r["heading"], r["text"]) for r in rows])
+    return rows
+
+
+def _game8(sources: _Sources) -> dict[str, list[dict]]:
+    """Game8 pages and their sections (see ``czn_data.game8.split_page``)."""
+    pages, sections, passages = [], [], []
+    for url, html, lastmod, fetched_at in sources.game8_pages:
+        page = split_page(html)
+        pages.append(
+            {
+                "url": url,
+                "title": page.title,
+                "summary": page.summary,
+                "body": page.body,
+                "updated_at": lastmod,
+                "data_fetched_at": fetched_at,
+            }
+        )
+        for section in page.sections:
+            sections.append({"url": url} | vars(section))
+            passages.append((page.title, section.heading, section.text))
+    _embed(sources, sections, passages)
+    return {"game8_page": pages, "game8_section": sections}
+
+
+def _embed(sources: _Sources, rows: list[dict], passages: list[tuple]) -> None:
+    """Set each row's embedding, computing only those of new or changed passages."""
+    texts = [embed.passage_text(*passage) for passage in passages]
     missing = [text for text in dict.fromkeys(texts) if text not in sources.embeddings]
     vectors = sources.embeddings | dict(zip(missing, embed.passages(missing), strict=True))
     for row, text in zip(rows, texts, strict=True):
         row["embedding"] = vectors[text]
-    return rows
 
 
 def _prydwen_rows(sources: _Sources, table: str) -> list[dict]:

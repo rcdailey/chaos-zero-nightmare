@@ -10,7 +10,8 @@
   a reason.
 - Scrapes fetch live sites: `scrape` (Prydwen, one request per 10 seconds; a few minutes, about 20
   when every page is due: empty database or weekly refresh), `scrape-e7bot` (seconds to 2 minutes;
-  about 8 on an empty database), `scrape-stove` (seconds; about 2 minutes on an empty database). To
+  about 8 on an empty database), `scrape-stove` and `scrape-game8` (seconds; about 2 minutes
+  each on an empty database). To
   verify a change against stored data instead (`mise run db` for the local database): `reparse`
   after a Prydwen parser change, `build` after a change to `czn_data.build` (merging and Stove post
   sections).

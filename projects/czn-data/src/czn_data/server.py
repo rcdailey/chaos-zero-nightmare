@@ -872,7 +872,8 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
         """Full-text search over every scraped Prydwen page (guides, tier list, team database,
         character reviews). Returns the best pages with highlighted excerpts; get_page reads
         a page's text in parts. Use it for strategy and opinions the other tools do not cover;
-        official news, events and patch notes are in search_posts. limit is at most 20."""
+        official news, events and patch notes are in search_posts, and how game systems and
+        modes work in search_game_systems. limit is at most 20."""
         return await _query(
             """
             SELECT url, title, page.data_fetched_at,
@@ -1013,14 +1014,91 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
         )
 
     @mcp.tool()
-    async def get_page(url: str, offset: int = 0) -> dict | None:
-        """Text of one scraped Prydwen page, by a prydwen.gg URL from search_guides or another
-        tool (url or prydwen_url). Other URLs return nothing. Pages can run to 40,000
-        characters, so body holds at most 15,000 of them from offset (a character position);
-        length is the whole page's, and note says how to read on."""
+    async def search_game_systems(query: str, limit: int = 5, offset: int = 0) -> dict:
+        """Search Game8's guides on how the game works, split into sections: game systems
+        (Save Data, Distortion Adaptation, Epiphany, stress, Link Crash, potentials, gacha),
+        Chaos modes and areas, Simulation and boss modes (Full-Scale Offensive), Ark City,
+        events, seasons, missions, and a glossary. Use it for "how does X work" and "what is
+        X"; characters, cards and equipment are in the other tools. query: a question or
+        words; matches words, page titles and headings (typos tolerated), and sections close
+        in meaning. Each result is one section: page_title, heading (its parent headings, "A
+        > B"), text, page_summary (the page's opening), updated_at (when Game8 last updated
+        the page), url, and offset and length (where text sits in get_page's body; read
+        around it when a section refers to another one). Game8 pages can be out of date: the
+        official posts (search_posts) win when they disagree. total counts every match;
+        offset pages through them (at most 20 per call)."""
+        vector = await anyio.to_thread.run_sync(embed.query, query)
+        # Ranked like search_posts: words, titles and headings, and meaning, merged by
+        # reciprocal rank fusion; newer pages win close calls.
+        return await _listing(
+            f"""
+            WITH base AS (
+                SELECT s.*, p.title, p.summary, p.updated_at, p.data_fetched_at
+                FROM game8_section s JOIN game8_page p USING (url)
+            ),
+            words AS (
+                SELECT url, position,
+                       row_number() OVER (ORDER BY ts_rank(search, q)
+                           + greatest(word_similarity(%(name)s, title),
+                                      word_similarity(%(name)s, heading))
+                           DESC) AS rank
+                FROM base,
+                     CAST(replace(plainto_tsquery('english', %(words)s)::text, '&', '|')
+                          AS tsquery) q
+                WHERE search @@ q OR {_name_match("title")} OR {_name_match("heading")}
+            ),
+            meaning AS (
+                SELECT url, position, row_number() OVER (ORDER BY similarity DESC) AS rank
+                FROM base, LATERAL (
+                    SELECT sum(a * b) AS similarity
+                    FROM unnest(embedding, %(vector)s::real[]) AS pair(a, b)
+                ) s
+                ORDER BY similarity DESC NULLS LAST
+                LIMIT {MEANING_CANDIDATES}
+            ),
+            relevance AS (
+                SELECT url, position, sum(1.0 / (60 + rank)) AS score
+                FROM (SELECT * FROM words UNION ALL SELECT * FROM meaning) ranked
+                GROUP BY url, position
+            ),
+            fused AS (
+                SELECT url, position,
+                       score + {RECENCY_WEIGHT} / (60 + row_number() OVER (
+                           ORDER BY updated_at DESC NULLS LAST, position)) AS score
+                FROM relevance JOIN base USING (url, position)
+            )
+            SELECT title AS page_title, heading, text, summary AS page_summary, updated_at,
+                   url, "offset", length, data_fetched_at, count(*) OVER () AS total
+            FROM base JOIN fused USING (url, position)
+            ORDER BY fused.score DESC, url, position
+            LIMIT %(limit)s OFFSET %(offset)s
+            """,
+            {
+                "words": query,
+                "name": query,
+                "vector": vector,
+                "limit": max(1, min(limit, 20)),
+                "offset": max(offset, 0),
+            },
+            offset=max(offset, 0),
+        )
+
+    @mcp.tool()
+    async def get_page(url: str, offset: int = 0, length: int = PAGE_CHARS) -> dict | None:
+        """Text of one scraped page, by URL: a prydwen.gg URL from search_guides or another
+        tool (url or prydwen_url), or a game8.co URL from search_game_systems. Other URLs
+        return nothing. Pages can run to 40,000 characters, so body holds at most length
+        characters (up to 15,000) from offset (a character position); the reply's length is
+        the whole page's, and note says how to read on. To read around a search_game_systems
+        section, start a little before its offset (say 1,500) with a length of a few
+        thousand."""
         rows = await _query(
-            "SELECT url, title, body, page.data_fetched_at"
-            " FROM prydwen.document JOIN prydwen.page USING (url) WHERE url = %(url)s",
+            """
+            SELECT url, title, body, page.data_fetched_at
+            FROM prydwen.document JOIN prydwen.page USING (url) WHERE url = %(url)s
+            UNION ALL
+            SELECT url, title, body, data_fetched_at FROM game8_page WHERE url = %(url)s
+            """,
             {"url": url},
         )
         if not rows:
@@ -1028,7 +1106,7 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
         page = rows[0]
         body = page.pop("body", "")
         start = max(offset, 0)
-        end = start + PAGE_CHARS
+        end = start + max(1, min(length, PAGE_CHARS))
         page |= {"length": len(body), "body": body[start:end]}
         if end < len(body):
             page["note"] = (
@@ -1041,6 +1119,7 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
         """Freshness of each source. prydwen: page counts, oldest and newest fetch times, and
         pages whose latest version failed to parse. e7bot: when the served game data was
         fetched, and the last attempt with its error. stove: official posts stored, the newest
+        fetch, and the last attempt with its error. game8: Game8 guide pages stored, the newest
         fetch, and the last attempt with its error. Failed fetches never replace served data."""
         summary = await _query(
             """
@@ -1077,7 +1156,24 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
             ) latest ON true
             """
         )
-        return {"prydwen": summary[0] | {"errors": errors}, "e7bot": e7bot[0], "stove": stove[0]}
+        game8 = await _query(
+            """
+            SELECT (SELECT count(*) FROM game8.page) AS pages,
+                   (SELECT max(fetched_at) FROM game8.page) AS data_fetched_at,
+                   latest.finished_at AS last_attempt, latest.ok AS last_attempt_ok,
+                   latest.error
+            FROM (SELECT 1) one
+            LEFT JOIN LATERAL (
+                SELECT * FROM game8.run ORDER BY started_at DESC LIMIT 1
+            ) latest ON true
+            """
+        )
+        return {
+            "prydwen": summary[0] | {"errors": errors},
+            "e7bot": e7bot[0],
+            "stove": stove[0],
+            "game8": game8[0],
+        }
 
     @mcp.tool()
     async def plan_deck(character: str) -> dict | None:

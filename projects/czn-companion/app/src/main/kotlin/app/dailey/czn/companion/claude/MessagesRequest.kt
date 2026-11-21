@@ -326,9 +326,11 @@ object MessagesRequest {
         - Every game fact or recommendation you state (rules, mechanics, limits, costs, what
           a button does, builds, ratings) MUST come from the screen or a czn tool result in
           this run; your own knowledge of the game is not a source. Before a reply that
-          needs one, call the tools, even for a follow-up question. For game systems (Save
-          Data, season mechanics, Environment Variables, shops, restrictions), check
-          search_posts and search_guides. When no result states the answer, say you don't
+          needs one, call the tools, even for a follow-up question. For how a game system,
+          mode, or screen works (Save Data, Distortion Adaptation, boss modes, Ark City),
+          check search_game_systems; for season content, events, shops, and restrictions,
+          check search_posts, which wins when the two disagree; for strategy, check
+          search_guides. When no result states the answer, say you don't
           know and name the in-game help ("i" button) or what to tap to find out; MUST NOT
           stretch a related result into an answer.
         - The player asks for help with anything in the game: a Chaos run's deck, an event or

@@ -119,6 +119,12 @@ object MessagesRequest {
         - After the block, the advice MUST be one sentence with the recommended action, then at
           most two short reasons, about 50 words in total. The player reads it mid-game on a
           narrow panel. Go longer only when the player asks for detail.
+        - When the player sends no question and the goal is unclear, you MUST state your best
+          guess of what they want in a few words and advise on that; do not stop to ask.
+        - When the advice depends on something not on this screen (deck, equipment, a card's
+          details, map nodes), you MUST name what to tap to show it and end with "Then
+          long-press." You cannot tap for the player; the next request carries that screen.
+          Give any advice the current screen supports first.
         - The advice MUST NOT narrate lookups or thinking ("Let me check..."), repeat facts from
           the seen block, or comment on anything that needs no action from the player.
         - The panel renders Markdown. You SHOULD bold card and choice names. You MUST NOT use

@@ -65,7 +65,9 @@ SELECT entity.* FROM (
            data_fetched_at
     FROM encounter
     UNION ALL
-    SELECT 'divine_epiphany', text, {divine_summary}, url, data_fetched_at
+    SELECT 'divine_epiphany', text,
+           concat_ws(' | ', {divine_applies}, nullif(array_to_string(gods, ', '), '')), url,
+           data_fetched_at
     FROM divine_epiphany
     UNION ALL
     SELECT 'chaos', name,
@@ -73,20 +75,26 @@ SELECT entity.* FROM (
            ' name as chaos',
            NULL, NULL FROM chaos
 ) entity
+, LATERAL (
+    SELECT entity.kind = 'effect'
+           AND to_tsvector('english', summary) @@ plainto_tsquery('english', %(name)s)
+           AS described
+) d
 WHERE (%(kind)s::text IS NULL OR entity.kind = %(kind)s)
-  AND ({match} OR entity.kind = 'effect'
-       AND to_tsvector('english', summary) @@ plainto_tsquery('english', %(name)s))
-ORDER BY {match} DESC, {order}, name
+  AND ({match} OR d.described)
+-- Names holding the query first, then effects whose description uses it, then fuzzy name
+-- matches: a loose spelling match ("Ionization" for "Polarization") must not outrank an effect
+-- that is about the term.
+ORDER BY name ILIKE '%%' || %(name)s || '%%' DESC, d.described DESC, {match} DESC, {order}, name
 LIMIT %(limit)s
 """
-# Which cards a Divine Epiphany applies to, as text: "Attack, Skill | cost 1 | Vitor, Caligo".
-DIVINE_SUMMARY = """concat_ws(' | ',
+# Which cards a Divine Epiphany applies to, as text: "Attack, Skill | cost 1".
+DIVINE_APPLIES = """concat_ws(' | ',
     coalesce(nullif(array_to_string(card_types, ', '), ''), 'any card type'),
     CASE WHEN cost_min <= 0 AND cost_max >= 99 THEN 'any cost'
          WHEN cost_max >= 99 THEN 'cost ' || cost_min || '+'
          WHEN cost_min = cost_max THEN 'cost ' || cost_min
-         ELSE 'cost ' || cost_min || '-' || cost_max END,
-    nullif(array_to_string(gods, ', '), ''))"""
+         ELSE 'cost ' || cost_min || '-' || cost_max END)"""
 # Other words for effect: the dictionary holds keywords, statuses, and card tags.
 LOOKUP_KIND_ALIASES = {"keyword": "effect", "status": "effect", "tag": "effect"}
 LookupKind = Literal[
@@ -122,7 +130,7 @@ NAME_ORDER = (
     f"(name ILIKE %(name)s) DESC, word_similarity(%(name)s, name) DESC, {_SQUASHED} DESC,"
     " similarity(name, %(name)s) DESC"
 )
-LOOKUP_SQL = LOOKUP_SQL.format(match=NAME_MATCH, order=NAME_ORDER, divine_summary=DIVINE_SUMMARY)
+LOOKUP_SQL = LOOKUP_SQL.format(match=NAME_MATCH, order=NAME_ORDER, divine_applies=DIVINE_APPLIES)
 
 # get_character section name -> query for that part of one character's data (%(slug)s).
 CHARACTER_SECTIONS = {
@@ -366,6 +374,11 @@ LIMIT 1
 """
 # Rows past LIST_LIMIT are cut; total says how many matched.
 LIST_LIMIT = 60
+# Characters of page text per get_page call; get_page's description states the number.
+PAGE_CHARS = 15_000
+# Divine Epiphanies per list_divine_epiphanies call (about 10,000 characters); its description
+# states the number.
+DIVINE_PAGE = 30
 
 # Sections closest in meaning that search_posts merges with its word matches.
 MEANING_CANDIDATES = 20
@@ -535,7 +548,12 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
         key = section.strip().lower()
         if key in CHARACTER_SECTIONS:
             return header | {key: await _query(CHARACTER_SECTIONS[key], slug)}
-        return header | {"sections": [s for s in prose if key in s["title"].lower()]}
+        found = [s for s in prose if key in s["title"].lower()]
+        if found:
+            return header | {"sections": found}
+        available = [s for s, n in counts.items() if n] + [s["title"] for s in prose]
+        missing = f"No section {section!r}. Sections: {', '.join(available)}."
+        return header | {"note": " ".join(filter(None, [header.get("note"), missing]))}
 
     @mcp.tool()
     async def match_card_text(
@@ -668,15 +686,29 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
         )
         return found[0] if found else None
 
-    async def _listing(sql: str, params: dict) -> dict:
-        """A list tool's reply: total matches, and the rows shown (at most LIST_LIMIT)."""
+    async def _listing(sql: str, params: dict, offset: int | None = None) -> dict:
+        """A list tool's reply: total matches, and the rows shown. offset is given by tools
+        that page (their SQL applies it), so the note says how to read on."""
         rows = await _query(sql, params)
-        total = rows[0]["total"] if rows else 0
+        if rows:
+            total = rows[0]["total"]
+        elif offset:
+            # Past the end no row carries the window count; count from the first page.
+            first = await _query(sql, params | {"offset": 0})
+            total = first[0]["total"] if first else 0
+        else:
+            total = 0
         for row in rows:
             del row["total"]
         reply = {"total": total, "results": rows}
-        if total > len(rows):
-            reply["note"] = f"Showing {len(rows)} of {total}; add filters to narrow."
+        start = offset or 0
+        if total > start + len(rows):
+            reply["note"] = (
+                f"Showing {start + 1}-{start + len(rows)} of {total}; offset="
+                f"{start + len(rows)} reads on, or add filters to narrow."
+                if offset is not None
+                else f"Showing {len(rows)} of {total}; add filters to narrow."
+            )
         return reply
 
     @mcp.tool()
@@ -769,8 +801,8 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
     @mcp.tool()
     async def search_guides(query: str, limit: int = 5) -> list[dict]:
         """Full-text search over every scraped Prydwen page (guides, tier list, team database,
-        character reviews). Returns the best pages with highlighted excerpts; get_page gives
-        a page's full text. Use it for strategy and opinions the other tools do not cover;
+        character reviews). Returns the best pages with highlighted excerpts; get_page reads
+        a page's text in parts. Use it for strategy and opinions the other tools do not cover;
         official news, events and patch notes are in search_posts. limit is at most 20."""
         return await _query(
             """
@@ -842,7 +874,7 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
         vector = await anyio.to_thread.run_sync(embed.query, query) if query else None
         # Two rankings merged by reciprocal rank fusion: sections matching the query's words
         # (or, with typos, a title or heading), and the sections closest in meaning.
-        reply = await _listing(
+        return await _listing(
             f"""
             WITH base AS (
                 SELECT * FROM post_section
@@ -908,25 +940,32 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
                 "limit": min(limit, 20),
                 "offset": max(offset, 0),
             },
+            offset=max(offset, 0),
         )
-        reply.pop("note", None)  # _listing's note does not know about offset
-        if reply["total"] > offset + len(reply["results"]):
-            reply["note"] = (
-                f"Showing {offset + 1}-{offset + len(reply['results'])} of {reply['total']};"
-                " raise offset for more, or add a query to narrow."
-            )
-        return reply
 
     @mcp.tool()
-    async def get_page(url: str) -> dict | None:
-        """Full text of one scraped Prydwen page, by a prydwen.gg URL from search_guides or
-        another tool (url or prydwen_url). Other URLs return nothing."""
+    async def get_page(url: str, offset: int = 0) -> dict | None:
+        """Text of one scraped Prydwen page, by a prydwen.gg URL from search_guides or another
+        tool (url or prydwen_url). Other URLs return nothing. Pages can run to 40,000
+        characters, so body holds at most 15,000 of them from offset (a character position);
+        length is the whole page's, and note says how to read on."""
         rows = await _query(
             "SELECT url, title, body, page.data_fetched_at"
             " FROM prydwen.document JOIN prydwen.page USING (url) WHERE url = %(url)s",
             {"url": url},
         )
-        return rows[0] if rows else None
+        if not rows:
+            return None
+        page = rows[0]
+        body = page.pop("body", "")
+        start = max(offset, 0)
+        end = start + PAGE_CHARS
+        page |= {"length": len(body), "body": body[start:end]}
+        if end < len(body):
+            page["note"] = (
+                f"Showing characters {start}-{end} of {len(body)}; offset={end} reads on."
+            )
+        return page
 
     @mcp.tool()
     async def data_status() -> dict:
@@ -1066,16 +1105,21 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
 
     @mcp.tool()
     async def list_divine_epiphanies(
-        card_type: str | None = None, cost: int | None = None, god: str | None = None
+        card_type: str | None = None,
+        cost: int | None = None,
+        god: str | None = None,
+        offset: int = 0,
     ) -> dict:
         """Divine Epiphanies that can be added to a card: optionally only those that apply to a
         card type (Attack, Skill, Upgrade) and a card cost, or that a god offers (Vitor,
         Caligo, Circen, Diallos, Nihilum, Secred). Each has its effect text, the card types and
-        cost range it applies to (applies_to), and the gods that offer it. total counts every
-        match, and note says when results shows only part of them."""
-        return await _listing(
+        cost range it applies to (applies_to), and the gods that offer it; url and
+        data_fetched_at, shared by all, are given once. total counts every match; results
+        holds 30 from offset, and note says how to read on."""
+        offset = max(offset, 0)
+        reply = await _listing(
             f"""
-            SELECT text, {DIVINE_SUMMARY} AS applies_to, gods, rarities, url,
+            SELECT text, {DIVINE_APPLIES} AS applies_to, gods, rarities, url,
                    data_fetched_at, count(*) OVER () AS total
             FROM divine_epiphany
             WHERE (%(type)s::text IS NULL OR card_types = '{{}}'
@@ -1084,10 +1128,16 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
                    OR cost_min IS NULL)
               AND (%(god)s::text IS NULL OR %(god)s ILIKE ANY (gods))
             ORDER BY text, applies_to
-            LIMIT {LIST_LIMIT * 2}
+            LIMIT {DIVINE_PAGE} OFFSET %(offset)s
             """,
-            {"type": card_type, "cost": cost, "god": god},
+            {"type": card_type, "cost": cost, "god": god, "offset": offset},
+            offset=offset,
         )
+        for row in reply["results"]:
+            for shared in ("url", "data_fetched_at"):
+                if shared in row:
+                    reply[shared] = row.pop(shared)
+        return reply
 
     async def _resolve_chaos(name: str | None) -> str | None:
         """The Chaos name the data uses for name; an unknown name raises an error listing the

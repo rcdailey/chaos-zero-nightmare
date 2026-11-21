@@ -89,6 +89,8 @@ VERSION_LABELS = {
     "mut": "mutation",
     "opt": "option",
 }
+# e7bot's page for each kind. Characters, partners, and encounters link one item by appending
+# "/<e7bot id>" (the site's routes); the other kinds have no per-item page.
 URLS = {
     "character": f"{SITE}czn/combatant",
     "card": f"{SITE}czn/cards",
@@ -370,7 +372,7 @@ def _characters(sources: _Sources) -> tuple[list[dict], dict[str, str]]:
                 "sections": found.get("sections") or [],
                 "prydwen_url": found.get("url"),
                 "source": "e7bot",
-                "url": URLS["character"],
+                "url": f"{URLS['character']}/{entry['id']}",
                 "data_fetched_at": fetched_at,
             }
         )
@@ -648,7 +650,7 @@ def _potentials(sources: _Sources, slugs: dict[str, str]) -> list[dict]:
                     "name": node["potential_node_type_define"]["sub_title"],
                     "text": text,
                     "source": "e7bot",
-                    "url": URLS["character"],
+                    "url": f"{URLS['character']}/{game_id}",
                     "data_fetched_at": fetched_at,
                 }
             )
@@ -663,8 +665,12 @@ def _potentials(sources: _Sources, slugs: dict[str, str]) -> list[dict]:
 
 def _e7_partners(sources: _Sources) -> list[dict]:
     partners, fetched_at = sources.items("czn/characters/partner/list/detail")
+    # The site's partner page opens only partners its characters list holds; others keep the
+    # category page.
+    listed = {str(c["id"]) for c in sources.items("czn/characters/list")[0]}
     rows = []
     for entry in partners:
+        page = f"/{entry['id']}" if str(entry["id"]) in listed else ""
         card = entry.get("partner_card") or {}
         passives = entry.get("partner_passives") or []
         rows.append(
@@ -679,7 +685,7 @@ def _e7_partners(sources: _Sources) -> list[dict]:
                 "ego_cost": card.get("cost"),
                 "ego_text": plain(card.get("desc_display")) or None,
                 "source": "e7bot",
-                "url": URLS["partner"],
+                "url": URLS["partner"] + page,
                 "data_fetched_at": fetched_at,
             }
         )
@@ -798,7 +804,7 @@ def _encounters(sources: _Sources) -> tuple[list[dict], list[dict]]:
                 "any_chaos": pack.get("pack_type") == "PACK_FACTION"
                 and pack.get("link_faction_id") == "common",
                 "reward_classes": sorted(classes),
-                "url": URLS["encounter"],
+                "url": f"{URLS['encounter']}/{first['id']}",
                 "data_fetched_at": min((f for f in fetched if f), default=None),
             }
         )

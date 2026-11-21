@@ -140,6 +140,23 @@ def test_search_guides_ranks_pages_with_more_query_words_first(call, conn):
     assert [p["url"] for p in pages] == [CHARACTER_URL, url]
 
 
+def test_get_page_pages_long_text_by_character_offset(call, conn):
+    url = "https://www.prydwen.gg/chaos-zero-nightmare/guides/long"
+    body = "a" * 15_000 + "b" * 5_000
+    store.save_page(conn, url, "guide", body, datetime.now(UTC), ParsedPage("Long", body), None)
+
+    first = call("get_page", url=url)
+    rest = call("get_page", url=url, offset=15_000)
+
+    assert (first["length"], first["body"], "offset=15000" in first["note"]) == (
+        20_000,
+        "a" * 15_000,
+        True,
+    )
+    assert rest["body"] == "b" * 5_000
+    assert "note" not in rest
+
+
 def test_search_guides_ranks_pages_with_every_word_by_closeness_not_repetition(call, conn):
     guides = "https://www.prydwen.gg/chaos-zero-nightmare/guides"
     pages = {
@@ -231,7 +248,7 @@ def test_search_posts_pages_through_every_match(call, conn):
     rest = call("search_posts", active_on="2026-11-20", limit=2, offset=2)
 
     assert (first["total"], len(first["results"])) == (3, 2)
-    assert "raise offset" in first["note"]
+    assert "offset=2" in first["note"]
     assert (len(rest["results"]), "note" in rest) == (1, False)
     headings = {r["heading"] for r in first["results"] + rest["results"]}
     assert len(headings) == 3
@@ -302,6 +319,8 @@ def effects(conn):
     rows = [
         {"name": "Exhaust", "type": "Tag", "description": "When used, move to Exhaust pile."},
         {"name": "Equilux", "type": "Unique effect", "description": "Polarizes the card."},
+        # Spelled like "Polarization" but about something else.
+        {"name": "Ionization", "type": "Debuff", "description": "+8% Damage taken."},
     ]
     page = ParsedPage("Effects", "", {"effect": rows})
     store.save_page(conn, EFFECTS_URL, "effects", "", datetime.now(UTC), page, None)
@@ -315,8 +334,8 @@ def test_lookup_accepts_keyword_as_effect_and_rejects_unknown_kinds(call, effect
 
 
 def test_lookup_finds_terms_defined_inside_other_effects(call, effects):
-    (found,) = call("lookup", name="Polarization", kind="effect")
-    assert found["name"] == "Equilux"
+    found = call("lookup", name="Polarization", kind="effect")
+    assert found[0]["name"] == "Equilux"
 
 
 def test_get_partner_returns_ego_skill(call, conn):
@@ -516,6 +535,48 @@ def test_plan_deck_ranks_epiphanies_and_caps_removals(call, game_data):
     assert [r["card"] for r in plan["removals"]] == ["Strike"]
     assert len(plan["removals"]) <= 5
     assert plan["equipment"][0] == {"item": "eq_1", "leaderboard_share": 1}
+
+
+def test_game_data_urls_open_the_item_where_e7bot_has_a_page_for_it(call, conn, game_data):
+    partner = {"rarity": 5, "job": "striker", "partner_card": {}, "partner_passives": []}
+    add_e7bot(
+        conn,
+        "czn/characters/partner/list/detail",
+        # The site's partner page opens only partners in its characters list.
+        [partner | {"id": "1027", "name": "Listed"}, partner | {"id": "20023", "name": "Unlisted"}],
+    )
+    site = "https://wiki.e7bot.top/#/czn"
+
+    assert call("get_character", name="mei lin")["url"] == f"{site}/combatant/1027"
+    assert call("get_encounter", name="mirror hall")["url"] == f"{site}/encounters/e1a"
+    assert call("get_partner", name="Listed")["url"] == f"{site}/partner/1027"
+    assert call("get_partner", name="Unlisted")["url"] == f"{site}/partner"
+
+
+def test_list_divine_epiphanies_pages_through_every_match(call, conn):
+    sparks = [
+        {"id": f"s{n:02}", "description": f"Effect {n:02}", "god_type": "vitor", "rarity": "R"}
+        for n in range(35)
+    ]
+    add_e7bot(conn, "czn/r-sparks/list", sparks)
+
+    first = call("list_divine_epiphanies")
+    rest = call("list_divine_epiphanies", offset=30)
+    past = call("list_divine_epiphanies", offset=500)
+
+    assert (first["total"], len(first["results"]), "offset=30" in first["note"]) == (35, 30, True)
+    assert "url" in first and "url" not in first["results"][0]
+    assert (len(rest["results"]), "note" in rest) == (5, False)
+    texts = {r["text"] for r in first["results"] + rest["results"]}
+    assert len(texts) == 35
+    assert (past["total"], past["results"]) == (35, [])
+
+
+def test_get_character_unknown_section_lists_the_real_ones(call):
+    reply = call("get_character", name="mei lin", section="ratings")
+    assert "sections" not in reply
+    assert "No section 'ratings'" in reply["note"]
+    assert "Pros" in reply["note"]
 
 
 def test_plan_deck_for_unknown_character_is_null(call):

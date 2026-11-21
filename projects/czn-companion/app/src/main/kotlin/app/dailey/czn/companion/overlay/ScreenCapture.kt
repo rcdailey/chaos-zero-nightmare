@@ -4,6 +4,7 @@ import android.accessibilityservice.AccessibilityService
 import android.graphics.Bitmap
 import android.view.Display
 import androidx.core.graphics.scale
+import app.dailey.czn.companion.claude.Screenshot
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.suspendCancellableCoroutine
 import java.io.ByteArrayOutputStream
@@ -67,6 +68,9 @@ private suspend fun AccessibilityService.captureOnce(): Result<Bitmap> =
             },
         )
     }
+
+/** The two JPEGs of one screenshot: Claude's copy, and full resolution for naming characters. */
+fun Bitmap.toScreenshot() = Screenshot(toJpeg(), toJpeg(maxLongSide = Int.MAX_VALUE, quality = 90))
 
 /**
  * JPEG scaled so the long side is at most [maxLongSide] pixels, the size sent to Claude. 1280 read

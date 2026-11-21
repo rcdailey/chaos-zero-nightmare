@@ -37,6 +37,7 @@ class MessagesRequestTest {
         text: String = "Why B?",
         character: String? = null,
         turn: List<BetaMessageParam> = emptyList(),
+        onScreen: String? = null,
     ) = wire(
         MessagesRequest.build(
             history,
@@ -46,8 +47,28 @@ class MessagesRequestTest {
             "czn-token",
             character,
             turn,
+            onScreen,
         ),
     )
+
+    @Test
+    fun `the characters named on the screenshot follow the player's text in the new message`() {
+        val line = "Characters on screen, top to bottom, left to right: Rossweisse, unidentified"
+        val named =
+            build(onScreen = line)["messages"]!!
+                .jsonArray
+                .last()
+                .jsonObject
+                .content()
+        assertEquals(listOf("Why B?", line), named.drop(1).map { it.text() })
+        val unnamed =
+            build()["messages"]!!
+                .jsonArray
+                .last()
+                .jsonObject
+                .content()
+        assertEquals(listOf("Why B?"), unnamed.drop(1).map { it.text() })
+    }
 
     /** The request body as the SDK sends it. */
     private fun wire(params: MessageCreateParams) =

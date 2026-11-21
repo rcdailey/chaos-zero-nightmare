@@ -8,6 +8,7 @@ import app.dailey.czn.companion.ask.Question
 import app.dailey.czn.companion.auth.AnthropicAuth
 import app.dailey.czn.companion.auth.CznDataAuth
 import app.dailey.czn.companion.auth.SignInRequired
+import app.dailey.czn.companion.characters.ScreenCharacters
 import app.dailey.czn.companion.run.RunRepository
 import com.anthropic.client.AnthropicClient
 import com.anthropic.client.okhttp.AnthropicOkHttpClient
@@ -73,6 +74,15 @@ interface PlayerInput {
 }
 
 /**
+ * One screenshot as JPEG twice: [claude] at the size Claude reads, [full] at the screen's
+ * resolution for naming the characters on it ([ScreenCharacters]).
+ */
+class Screenshot(
+    val claude: ByteArray,
+    val full: ByteArray,
+)
+
+/**
  * Asks Claude about the current screen with the active run as context, streaming the reply. A
  * reply can take several requests: whenever Claude stops to call an app tool, the app runs it
  * (asking the player through [PlayerInput] if needed) and sends the result back. An exchange is
@@ -83,6 +93,7 @@ class ClaudeConversation(
     private val anthropic: AnthropicAuth,
     private val cznData: CznDataAuth,
     private val run: RunRepository,
+    private val screenCharacters: ScreenCharacters,
 ) {
     val entries get() = run.entries
 
@@ -94,7 +105,7 @@ class ClaudeConversation(
 
     fun ask(
         text: String,
-        jpeg: ByteArray?,
+        screenshot: Screenshot?,
         player: PlayerInput,
     ): Flow<ReplyEvent> =
         flow {
@@ -102,6 +113,7 @@ class ClaudeConversation(
                 tokenOrNull(FailureKind.AnthropicSignIn) { anthropic.accessToken() } ?: return@flow
             val cznToken =
                 tokenOrNull(FailureKind.CznSignIn) { cznData.accessToken() } ?: return@flow
+            val onScreen = screenshot?.let { screenCharacters.identify(it.full) }
             val history = run.entriesNow()
             // Read once, so the request prefix stays identical, and cached, across this turn.
             val character = run.characterNow()
@@ -116,11 +128,12 @@ class ClaudeConversation(
                         MessagesRequest.build(
                             history,
                             text,
-                            jpeg,
+                            screenshot?.claude,
                             CznDataAuth.MCP_URL,
                             cznToken,
                             character,
                             turn,
+                            onScreen,
                         )
                     val message = stream(client, params, reply, tools)
                     when (message.stopReason().orElse(null)) {
@@ -136,7 +149,14 @@ class ClaudeConversation(
                         }
 
                         else -> {
-                            run.appendExchange(text, reply.toString(), tools, asks)
+                            // The names line stays with the question, so later turns keep it.
+                            val asked = listOf(text, onScreen.orEmpty()).filter(String::isNotBlank)
+                            run.appendExchange(
+                                asked.joinToString("\n\n"),
+                                reply.toString(),
+                                tools,
+                                asks,
+                            )
                             emit(ReplyEvent.Done)
                             return@flow
                         }

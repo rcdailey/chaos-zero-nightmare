@@ -25,6 +25,7 @@ import androidx.core.content.edit
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import app.dailey.czn.companion.CompanionApp
 import app.dailey.czn.companion.CompanionTheme
+import app.dailey.czn.companion.claude.Screenshot
 import kotlinx.coroutines.MainScope
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
@@ -200,12 +201,14 @@ class OverlayService : AccessibilityService() {
     }
 
     /** Screenshot of the game alone: the app's windows are hidden while it is taken. */
-    private suspend fun captureGame(): Result<ByteArray> {
+    private suspend fun captureGame(): Result<Screenshot> {
         overlay?.visibility = View.INVISIBLE
         delay(HIDE_SETTLE_MILLIS)
-        val result = capture().map { it.toJpeg() }
+        val result = capture().map { it.toScreenshot() }
         overlay?.visibility = View.VISIBLE
-        result.onSuccess { if (isDebuggable()) File(filesDir, "last-capture.jpg").writeBytes(it) }
+        result.onSuccess {
+            if (isDebuggable()) File(filesDir, "last-capture.jpg").writeBytes(it.claude)
+        }
         return result
     }
 

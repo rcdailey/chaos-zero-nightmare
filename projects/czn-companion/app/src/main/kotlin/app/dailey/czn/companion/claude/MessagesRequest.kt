@@ -43,6 +43,9 @@ object MessagesRequest {
      * @param turn messages Claude and the app exchanged after [text] in this turn: Claude's
      *   responses that stopped for a tool, each followed by the app's tool results if any.
      * @param character the run's character, or null while unknown.
+     * @param onScreen the characters the data server named on the screenshot
+     *   ([app.dailey.czn.companion.characters.ScreenCharacters.describe]), or null without them.
+     *   [ClaudeConversation] saves it with the question, so history carries it afterwards.
      */
     fun build(
         history: List<RunEntry>,
@@ -52,6 +55,7 @@ object MessagesRequest {
         cznToken: String,
         character: String? = null,
         turn: List<BetaMessageParam> = emptyList(),
+        onScreen: String? = null,
     ): MessageCreateParams =
         MessageCreateParams
             .builder()
@@ -95,6 +99,7 @@ object MessagesRequest {
                     listOfNotNull(
                         jpeg?.let(::imageBlock),
                         BetaContentBlockParam.ofText(text.ifBlank { SCREEN_ONLY }),
+                        onScreen?.let(BetaContentBlockParam::ofText),
                     ),
                 )
                 turn.forEach(::addMessage)
@@ -282,11 +287,13 @@ object MessagesRequest {
           shows the player's actual values, which can differ from the database's base values;
           prefer the screen. czn tool results leave out empty fields, so a missing field means
           the data has no value for it.
-        - Screens show characters as portraits without names. You MUST identify each one by
-          matching the portrait's hair, eyes, eyewear, weapon, and outfit against the
-          appearance that list_characters returns, filtered by the element icon shown, and
-          name them. When no appearance fits, or list_characters gives none, say the
-          character is unidentified; element and class icons alone MUST NOT decide a name.
+        - Screens show characters as portraits without names. The app names them for you: a
+          line "Characters on screen, top to bottom, left to right: ..." after the player's
+          message comes from comparing each figure with every character's card art, and is
+          authoritative. "A or B" means one of the two; do not pick one unless the screen
+          shows a name. "unidentified" stays unidentified. Without that line, call the
+          characters unidentified. You MUST NOT name a character from looks, element icons,
+          or class icons.
         - You MUST state only player facts the screen or this run's history shows. You MUST
           NOT invent progress, clears, ownership, or past purchases ("the highest level
           you've cleared"). When comparing two screens, attribute a change only to what both

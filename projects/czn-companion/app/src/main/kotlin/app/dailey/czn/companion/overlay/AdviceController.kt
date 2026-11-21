@@ -14,6 +14,7 @@ import app.dailey.czn.companion.claude.ClaudeConversation
 import app.dailey.czn.companion.claude.FailureKind
 import app.dailey.czn.companion.claude.PlayerInput
 import app.dailey.czn.companion.claude.ReplyEvent
+import app.dailey.czn.companion.claude.Screenshot
 import app.dailey.czn.companion.run.RunEntry
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -165,20 +166,20 @@ class AdviceController(
     /** Asks [question] about [screenshot]; ignored while a reply is in progress. */
     fun ask(
         question: String,
-        screenshot: Result<ByteArray>,
+        screenshot: Result<Screenshot>,
     ) {
         if (local.value.busy) {
             Log.d(TAG, "ask ignored, reply in progress: $question")
             return
         }
-        val jpeg =
+        val shot =
             screenshot.getOrElse { failure ->
                 Log.w(TAG, "screenshot failed", failure)
                 local.update { it.copy(error = "Could not take a screenshot: ${failure.message}") }
                 return
             }
         entryCountAtAsk = state.value.entries.size
-        Log.d(TAG, "ask '$question', ${jpeg.size} B jpeg, $entryCountAtAsk saved entries")
+        Log.d(TAG, "ask '$question', ${shot.claude.size} B jpeg, $entryCountAtAsk saved entries")
         if (question.isNotEmpty()) draft.clearText()
         local.update {
             it.copy(
@@ -193,7 +194,7 @@ class AdviceController(
         }
         reply =
             scope.launch {
-                conversation.ask(question, jpeg, playerInput).collect { event ->
+                conversation.ask(question, shot, playerInput).collect { event ->
                     if (event is ReplyEvent.Failed && draft.text.isEmpty()) {
                         draft.setTextAndPlaceCursorAtEnd(question)
                     }

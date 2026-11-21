@@ -23,11 +23,13 @@ lacks, such as a character Prydwen covers first. Every merged row has `source` (
 
 One container image (`ghcr.io/rcdailey/czn-data`) runs every workload:
 
-- `czn-data daily`: the scheduled run (a daily Kubernetes CronJob). It runs the three scrapes
-  below at once, then `enrich`, then one build, so a run takes about as long as the Prydwen
-  scrape. A failed step fails the run but never stops a later one; enrich and the build then use
-  the last good data of that source. Each scrape and enrich also runs on its own (for a manual
-  rerun after a failure), and then builds.
+- `czn-data daily`: the scheduled run (a daily Kubernetes CronJob). It runs the three scrapes below
+  at once, then `enrich`, then one build, so a run takes about as long as the Prydwen scrape. A
+  failed step fails the run but never stops a later one; enrich and the build then use the last good
+  data of that source. Each scrape and enrich also runs on its own (for a manual rerun after a
+  failure), and then builds. Only one of `daily`, the scrapes, `reparse`, and `enrich` runs at a
+  time (a Postgres advisory lock): one started while another runs, such as a deploy's scrape during
+  the CronJob, logs `another run is in progress, skipping` and exits 0 without migrating.
 - `czn-data scrape-e7bot`: the e7bot scrape. It makes 4 requests at a time, each worker pausing one
   second between requests. A run fetches the 11 list and diff documents; the 445 character and event
   details only when e7bot's diff timestamp shows new game data, or once a week (about 2 minutes

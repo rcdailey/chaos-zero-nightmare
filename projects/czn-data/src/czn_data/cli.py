@@ -17,6 +17,9 @@ from datetime import UTC, datetime
 
 import psycopg
 
+# Arbitrary constant shared by every czn-data process; distinct from the migration and build locks.
+RUN_LOCK = 7_418_023_357
+
 # Attributes every LogRecord has; anything else was passed through ``extra=`` and is logged.
 _STANDARD_ATTRS = set(vars(logging.makeLogRecord({}))) | {"message", "asctime", "taskName"}
 
@@ -79,13 +82,28 @@ def main() -> None:
         return
     from .migrate import migrate
 
-    migrate(os.environ["DATABASE_URL"])
-    if args.command == "migrate":
+    if args.command in ("migrate", "build"):
+        migrate(os.environ["DATABASE_URL"])
+        if args.command == "build":
+            sys.exit(0 if _guarded(_build_step) else 1)
         return
+    # Scrapes and enrich insert rows without conflict handling, and two Prydwen crawls at once
+    # double the load Cloudflare sees, so a run that starts during another one (a deploy's run
+    # during the daily CronJob) skips. The lock comes before migrating because a migration can
+    # reparse or build. Closing the connection on exit releases the lock.
+    with _connect() as lock:
+        if not lock.execute("SELECT pg_try_advisory_lock(%s)", (RUN_LOCK,)).fetchone()[0]:
+            logging.getLogger("czn_data").warning(
+                "another run is in progress, skipping", extra={"command": args.command}
+            )
+            return
+        migrate(os.environ["DATABASE_URL"])
+        _run_locked(args)
+
+
+def _run_locked(args: argparse.Namespace) -> None:
     if args.command == "daily":
         sys.exit(_run_daily(args.allow_shrink))
-    if args.command == "build":
-        sys.exit(0 if _guarded(_build_step) else 1)
     steps = {
         "enrich": _enrich,
         "scrape-e7bot": lambda: _scrape_e7bot(args.allow_shrink),

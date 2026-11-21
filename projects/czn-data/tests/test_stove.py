@@ -10,7 +10,7 @@ from urllib.parse import parse_qs
 
 import pytest
 
-from czn_data.cli import main
+from czn_data.cli import RUN_LOCK, main
 from czn_data.fetch import FetchFailed
 from czn_data.stove import API, BOARDS, Client, scrape_stove
 
@@ -160,3 +160,24 @@ def test_scrape_stove_command_exits_nonzero_when_stove_fails(conn, database_url,
     with pytest.raises(SystemExit) as exit_:
         main()
     assert exit_.value.code == 1
+
+
+def test_run_started_while_another_runs_skips_without_fetching(conn, database_url, monkeypatch):
+    """A deploy can start a scrape while the daily CronJob runs; the later one must not crawl."""
+
+    class MustNotFetch:
+        def __init__(self, **_):
+            pass
+
+        def get(self, url: str) -> str:
+            raise AssertionError(f"fetched {url} while another run held the lock")
+
+    monkeypatch.setattr("czn_data.fetch.Fetcher", MustNotFetch)
+    monkeypatch.setenv("DATABASE_URL", database_url)
+    monkeypatch.setattr("sys.argv", ["czn-data", "scrape-stove"])
+    conn.execute("SELECT pg_advisory_lock(%s)", (RUN_LOCK,))
+
+    main()
+
+    assert stored(conn) == {}
+    assert conn.execute("SELECT count(*) FROM stove.run").fetchone() == (0,)

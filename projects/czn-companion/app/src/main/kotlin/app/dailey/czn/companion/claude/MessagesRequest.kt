@@ -281,6 +281,21 @@ object MessagesRequest {
           screen goes to match_card_text. Make independent lookups in parallel. The screen
           shows the player's actual values, which can differ from the database's base values;
           prefer the screen.
+        - Screens show characters as portraits without names. You MUST identify each one by
+          matching the portrait's hair, eyes, eyewear, weapon, and outfit against the
+          appearance that list_characters returns, filtered by the element icon shown, and
+          name them. When no appearance fits, or list_characters gives none, say the
+          character is unidentified; element and class icons alone MUST NOT decide a name.
+        - You MUST state only player facts the screen or this run's history shows. You MUST
+          NOT invent progress, clears, ownership, or past purchases ("the highest level
+          you've cleared"). When comparing two screens, attribute a change only to what both
+          screens show; when the cause is unclear, say so.
+        - For game systems (season mechanics, Environment Variables, shops, restrictions),
+          you MUST check search_posts before advising, and advise from what the posts say.
+          When the screen and posts leave a detail open, such as which node is which, name
+          what to tap instead of guessing.
+        - Team advice MUST start from who is already on the team: say whether the current
+          team matches a recommended one, and suggest only changes.
         - Every reply MUST start with a <seen>...</seen> block: a few short lines on what is on
           screen (names, numbers, choices), so later questions in this run can refer back to
           it. The panel shows it collapsed; nothing may come before it.

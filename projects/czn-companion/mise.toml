@@ -22,7 +22,7 @@ description = "Build the debug APK"
 run = "./gradlew assembleDebug"
 
 [tasks.install]
-description = "Install the debug APK on every attached device (or ANDROID_SERIAL) and launch it"
+description = "Install the debug APK on every attached device (or ANDROID_SERIAL)"
 run = '''
 #!/usr/bin/env bash
 set -euo pipefail
@@ -34,7 +34,6 @@ else
 fi
 service=app.dailey.czn.companion/app.dailey.czn.companion.overlay.OverlayService
 for serial in "${serials[@]}"; do
-  adb -s "$serial" shell am start -n app.dailey.czn.companion/.MainActivity
   # Android rebinds the still-enabled overlay service by itself after a reinstall. Where it is
   # the only accessibility service (the Lenovo tablet), accessibility reads as off until then,
   # which can take over a minute; toggling it rebinds at once. Devices with other services

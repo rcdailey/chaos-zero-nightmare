@@ -12,7 +12,7 @@ Every tool comes from `mise.toml`; nothing else needs installing.
 mise install
 mise run setup    # Android SDK packages
 mise run check    # format check, lint, unit tests
-mise run install  # build, install on the attached device, launch
+mise run install  # build, install on the attached device
 ```
 
 `mise run preview` renders every Compose `@Preview` to PNGs under `build/previews` without a

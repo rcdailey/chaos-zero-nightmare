@@ -218,7 +218,7 @@ ORDER BY count(*) DESC, c.name
 RECOMMENDED_BY_SQL = RECOMMENDED_BY_SQL.format(match=NAME_MATCH, order=NAME_ORDER)
 
 LIST_CHARACTERS_SQL = """
-SELECT c.name, c.rarity, c.element, c.class, c.gender
+SELECT c.name, c.rarity, c.element, c.class, c.gender, c.image_url
 FROM character c
 WHERE (%(gender)s::text IS NULL OR c.gender = lower(%(gender)s))
   AND (%(element)s::text IS NULL OR c.element ILIKE %(element)s)
@@ -641,8 +641,8 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
         character_class: str | None = None,
         rarity: int | None = None,
     ) -> list[dict]:
-        """Every character, one short line each (name, rarity, element, class, gender),
-        optionally filtered: gender female or male, element (Passion, Justice, Order, Void,
+        """Every character, one short line each (name, rarity, element, class, gender, card art
+        image_url), optionally filtered: gender female or male, element (Passion, Justice, Order, Void,
         Instinct), character_class (Striker, Vanguard, Ranger, Hunter, Controller, Psionic),
         rarity 4 or 5."""
         return await _query(

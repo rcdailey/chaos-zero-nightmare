@@ -251,6 +251,7 @@ def test_list_characters_filters_by_gender(call, conn):
             "element": "Passion",
             "class": "Striker",
             "gender": "female",
+            "image_url": "https://cdn.prydwen.gg/images/chaos/characters/mei-lin_card.webp",
         }
     ]
     assert call("list_characters", gender="male") == []

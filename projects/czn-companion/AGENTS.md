@@ -10,7 +10,11 @@ Sideloaded app for Android 16+ (Lenovo Legion Y700 Gen 5 on a China ROM, Nothing
 - Versions: current stable releases, pinned only in `gradle/libs.versions.toml`; no alpha, beta,
   or RC artifacts.
 - Stack: Kotlin (K2, current stable language features), Jetpack Compose with Material 3,
-  coroutines and `StateFlow`, kotlinx.serialization, Ktor client for HTTP and SSE.
+  coroutines and `StateFlow`, kotlinx.serialization, Ktor client for HTTP and SSE, Room 3
+  (`androidx.room3`, KSP) for run state.
+- Room: commit the exported schemas under `app/schemas`. A schema change bumps the database
+  version with a migration (`AutoMigration` when it suffices); never a destructive fallback,
+  which wipes the user's runs.
 - Structure: one Gradle module and constructor injection without a DI framework. Split modules
   only for reuse or visibility; add Hilt when manual wiring outgrows one file.
 - Architecture: follow the developer.android.com architecture recommendations: unidirectional
@@ -29,8 +33,9 @@ Sideloaded app for Android 16+ (Lenovo Legion Y700 Gen 5 on a China ROM, Nothing
   Bearer token with the `oauth-2025-04-20` and `claude-code-20250219` betas. The first system
   block MUST be exactly the Claude Code identity line, with the app's prompt in a later block;
   any other first block returns a bare 429. Anthropic does not document this flow and has
-  changed it; keep it in one class. Images, tools, and the MCP connector work with these tokens
-  (verified 2026-11-20).
+  changed it; keep sign-in in `auth/AnthropicAuth.kt` and the identity line and betas in
+  `claude/MessagesRequest.kt`, nowhere else. Images, tools, and the MCP connector (beta
+  `mcp-client-2025-11-20`) work with these tokens (verified 2026-11-20).
 
 ## UI design
 

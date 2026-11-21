@@ -190,15 +190,19 @@ fun CompanionTheme(
 
 /**
  * Color roles Material 3 lacks. [recommended] is the green that marks Claude's suggested
- * option; dynamic color has no green role, so it is fixed per light and dark theme.
+ * option, drawn on [recommendedContainer]; dynamic color has no green role, so both are fixed
+ * per light and dark theme.
  */
 @Immutable
 data class ExtraColors(
     val recommended: Color,
+    val recommendedContainer: Color,
 )
 
-private val DarkExtraColors = ExtraColors(recommended = Color(0xFF81C995))
-private val LightExtraColors = ExtraColors(recommended = Color(0xFF188038))
+private val DarkExtraColors =
+    ExtraColors(recommended = Color(0xFF81C995), recommendedContainer = Color(0xFF1E3A28))
+private val LightExtraColors =
+    ExtraColors(recommended = Color(0xFF188038), recommendedContainer = Color(0xFFE6F4EA))
 
 private val LocalExtraColors = staticCompositionLocalOf { DarkExtraColors }
 

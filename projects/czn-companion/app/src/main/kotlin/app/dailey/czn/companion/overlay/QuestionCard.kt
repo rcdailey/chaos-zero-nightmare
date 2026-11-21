@@ -1,5 +1,6 @@
 package app.dailey.czn.companion.overlay
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -183,16 +184,12 @@ private fun OptionRow(
     onClick: () -> Unit,
 ) {
     val supporting: (@Composable () -> Unit)? = option.description?.let { { Text(it) } }
-    val overline: (@Composable () -> Unit)? =
-        if (option.recommended) {
-            (
-                {
-                    RecommendedLabel()
-                }
-            )
-        } else {
-            null
+    val headline: @Composable () -> Unit = {
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text(option.label, Modifier.weight(1f, fill = false).alignByBaseline())
+            if (option.recommended) RecommendedLabel(Modifier.alignByBaseline())
         }
+    }
     val colors =
         ListItemDefaults.colors(
             containerColor = MaterialTheme.colorScheme.surfaceContainerHighest,
@@ -203,28 +200,35 @@ private fun OptionRow(
             checked = selected,
             onCheckedChange = { onClick() },
             leadingContent = { Checkbox(checked = selected, onCheckedChange = null) },
-            overlineContent = overline,
             supportingContent = supporting,
             colors = colors,
             shapes = shapes,
-        ) { Text(option.label) }
+            content = headline,
+        )
     } else {
         SegmentedListItem(
             selected = selected,
             onClick = onClick,
             leadingContent = { RadioButton(selected = selected, onClick = null) },
-            overlineContent = overline,
             supportingContent = supporting,
             colors = colors,
             shapes = shapes,
-        ) { Text(option.label) }
+            content = headline,
+        )
     }
 }
 
-/** Marks Claude's suggested option in green, with a thumbs-up and the word, not color alone. */
+/**
+ * Marks Claude's suggested option in green, with a thumbs-up and the word, not color alone. It
+ * sits right of the option's label as a badge, in smaller type, on the label's first line.
+ */
 @Composable
-private fun RecommendedLabel() =
+private fun RecommendedLabel(modifier: Modifier = Modifier) =
     Row(
+        modifier =
+            modifier
+                .background(extraColors.recommendedContainer, MaterialTheme.shapes.small)
+                .padding(horizontal = 6.dp, vertical = 2.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(4.dp),
     ) {
@@ -233,9 +237,9 @@ private fun RecommendedLabel() =
             painterResource(R.drawable.ic_thumb_up),
             contentDescription = null,
             tint = green,
-            modifier = Modifier.size(16.dp),
+            modifier = Modifier.size(14.dp),
         )
-        Text("Recommended", color = green, style = MaterialTheme.typography.labelLarge)
+        Text("Recommended", color = green, style = MaterialTheme.typography.labelMedium)
     }
 
 /** Every answer by its short label; a tap goes back to that question to change it. */

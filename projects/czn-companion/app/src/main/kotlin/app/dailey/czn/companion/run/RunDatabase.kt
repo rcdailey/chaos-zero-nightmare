@@ -11,6 +11,10 @@ import androidx.room3.Insert
 import androidx.room3.PrimaryKey
 import androidx.room3.Query
 import androidx.room3.RoomDatabase
+import androidx.room3.Upsert
+import androidx.room3.migration.AutoMigrationSpec
+import androidx.sqlite.SQLiteConnection
+import androidx.sqlite.execSQL
 import kotlinx.coroutines.flow.Flow
 
 /** One game run. Exactly one run is active; New run closes it and starts another. */
@@ -23,7 +27,40 @@ data class RunRow(
     val character: String? = null,
 )
 
-/** One message in a run's conversation, in order. Text only; screenshots are never stored. */
+/**
+ * The exchange in progress in a run, saved after every request and every answered app tool, so a
+ * reply survives the app being killed (Android ends it freely while another app is in front).
+ * Deleted when the reply completes, fails, or is stopped; a run has at most one.
+ */
+@Entity(
+    tableName = "open_turn",
+    foreignKeys = [ForeignKey(RunRow::class, ["id"], ["runId"], onDelete = ForeignKey.CASCADE)],
+)
+class OpenTurnRow(
+    @PrimaryKey val runId: Long,
+    /** The player's typed text, empty for a screen read. */
+    val question: String,
+    /** What the app found on the screenshot; see [RunEntryRow.screen]. */
+    val screen: String,
+    /** The screenshot Claude reads, kept only while this exchange is open. */
+    val jpeg: ByteArray?,
+    /** Reply text so far. */
+    val reply: String,
+    /** As in [RunEntryRow.tools] and [RunEntryRow.asks]. */
+    val tools: String,
+    val asks: String,
+    /**
+     * Messages Claude and the app exchanged after the question, as a JSON array of the Anthropic
+     * SDK's message params. When the last is Claude's and calls app tools, those tools still
+     * wait for their results.
+     */
+    val turn: String,
+)
+
+/**
+ * One message in a run's conversation, in order. Text only; a screenshot is kept only in
+ * [OpenTurnRow] while its exchange is open.
+ */
 @Entity(
     tableName = "run_entry",
     foreignKeys = [ForeignKey(RunRow::class, ["id"], ["runId"], onDelete = ForeignKey.CASCADE)],
@@ -40,6 +77,11 @@ data class RunEntryRow(
     @ColumnInfo(defaultValue = "") val tools: String = "",
     /** Questions Claude asked the player during an assistant reply, as `PlayerAsks.encode` JSON. */
     @ColumnInfo(defaultValue = "") val asks: String = "",
+    /**
+     * What the app found on a user message's screenshot, such as the characters the data server
+     * named; sent to Claude with the message and shown in the reply's details.
+     */
+    @ColumnInfo(defaultValue = "") val screen: String = "",
 )
 
 @Dao
@@ -76,17 +118,51 @@ interface RunDao {
 
     @Insert
     suspend fun insertEntries(entries: List<RunEntryRow>)
+
+    @Query("SELECT * FROM open_turn WHERE runId = :runId")
+    suspend fun openTurn(runId: Long): OpenTurnRow?
+
+    @Upsert
+    suspend fun saveOpenTurn(turn: OpenTurnRow)
+
+    @Query("DELETE FROM open_turn WHERE runId = :runId")
+    suspend fun deleteOpenTurn(runId: Long)
 }
 
 @Database(
-    entities = [RunRow::class, RunEntryRow::class],
-    version = 4,
+    entities = [RunRow::class, RunEntryRow::class, OpenTurnRow::class],
+    version = 7,
     autoMigrations = [
         AutoMigration(from = 1, to = 2),
         AutoMigration(from = 2, to = 3),
         AutoMigration(from = 3, to = 4),
+        AutoMigration(from = 4, to = 5),
+        AutoMigration(from = 5, to = 6),
+        AutoMigration(from = 6, to = 7, spec = MoveNamesToScreen::class),
     ],
 )
 abstract class RunDatabase : RoomDatabase() {
     abstract fun runDao(): RunDao
+}
+
+/**
+ * Before [RunEntryRow.screen] existed, the app saved the names line inside the player's message,
+ * after a blank line. Moves it to [RunEntryRow.screen] so every reply shows it the same way.
+ */
+class MoveNamesToScreen : AutoMigrationSpec {
+    override suspend fun onPostMigrate(connection: SQLiteConnection) {
+        val at = "instr(text, '$NAMES_PREFIX')"
+        connection.execSQL(
+            """
+            UPDATE run_entry SET
+                screen = substr(text, $at),
+                text = rtrim(substr(text, 1, $at - 1), char(10))
+            WHERE kind = 'user' AND screen = '' AND $at > 0
+            """.trimIndent(),
+        )
+    }
+
+    private companion object {
+        const val NAMES_PREFIX = "Characters on screen, top to bottom, left to right: "
+    }
 }

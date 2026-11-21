@@ -38,6 +38,7 @@ class MessagesRequestTest {
         character: String? = null,
         turn: List<BetaMessageParam> = emptyList(),
         onScreen: String? = null,
+        history: List<RunEntry> = this.history,
     ) = wire(
         MessagesRequest.build(
             history,
@@ -68,6 +69,20 @@ class MessagesRequestTest {
                 .jsonObject
                 .content()
         assertEquals(listOf("Why B?"), unnamed.drop(1).map { it.text() })
+    }
+
+    @Test
+    fun `a saved message's named characters reach Claude in later turns`() {
+        val line = "Characters on screen, top to bottom, left to right: Mika"
+        val saved =
+            listOf(
+                RunEntry(EntryKind.User, "Who?", screen = line),
+                RunEntry(EntryKind.Assistant, "Mika."),
+            )
+        val messages = build(history = saved)["messages"]!!.jsonArray.map { it.jsonObject }
+        assertEquals(listOf("Who?", line), messages[0].content().map { it.text() })
+        assertNull(messages[0].content().last()["cache_control"])
+        assertNotNull(messages[1].content().last()["cache_control"])
     }
 
     /** The request body as the SDK sends it. */
@@ -111,8 +126,7 @@ class MessagesRequestTest {
         assertTrue("not known" in system(null))
     }
 
-    @Test
-    fun `tool exchanges of this turn follow the newest message`() {
+    private fun toolExchange(): Pair<BetaMessageParam, BetaMessageParam> {
         val toolUse =
             BetaMessageParam.ofAssistantOfContentBlockParams(
                 listOf(
@@ -138,6 +152,12 @@ class MessagesRequestTest {
                     ),
                 ),
             )
+        return toolUse to result
+    }
+
+    @Test
+    fun `tool exchanges of this turn follow the newest message`() {
+        val (toolUse, result) = toolExchange()
         val messages =
             build(jpeg = null, turn = listOf(toolUse, result))["messages"]!!
                 .jsonArray

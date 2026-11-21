@@ -433,20 +433,30 @@ private fun Conversation(
             }
             item(key = "pending-question") { Question(question) }
         }
-        items(state.entries.asReversed()) { entry ->
+        val entries = state.entries
+        items(entries.indices.reversed().toList()) { index ->
+            val entry = entries[index]
             if (entry.kind == EntryKind.User) {
                 Question(entry.text)
             } else {
-                Reply(entry.text, entry.tools, entry.asks, complete = true, working = false)
+                Reply(
+                    entry.text,
+                    entry.tools,
+                    entry.asks,
+                    complete = true,
+                    working = false,
+                    screen = entries.getOrNull(index - 1)?.screen.orEmpty(),
+                )
             }
         }
     }
 }
 
 /**
- * A reply: the CZN data lookups behind it, its collapsed seen block, then the advice with each
- * set of questions Claude asked where it asked them; a spinner while Claude is [working] and no
- * advice follows the last question yet.
+ * A reply: the CZN data lookups behind it, its collapsed details (what the app found on the
+ * screenshot, [screen], and Claude's seen block), then the advice with each set of questions
+ * Claude asked where it asked them; a spinner while Claude is [working] and no advice follows
+ * the last question yet.
  */
 @Composable
 private fun Reply(
@@ -455,11 +465,13 @@ private fun Reply(
     asks: List<AnsweredAsk>,
     complete: Boolean,
     working: Boolean,
+    screen: String = "",
 ) {
     val parts = ReplyParts.parse(text, complete, asks.map { it.offset })
+    val details = listOfNotNull(screen.ifBlank { null }, parts.seen).joinToString("\n\n")
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         if (tools.isNotEmpty()) ToolCalls(tools)
-        parts.seen?.let { SeenBlock(it) }
+        if (details.isNotEmpty()) DetailsBlock(details)
         parts.advice.forEachIndexed { index, advice ->
             if (advice.isNotEmpty()) SteadyMarkdown(advice)
             asks.getOrNull(index)?.let { AnsweredAskCard(it) }
@@ -492,7 +504,7 @@ private fun ToolCalls(tools: List<String>) =
     }
 
 @Composable
-private fun SeenBlock(text: String) {
+private fun DetailsBlock(text: String) {
     var expanded by rememberSaveable { mutableStateOf(false) }
     Surface(
         onClick = { expanded = !expanded },
@@ -506,7 +518,7 @@ private fun SeenBlock(text: String) {
                 horizontalArrangement = Arrangement.spacedBy(4.dp),
             ) {
                 Text(
-                    "Seen on screen",
+                    "Details",
                     style = MaterialTheme.typography.labelMedium,
                 )
                 Icon(

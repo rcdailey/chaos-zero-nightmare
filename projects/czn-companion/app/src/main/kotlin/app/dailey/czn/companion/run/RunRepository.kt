@@ -19,9 +19,23 @@ data class RunEntry(
     val tools: List<String> = emptyList(),
     /** Questions Claude asked the player during an assistant reply, with the answers. */
     val asks: List<AnsweredAsk> = emptyList(),
+    /** What the app found on a user message's screenshot (see [RunEntryRow.screen]). */
+    val screen: String = "",
 )
 
-/** The active run's conversation. Survives restarts until [newRun]. */
+/** The exchange in progress in the active run; see [OpenTurnRow]. */
+class OpenTurn(
+    val question: String,
+    val screen: String,
+    val jpeg: ByteArray?,
+    val reply: String,
+    val tools: List<String>,
+    val asks: List<AnsweredAsk>,
+    /** JSON array of SDK message params; see [OpenTurnRow.turn]. */
+    val turn: String,
+)
+
+/** The active run's conversation, with any exchange in progress. Survives restarts until [newRun]. */
 class RunRepository(
     private val db: RunDatabase,
     private val now: () -> Long = System::currentTimeMillis,
@@ -57,12 +71,53 @@ class RunRepository(
                 dao.entriesNow(it.id).map(::toEntry)
             }.orEmpty()
 
-    /** Saves one completed exchange; both messages are written or neither is. */
+    suspend fun openTurn(): OpenTurn? =
+        dao.activeRun()?.let { dao.openTurn(it.id) }?.let { row ->
+            OpenTurn(
+                row.question,
+                row.screen,
+                row.jpeg,
+                row.reply,
+                splitTools(row.tools),
+                PlayerAsks.decode(row.asks),
+                row.turn,
+            )
+        }
+
+    /** Replaces the active run's open exchange with [turn]. */
+    suspend fun saveOpenTurn(turn: OpenTurn) =
+        db.useWriterConnection { connection ->
+            connection.immediateTransaction {
+                dao.saveOpenTurn(
+                    OpenTurnRow(
+                        runId = activeRunId(),
+                        question = turn.question,
+                        screen = turn.screen,
+                        jpeg = turn.jpeg,
+                        reply = turn.reply,
+                        tools = joinTools(turn.tools),
+                        asks = PlayerAsks.encode(turn.asks),
+                        turn = turn.turn,
+                    ),
+                )
+            }
+        }
+
+    suspend fun discardOpenTurn() =
+        db.useWriterConnection { connection ->
+            connection.immediateTransaction { dao.activeRun()?.let { dao.deleteOpenTurn(it.id) } }
+        }
+
+    /**
+     * Saves one completed exchange and closes the open one; both messages are written or neither
+     * is.
+     */
     suspend fun appendExchange(
         user: String,
         assistant: String,
         tools: List<String>,
         asks: List<AnsweredAsk> = emptyList(),
+        screen: String = "",
     ) = db.useWriterConnection { connection ->
         connection.immediateTransaction {
             val runId = activeRunId()
@@ -76,6 +131,7 @@ class RunRepository(
                         kind = USER,
                         text = user,
                         createdAt = time,
+                        screen = screen,
                     ),
                     RunEntryRow(
                         runId = runId,
@@ -83,17 +139,20 @@ class RunRepository(
                         kind = ASSISTANT,
                         text = assistant,
                         createdAt = time,
-                        tools = tools.joinToString("\n") { it.replace('\n', ' ') },
+                        tools = joinTools(tools),
                         asks = PlayerAsks.encode(asks),
                     ),
                 ),
             )
+            dao.deleteOpenTurn(runId)
         }
     }
 
     suspend fun newRun() =
         db.useWriterConnection { connection ->
             connection.immediateTransaction {
+                // A closed run cannot resume its open exchange; drop it with its screenshot.
+                dao.activeRun()?.let { dao.deleteOpenTurn(it.id) }
                 dao.closeActiveRun()
                 dao.insertRun(RunRow(startedAt = now(), active = true))
             }
@@ -107,9 +166,14 @@ class RunRepository(
         RunEntry(
             if (row.kind == USER) EntryKind.User else EntryKind.Assistant,
             row.text,
-            row.tools.lines().filter(String::isNotBlank),
+            splitTools(row.tools),
             PlayerAsks.decode(row.asks),
+            row.screen,
         )
+
+    private fun joinTools(tools: List<String>) = tools.joinToString("\n") { it.replace('\n', ' ') }
+
+    private fun splitTools(tools: String) = tools.lines().filter(String::isNotBlank)
 
     private companion object {
         const val USER = "user"

@@ -9,6 +9,7 @@ import app.dailey.czn.companion.auth.AnthropicAuth
 import app.dailey.czn.companion.auth.CznDataAuth
 import app.dailey.czn.companion.auth.SignInRequired
 import app.dailey.czn.companion.characters.ScreenCharacters
+import app.dailey.czn.companion.run.OpenTurn
 import app.dailey.czn.companion.run.RunRepository
 import com.anthropic.client.AnthropicClient
 import com.anthropic.client.okhttp.AnthropicOkHttpClient
@@ -22,7 +23,7 @@ import com.anthropic.models.beta.messages.BetaMessage
 import com.anthropic.models.beta.messages.BetaMessageParam
 import com.anthropic.models.beta.messages.BetaStopReason
 import com.anthropic.models.beta.messages.BetaToolResultBlockParam
-import com.anthropic.models.beta.messages.BetaToolUseBlock
+import com.anthropic.models.beta.messages.BetaToolUseBlockParam
 import com.anthropic.models.beta.messages.MessageCreateParams
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
@@ -85,8 +86,9 @@ class Screenshot(
 /**
  * Asks Claude about the current screen with the active run as context, streaming the reply. A
  * reply can take several requests: whenever Claude stops to call an app tool, the app runs it
- * (asking the player through [PlayerInput] if needed) and sends the result back. An exchange is
- * saved to the run only after the reply completes; a failed or cancelled request leaves the
+ * (asking the player through [PlayerInput] if needed) and sends the result back. The exchange in
+ * progress is kept as the run's [OpenTurn], so it can [resume] after the app is killed. It joins
+ * the run's conversation only after the reply completes; a failed or stopped request leaves the
  * conversation unchanged, though a character set before the failure stays set.
  */
 class ClaudeConversation(
@@ -96,6 +98,8 @@ class ClaudeConversation(
     private val screenCharacters: ScreenCharacters,
 ) {
     val entries get() = run.entries
+
+    suspend fun entriesNow() = run.entriesNow()
 
     val character get() = run.character
 
@@ -114,67 +118,132 @@ class ClaudeConversation(
             val cznToken =
                 tokenOrNull(FailureKind.CznSignIn) { cznData.accessToken() } ?: return@flow
             val onScreen = screenshot?.let { screenCharacters.identify(it.full) }
-            val history = run.entriesNow()
-            // Read once, so the request prefix stays identical, and cached, across this turn.
-            val character = run.characterNow()
-            val reply = StringBuilder()
-            val tools = mutableListOf<String>()
-            val asks = mutableListOf<AnsweredAsk>()
-            val turn = mutableListOf<BetaMessageParam>()
-            val client = client(anthropicToken)
-            try {
-                repeat(MAX_ROUNDS) {
-                    val params =
-                        MessagesRequest.build(
-                            history,
-                            text,
-                            screenshot?.claude,
-                            CznDataAuth.MCP_URL,
-                            cznToken,
-                            character,
-                            turn,
-                            onScreen,
+            val open =
+                OpenTurn(
+                    text,
+                    onScreen.orEmpty(),
+                    screenshot?.claude,
+                    "",
+                    emptyList(),
+                    emptyList(),
+                    encodeTurn(emptyList()),
+                )
+            run.saveOpenTurn(open)
+            continueTurn(open, anthropicToken, cznToken, player)
+        }.flowOn(Dispatchers.IO)
+
+    /** The exchange the app was in when it last stopped, if it never finished. */
+    suspend fun openTurn(): OpenTurn? = run.openTurn()
+
+    /**
+     * Continues [openTurn] where it was saved: questions Claude asked that wait for the player
+     * are asked again, and a request cut off mid-reply is sent again from its start.
+     */
+    fun resume(player: PlayerInput): Flow<ReplyEvent> =
+        flow {
+            val open = run.openTurn() ?: return@flow
+            val anthropicToken =
+                tokenOrNull(FailureKind.AnthropicSignIn) { anthropic.accessToken() }
+            val cznToken = tokenOrNull(FailureKind.CznSignIn) { cznData.accessToken() }
+            if (anthropicToken == null || cznToken == null) {
+                run.discardOpenTurn()
+                return@flow
+            }
+            continueTurn(open, anthropicToken, cznToken, player)
+        }.flowOn(Dispatchers.IO)
+
+    /** Ends the open exchange without saving it, as when the player stops the reply. */
+    suspend fun discardOpenTurn() = run.discardOpenTurn()
+
+    /**
+     * Runs the exchange from [open] to its end, saving it after every request and every round of
+     * app tools. It is saved to the run when the reply completes and discarded when it fails.
+     */
+    private suspend fun FlowCollector<ReplyEvent>.continueTurn(
+        open: OpenTurn,
+        anthropicToken: String,
+        cznToken: String,
+        player: PlayerInput,
+    ) {
+        val history = run.entriesNow()
+        // Read once, so the request prefix stays identical, and cached, across this turn.
+        val character = run.characterNow()
+        val reply = StringBuilder(open.reply)
+        val tools = open.tools.toMutableList()
+        val asks = open.asks.toMutableList()
+        val turn = decodeTurn(open.turn).toMutableList()
+
+        suspend fun save() =
+            run.saveOpenTurn(
+                OpenTurn(
+                    open.question,
+                    open.screen,
+                    open.jpeg,
+                    reply.toString(),
+                    tools.toList(),
+                    asks.toList(),
+                    encodeTurn(turn),
+                ),
+            )
+
+        suspend fun fail(failure: ReplyEvent.Failed) {
+            run.discardOpenTurn()
+            emit(failure)
+        }
+        val client = client(anthropicToken)
+        try {
+            repeat(MAX_ROUNDS) {
+                val uses = waitingToolUses(turn.lastOrNull())
+                if (uses.isNotEmpty()) {
+                    turn += toolResults(uses) { use -> runTool(use, player, reply, asks) }
+                    save()
+                }
+                val params =
+                    MessagesRequest.build(
+                        history,
+                        open.question,
+                        open.jpeg,
+                        CznDataAuth.MCP_URL,
+                        cznToken,
+                        character,
+                        turn,
+                        open.screen.ifBlank { null },
+                    )
+                val message = stream(client, params, reply, tools)
+                when (message.stopReason().orElse(null)) {
+                    // App tools run at the start of the next round, from the saved message.
+                    // A paused reply (a long server-side tool call) resumes when resent.
+                    BetaStopReason.TOOL_USE, BetaStopReason.PAUSE_TURN -> {
+                        turn += message.toParam()
+                        save()
+                    }
+
+                    else -> {
+                        run.appendExchange(
+                            open.question,
+                            reply.toString(),
+                            tools,
+                            asks,
+                            open.screen,
                         )
-                    val message = stream(client, params, reply, tools)
-                    when (message.stopReason().orElse(null)) {
-                        BetaStopReason.TOOL_USE -> {
-                            turn += message.toParam()
-                            turn +=
-                                toolResults(message) { use -> runTool(use, player, reply, asks) }
-                        }
-
-                        // A long server-side tool call paused the reply; resending resumes it.
-                        BetaStopReason.PAUSE_TURN -> {
-                            turn += message.toParam()
-                        }
-
-                        else -> {
-                            // The names line stays with the question, so later turns keep it.
-                            val asked = listOf(text, onScreen.orEmpty()).filter(String::isNotBlank)
-                            run.appendExchange(
-                                asked.joinToString("\n\n"),
-                                reply.toString(),
-                                tools,
-                                asks,
-                            )
-                            emit(ReplyEvent.Done)
-                            return@flow
-                        }
+                        emit(ReplyEvent.Done)
+                        return
                     }
                 }
-                emit(ReplyEvent.Failed(FailureKind.Api, "Claude kept calling tools; try again."))
-            } catch (e: UnauthorizedException) {
-                emit(ReplyEvent.Failed(FailureKind.AnthropicSignIn, e.message.orEmpty()))
-            } catch (e: AnthropicServiceException) {
-                emit(serviceFailure(e))
-            } catch (e: AnthropicIoException) {
-                emit(ReplyEvent.Failed(FailureKind.Network, e.message ?: "Network error."))
-            } catch (e: IOException) {
-                emit(ReplyEvent.Failed(FailureKind.Network, e.message ?: "Network error."))
-            } finally {
-                client.close()
             }
-        }.flowOn(Dispatchers.IO)
+            fail(ReplyEvent.Failed(FailureKind.Api, "Claude kept calling tools; try again."))
+        } catch (e: UnauthorizedException) {
+            fail(ReplyEvent.Failed(FailureKind.AnthropicSignIn, e.message.orEmpty()))
+        } catch (e: AnthropicServiceException) {
+            fail(serviceFailure(e))
+        } catch (e: AnthropicIoException) {
+            fail(ReplyEvent.Failed(FailureKind.Network, e.message ?: "Network error."))
+        } catch (e: IOException) {
+            fail(ReplyEvent.Failed(FailureKind.Network, e.message ?: "Network error."))
+        } finally {
+            client.close()
+        }
+    }
 
     /**
      * A client for one reply: the subscription token rotates, and the SDK takes it when the client
@@ -241,13 +310,13 @@ class ClaudeConversation(
         return accumulator.message()
     }
 
-    /** Runs every app tool Claude called in [message] and returns their results as one message. */
+    /** Runs the app tools in [uses] and returns their results as one message. */
     private suspend fun toolResults(
-        message: BetaMessage,
-        runTool: suspend (BetaToolUseBlock) -> Pair<String, Boolean>,
+        uses: List<BetaToolUseBlockParam>,
+        runTool: suspend (BetaToolUseBlockParam) -> Pair<String, Boolean>,
     ): BetaMessageParam {
         val results =
-            message.content().mapNotNull { it.toolUse().orElse(null) }.map { use ->
+            uses.map { use ->
                 val (content, isError) = runTool(use)
                 BetaContentBlockParam.ofToolResult(
                     BetaToolResultBlockParam
@@ -266,12 +335,13 @@ class ClaudeConversation(
      * [reply], so the saved reply shows each where Claude asked it.
      */
     private suspend fun FlowCollector<ReplyEvent>.runTool(
-        use: BetaToolUseBlock,
+        use: BetaToolUseBlockParam,
         player: PlayerInput,
         reply: StringBuilder,
         asks: MutableList<AnsweredAsk>,
     ): Pair<String, Boolean> {
-        val input = use._input().asObject().orElse(emptyMap())
+        val inputJson = JSON.writeValueAsString(use._input())
+        val input = JsonValue.from(JSON.readTree(inputJson)).asObject().orElse(emptyMap())
 
         suspend fun ask(questions: List<Question>): List<Answer>? {
             val answers = player.ask(questions)
@@ -282,7 +352,7 @@ class ClaudeConversation(
         }
         return when (use.name()) {
             MessagesRequest.ASK_PLAYER -> {
-                PlayerAsks.parse(JSON.writeValueAsString(use._input())).fold(
+                PlayerAsks.parse(inputJson).fold(
                     onSuccess = { questions ->
                         PlayerAsks.describe(questions, ask(questions)) to
                             false
@@ -389,6 +459,24 @@ class ClaudeConversation(
 
     private companion object {
         val JSON = com.anthropic.core.jsonMapper()
+
+        /** [turn] as stored in [OpenTurn.turn]. */
+        fun encodeTurn(turn: List<BetaMessageParam>): String = JSON.writeValueAsString(turn)
+
+        fun decodeTurn(json: String): List<BetaMessageParam> =
+            JSON.readValue(json, Array<BetaMessageParam>::class.java).toList()
+
+        /** App tools Claude called in [message] that have no results yet: its last message. */
+        fun waitingToolUses(message: BetaMessageParam?): List<BetaToolUseBlockParam> {
+            if (message?.role() != BetaMessageParam.Role.ASSISTANT) return emptyList()
+            return message
+                .content()
+                .orElse(null)
+                ?.contentBlockParams()
+                ?.orElse(null)
+                .orEmpty()
+                .mapNotNull { it.toolUse().orElse(null) }
+        }
 
         /** Requests per reply; a reply that needs more is assumed stuck in a tool loop. */
         const val MAX_ROUNDS = 8

@@ -19,6 +19,7 @@ import app.dailey.czn.companion.run.RunEntry
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -192,9 +193,43 @@ class AdviceController(
                 typing = null,
             )
         }
+        follow(question) { conversation.ask(question, shot, playerInput) }
+    }
+
+    init {
+        restore()
+    }
+
+    /**
+     * Shows the exchange the app was in when Android last killed it, and continues it: a question
+     * Claude asked is asked again, and a cut-off request is sent again.
+     */
+    private fun restore() {
+        scope.launch {
+            val open = conversation.openTurn() ?: return@launch
+            entryCountAtAsk = conversation.entriesNow().size
+            Log.d(TAG, "restoring open turn, ${open.reply.length} chars, ${open.asks.size} asks")
+            local.update {
+                it.copy(
+                    pendingQuestion = open.question,
+                    streaming = open.reply,
+                    pendingTools = open.tools,
+                    pendingAsks = open.asks,
+                    busy = true,
+                )
+            }
+            follow(open.question) { conversation.resume(playerInput) }
+        }
+    }
+
+    /** Collects a reply to [question] into the panel state. */
+    private fun follow(
+        question: String,
+        replies: () -> Flow<ReplyEvent>,
+    ) {
         reply =
             scope.launch {
-                conversation.ask(question, shot, playerInput).collect { event ->
+                replies().collect { event ->
                     if (event is ReplyEvent.Failed && draft.text.isEmpty()) {
                         draft.setTextAndPlaceCursorAtEnd(question)
                     }
@@ -242,6 +277,7 @@ class AdviceController(
         Log.d(TAG, "stop")
         reply?.cancel()
         reply = null
+        scope.launch { conversation.discardOpenTurn() }
         if (question.isNotEmpty() && draft.text.isEmpty()) {
             draft.setTextAndPlaceCursorAtEnd(question)
         }
@@ -324,6 +360,9 @@ class AdviceController(
 
     fun confirmNewRun() {
         Log.d(TAG, "new run")
+        // A reply still running would save its exchange, or its open turn, to the new run.
+        reply?.cancel()
+        reply = null
         local.update { it.copy(confirmingNewRun = false, error = null).finished() }
         scope.launch { conversation.newRun() }
     }

@@ -45,7 +45,7 @@ object MessagesRequest {
      * @param character the run's character, or null while unknown.
      * @param onScreen the characters the data server named on the screenshot
      *   ([app.dailey.czn.companion.characters.ScreenCharacters.describe]), or null without them.
-     *   [ClaudeConversation] saves it with the question, so history carries it afterwards.
+     *   Saved as the entry's [RunEntry.screen], which history sends after the saved text.
      */
     fun build(
         history: List<RunEntry>,
@@ -82,17 +82,20 @@ object MessagesRequest {
             .addTool(ASK_PLAYER_TOOL)
             .apply {
                 history.forEachIndexed { index, entry ->
-                    val block =
-                        BetaContentBlockParam.ofText(
-                            textBlock(
-                                withAsks(entry.text, entry.asks).ifBlank { SCREEN_ONLY },
-                                index == history.lastIndex,
-                            ),
-                        )
+                    val texts =
+                        listOf(withAsks(entry.text, entry.asks).ifBlank { SCREEN_ONLY }) +
+                            listOf(entry.screen).filter(String::isNotBlank)
+                    // The cache breakpoint goes on the last block of the last message.
+                    val blocks =
+                        texts.mapIndexed { i, text ->
+                            BetaContentBlockParam.ofText(
+                                textBlock(text, index == history.lastIndex && i == texts.lastIndex),
+                            )
+                        }
                     if (entry.kind == EntryKind.User) {
-                        addUserMessageOfContentBlockParams(listOf(block))
+                        addUserMessageOfContentBlockParams(blocks)
                     } else {
-                        addAssistantMessageOfContentBlockParams(listOf(block))
+                        addAssistantMessageOfContentBlockParams(blocks)
                     }
                 }
                 addUserMessageOfContentBlockParams(
@@ -302,16 +305,24 @@ object MessagesRequest {
           you MUST check search_posts before advising, and advise from what the posts say.
           When the screen and posts leave a detail open, such as which node is which, name
           what to tap instead of guessing.
+        - The player asks for help with anything in the game: a Chaos run's deck, an event or
+          minigame, a character's build (partner, equipment, potentials), where to spend
+          points, a team. Advise on the player's goal only, once you know it. When neither the
+          player's message nor this run's history states it, you MUST call ask_player before
+          advising, offering 2 to 4 goals this screen suggests, the likeliest recommended. On
+          a character screen, for example: optimize this character, pick a partner, set up
+          equipment. You need not guess right: the player steers over the next turns, so make
+          each step easy. Once known, the goal carries over; when a later screen fits it
+          poorly, ask again with goals that fit, the known one first.
         - Team advice MUST start from who is already on the team: say whether the current
-          team matches a recommended one, and suggest only changes.
+          team matches a recommended one, and suggest only changes. Give it only when the goal
+          is the team.
         - Every reply MUST start with a <seen>...</seen> block: a few short lines on what is on
           screen (names, numbers, choices), so later questions in this run can refer back to
           it. The panel shows it collapsed; nothing may come before it.
         - After the block, the advice MUST be one sentence with the recommended action, then at
           most two short reasons, about 50 words in total. The player reads it mid-game on a
           narrow panel. Go longer only when the player asks for detail.
-        - When the player sends no question and the goal is unclear, you MUST state your best
-          guess of what they want in a few words and advise on that; do not stop to ask.
         - When the advice depends on something not on this screen (deck, equipment, a card's
           details, map nodes), you MUST name what to tap to show it and end with "Then
           long-press." You cannot tap for the player; the next request carries that screen.
@@ -321,17 +332,18 @@ object MessagesRequest {
         - The panel renders Markdown. You SHOULD bold card and choice names. You MUST NOT use
           headings or tables.
         - Earlier messages in this conversation are this run's history. You SHOULD use them.
-        - A run builds one character's deck. The last system block names that character. When
-          it is not known and the screen shows it beyond doubt, you MUST call
-          set_run_character. When advice depends on it and the screen leaves it open, you MUST
-          call ask_run_character, offering only the plausible characters (for example the team
-          of three seen earlier). You MUST NOT ask again once it is known unless the screen
+        - A Chaos run builds one character's deck. The last system block names that character
+          or says it is not known yet. When the goal is a Chaos run and the character is not
+          known, you MUST settle it before advising on the run: call set_run_character when
+          the screen shows it beyond doubt, otherwise ask_run_character, offering only the
+          plausible characters (for example the team of three on screen). You MUST NOT guess
+          the character, and MUST NOT ask again once it is known unless the screen
           contradicts it.
-        - When the best action depends on something only the player knows (their goal for the
-          run, what they own, a preference) and neither the screen nor the history settles it,
-          you MAY call ask_player, batching every open question into one call. You SHOULD
-          advise instead when a reasonable guess exists, and MUST NOT ask what a screenshot
-          could show; name what to tap instead.
+        - When the best action depends on something else only the player knows (what they
+          own, a preference) and neither the screen nor the history settles it, you MAY call
+          ask_player, batching every open question into one call. You SHOULD advise instead
+          when a reasonable guess exists, and MUST NOT ask what a screenshot could show; name
+          what to tap instead.
         - The app shows earlier questions you asked, with the player's answers, as <asked>
           blocks in your past replies. You MUST NOT write <asked> blocks yourself.
         """.trimIndent()

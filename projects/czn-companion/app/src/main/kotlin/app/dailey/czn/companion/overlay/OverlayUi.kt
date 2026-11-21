@@ -8,12 +8,14 @@ import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -270,6 +272,9 @@ class PanelActions(
     val onSend: (String) -> Unit = {},
 )
 
+/** Below this height the top bar would leave the conversation almost no room. */
+private val TOP_BAR_MIN_PANEL_HEIGHT = 240.dp
+
 /** The side panel, in the side tab's color so the two read as one piece. */
 @Composable
 fun Panel(
@@ -282,9 +287,14 @@ fun Panel(
     shadowElevation = 8.dp,
     modifier = Modifier.fillMaxSize(),
 ) {
-    Column {
-        PanelTopBar(state, actions)
-        PanelBody(state, draft, actions)
+    // The keyboard covers most of a phone's landscape height: the panel shrinks to the space above
+    // it and drops the top bar when that space is too short for it.
+    BoxWithConstraints(Modifier.imePadding()) {
+        val roomForTopBar = maxHeight >= TOP_BAR_MIN_PANEL_HEIGHT
+        Column {
+            if (roomForTopBar) PanelTopBar(state, actions)
+            PanelBody(state, draft, actions)
+        }
     }
 }
 

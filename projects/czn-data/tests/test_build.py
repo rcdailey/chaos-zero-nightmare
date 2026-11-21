@@ -116,6 +116,40 @@ def test_ratings_of_a_card_prydwen_renames_land_on_the_same_versions(conn):
     ]
 
 
+def test_a_card_prydwen_lists_twice_keeps_the_review_from_either_listing(conn):
+    """Prydwen lists a card a character also creates twice (as her own card and as the
+    created copy); the review on the second listing must reach the game's card."""
+    review = "Most cards use very common divines"
+    rows = [
+        {
+            "character_slug": "mei-lin",
+            "category": category,
+            "base_name": "Chain Fire",
+            "variant": "",
+            "name": "Chain Fire",
+            "cost": "1",
+            "type": "Attack",
+            "tags": [],
+            "text": text,
+            "epiphany_review": epiphany_review,
+        }
+        for category, text, epiphany_review in (
+            ("starting", "50% Damage x 2", None),
+            ("generated", "40% Damage x 2", review),
+        )
+    ]
+    page = ParsedPage("Mei Lin", "", {"card": rows})
+    store.save_page(conn, CHARACTER_URL, "character", "", datetime.now(UTC), page, None)
+    put(conn, "czn/characters/list", roster("love"))
+    put(conn, "czn/cards/list", [e7_card("c_1027_srt1", "50% Damage x 2")])
+
+    result = build(conn)
+
+    merged = conn.execute("SELECT name, epiphany_review, source FROM card").fetchall()
+    assert merged == [("Chain Fire", review, "e7bot")]
+    assert result.unmatched["card"] == 0
+
+
 def test_unknown_game_value_fails_the_build_and_keeps_merged_data(conn, prydwen):
     put(conn, "czn/characters/list", roster("love"))
     build(conn)

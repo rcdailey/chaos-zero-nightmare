@@ -462,6 +462,11 @@ def _cards(sources, slugs, characters, known, result) -> list[dict]:
             matches = prydwen.get((slug, guide_name, variant))
             found = matches.pop(0) if matches else None
             if code == "":
+                # A card the character also creates is listed twice on Prydwen (her own card
+                # and the created copy), with the review on either listing.
+                while matches:
+                    extra = matches.pop(0)
+                    found |= {k: extra.get(k) for k in _PRYDWEN_CARD_FIELDS if not found.get(k)}
                 base_found = found
             category = derived_category
             if derived_category != "ego":  # Prydwen files Ego skills under starting cards

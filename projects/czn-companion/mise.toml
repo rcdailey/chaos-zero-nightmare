@@ -2,6 +2,8 @@
 java = "temurin-25"
 android-sdk = "23.0"
 android-cli = "1.1.16919734"
+# OpenCode's per-file formatter; keep in step with the ktlint version in gradle/libs.versions.toml.
+ktlint = "1.8.0"
 
 [tasks.setup]
 description = "Install the Android SDK packages the build needs"

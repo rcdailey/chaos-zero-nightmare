@@ -221,7 +221,8 @@ class OverlayService : AccessibilityService() {
             } else {
                 params.flags or LayoutParams.FLAG_NOT_FOCUSABLE
             }
-        params.softInputMode = LayoutParams.SOFT_INPUT_ADJUST_RESIZE
+        // The window keeps its size under the keyboard; the panel's imePadding lifts its content.
+        params.softInputMode = LayoutParams.SOFT_INPUT_ADJUST_NOTHING
         windowManager.updateViewLayout(view, params)
         if (!focusable) advice.stopTyping()
     }

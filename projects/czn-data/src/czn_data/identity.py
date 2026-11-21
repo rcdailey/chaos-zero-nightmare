@@ -206,13 +206,18 @@ def _suppress_overlaps(boxes: np.ndarray, scores: np.ndarray) -> list[int]:
 
 def _reading_order(figures: list[Figure]) -> list[Figure]:
     """Rows from the top, left to right within a row. A figure joins the current row when its
-    vertical center lies within the row's first figure's box."""
-    figures = sorted(figures, key=lambda f: (f.box[1] + f.box[3]) / 2)
+    height overlaps the row's by at least half its own height, so a small icon beside tall
+    cards stays in their row even when it sits above their middle."""
+    figures = sorted(figures, key=lambda f: f.box[1])
     rows: list[list[Figure]] = []
+    row_top = row_bottom = 0
     for figure in figures:
-        center = (figure.box[1] + figure.box[3]) / 2
-        if rows and rows[-1][0].box[1] <= center <= rows[-1][0].box[3]:
+        top, bottom = figure.box[1], figure.box[3]
+        overlap = min(bottom, row_bottom) - max(top, row_top)
+        if rows and overlap >= (bottom - top) / 2:
             rows[-1].append(figure)
+            row_top, row_bottom = min(row_top, top), max(row_bottom, bottom)
         else:
             rows.append([figure])
+            row_top, row_bottom = top, bottom
     return [figure for row in rows for figure in sorted(row, key=lambda f: f.box[0])]

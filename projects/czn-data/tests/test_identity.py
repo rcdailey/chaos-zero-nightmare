@@ -46,8 +46,15 @@ def named(identifier, prints, screenshot: str) -> list[tuple[str, list[str]]]:
     return [(figure.result, figure.names) for figure in figures]
 
 
-def test_team_formation_cards_are_named_and_a_monster_icon_is_unknown(identifier, prints):
-    assert named(identifier, prints, "team-formation.jpg") == [
+@pytest.mark.parametrize(
+    "screenshot",
+    # The second has the monster icon above the cards' middle; it stays in their row.
+    ["team-formation.jpg", "team-formation-icon-above.jpg"],
+)
+def test_team_formation_cards_are_named_and_a_monster_icon_is_unknown(
+    identifier, prints, screenshot
+):
+    assert named(identifier, prints, screenshot) == [
         ("match", ["Rossweisse"]),
         ("match", ["Tiphera"]),
         ("match", ["Mika"]),

@@ -44,6 +44,8 @@ class OpenTurnRow(
     val screen: String,
     /** The screenshot Claude reads, kept only while this exchange is open. */
     val jpeg: ByteArray?,
+    /** As in [RunEntryRow.screenshot]; the app names characters from this full-size copy. */
+    @ColumnInfo(defaultValue = "") val screenshot: String,
     /** Reply text so far. */
     val reply: String,
     /** As in [RunEntryRow.tools] and [RunEntryRow.asks]. */
@@ -82,6 +84,17 @@ data class RunEntryRow(
      * named; sent to Claude with the message and shown in the reply's details.
      */
     @ColumnInfo(defaultValue = "") val screen: String = "",
+    /**
+     * A user message's screenshot in [app.dailey.czn.companion.run.ScreenshotArchive], by file
+     * name; empty without one. The archive keeps only the newest, so the file may be gone.
+     */
+    @ColumnInfo(defaultValue = "") val screenshot: String = "",
+    /**
+     * Everything Claude and the app exchanged for an assistant reply, as in [OpenTurnRow.turn]
+     * plus Claude's last message: every tool call with its full input and result. Kept for
+     * debugging only; never sent or shown.
+     */
+    @ColumnInfo(defaultValue = "") val exchange: String = "",
 )
 
 @Dao
@@ -131,7 +144,7 @@ interface RunDao {
 
 @Database(
     entities = [RunRow::class, RunEntryRow::class, OpenTurnRow::class],
-    version = 7,
+    version = 8,
     autoMigrations = [
         AutoMigration(from = 1, to = 2),
         AutoMigration(from = 2, to = 3),
@@ -139,6 +152,7 @@ interface RunDao {
         AutoMigration(from = 4, to = 5),
         AutoMigration(from = 5, to = 6),
         AutoMigration(from = 6, to = 7, spec = MoveNamesToScreen::class),
+        AutoMigration(from = 7, to = 8),
     ],
 )
 abstract class RunDatabase : RoomDatabase() {

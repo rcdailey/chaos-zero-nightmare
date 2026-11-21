@@ -11,6 +11,7 @@ import app.dailey.czn.companion.auth.SignInRequired
 import app.dailey.czn.companion.characters.ScreenCharacters
 import app.dailey.czn.companion.run.OpenTurn
 import app.dailey.czn.companion.run.RunRepository
+import app.dailey.czn.companion.run.ScreenshotArchive
 import com.anthropic.client.AnthropicClient
 import com.anthropic.client.okhttp.AnthropicOkHttpClient
 import com.anthropic.core.JsonValue
@@ -76,7 +77,7 @@ interface PlayerInput {
 
 /**
  * One screenshot as JPEG twice: [claude] at the size Claude reads, [full] at the screen's
- * resolution for naming the characters on it ([ScreenCharacters]).
+ * resolution for naming the characters on it ([ScreenCharacters]) and for [ScreenshotArchive].
  */
 class Screenshot(
     val claude: ByteArray,
@@ -96,6 +97,7 @@ class ClaudeConversation(
     private val cznData: CznDataAuth,
     private val run: RunRepository,
     private val screenCharacters: ScreenCharacters,
+    private val archive: ScreenshotArchive,
 ) {
     val entries get() = run.entries
 
@@ -117,12 +119,12 @@ class ClaudeConversation(
                 tokenOrNull(FailureKind.AnthropicSignIn) { anthropic.accessToken() } ?: return@flow
             val cznToken =
                 tokenOrNull(FailureKind.CznSignIn) { cznData.accessToken() } ?: return@flow
-            val onScreen = screenshot?.let { screenCharacters.identify(it.full) }
             val open =
                 OpenTurn(
                     text,
-                    onScreen.orEmpty(),
+                    "",
                     screenshot?.claude,
+                    screenshot?.let { archive.save(it.full) }.orEmpty(),
                     "",
                     emptyList(),
                     emptyList(),
@@ -172,13 +174,16 @@ class ClaudeConversation(
         val tools = open.tools.toMutableList()
         val asks = open.asks.toMutableList()
         val turn = decodeTurn(open.turn).toMutableList()
+        // Set when Claude asks for the characters' names; saved with the question.
+        var screen = open.screen
 
         suspend fun save() =
             run.saveOpenTurn(
                 OpenTurn(
                     open.question,
-                    open.screen,
+                    screen,
                     open.jpeg,
+                    open.screenshot,
                     reply.toString(),
                     tools.toList(),
                     asks.toList(),
@@ -195,7 +200,14 @@ class ClaudeConversation(
             repeat(MAX_ROUNDS) {
                 val uses = waitingToolUses(turn.lastOrNull())
                 if (uses.isNotEmpty()) {
-                    turn += toolResults(uses) { use -> runTool(use, player, reply, asks) }
+                    turn +=
+                        toolResults(uses) { use ->
+                            if (use.name() == MessagesRequest.IDENTIFY_CHARACTERS) {
+                                identifyCharacters(open.screenshot) { screen = it }
+                            } else {
+                                runTool(use, player, reply, asks)
+                            }
+                        }
                     save()
                 }
                 val params =
@@ -207,7 +219,6 @@ class ClaudeConversation(
                         cznToken,
                         character,
                         turn,
-                        open.screen.ifBlank { null },
                     )
                 val message = stream(client, params, reply, tools)
                 when (message.stopReason().orElse(null)) {
@@ -224,7 +235,9 @@ class ClaudeConversation(
                             reply.toString(),
                             tools,
                             asks,
-                            open.screen,
+                            screen,
+                            open.screenshot,
+                            encodeTurn(turn + message.toParam()),
                         )
                         emit(ReplyEvent.Done)
                         return
@@ -328,6 +341,28 @@ class ClaudeConversation(
                 )
             }
         return BetaMessageParam.ofUserOfContentBlockParams(results)
+    }
+
+    /**
+     * Names the characters on the archived [screenshot] for Claude; [onLine] receives the names
+     * line to save with the question. The server's full answer joins the archive.
+     */
+    private suspend fun identifyCharacters(
+        screenshot: String,
+        onLine: (String) -> Unit,
+    ): Pair<String, Boolean> {
+        val jpeg =
+            screenshot.ifEmpty { null }?.let(archive::read)
+                ?: return "This request's screenshot is no longer kept; call the characters " +
+                    "unidentified." to true
+        val found =
+            screenCharacters.identify(jpeg)
+                ?: return "The data server did not answer; call the characters unidentified." to
+                    true
+        archive.saveIdentify(screenshot, found.response)
+        val line = found.line ?: return "No character figures found on this screenshot." to false
+        onLine(line)
+        return line to false
     }
 
     /**

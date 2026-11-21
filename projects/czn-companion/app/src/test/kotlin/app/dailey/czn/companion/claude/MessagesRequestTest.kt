@@ -37,7 +37,6 @@ class MessagesRequestTest {
         text: String = "Why B?",
         character: String? = null,
         turn: List<BetaMessageParam> = emptyList(),
-        onScreen: String? = null,
         history: List<RunEntry> = this.history,
     ) = wire(
         MessagesRequest.build(
@@ -48,28 +47,8 @@ class MessagesRequestTest {
             "czn-token",
             character,
             turn,
-            onScreen,
         ),
     )
-
-    @Test
-    fun `the characters named on the screenshot follow the player's text in the new message`() {
-        val line = "Characters on screen, top to bottom, left to right: Rossweisse, unidentified"
-        val named =
-            build(onScreen = line)["messages"]!!
-                .jsonArray
-                .last()
-                .jsonObject
-                .content()
-        assertEquals(listOf("Why B?", line), named.drop(1).map { it.text() })
-        val unnamed =
-            build()["messages"]!!
-                .jsonArray
-                .last()
-                .jsonObject
-                .content()
-        assertEquals(listOf("Why B?"), unnamed.drop(1).map { it.text() })
-    }
 
     @Test
     fun `a saved message's named characters reach Claude in later turns`() {
@@ -231,9 +210,10 @@ class MessagesRequestTest {
     }
 
     @Test
-    fun `Claude can ask the player questions`() {
+    fun `Claude can ask the player questions and the app to name the characters on screen`() {
         val names = build()["tools"]!!.jsonArray.mapNotNull { it.jsonObject.string("name") }
         assertTrue(MessagesRequest.ASK_PLAYER in names)
+        assertTrue(MessagesRequest.IDENTIFY_CHARACTERS in names)
     }
 
     @Test

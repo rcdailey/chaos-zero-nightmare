@@ -29,10 +29,20 @@ private data class IdentifyResponse(
 )
 
 /**
+ * What the data server found on a screenshot: [line] as [ScreenCharacters.describe] writes it
+ * (null when it found no figures), and [response], its raw answer with every figure's box,
+ * candidates, and match scores, kept for debugging.
+ */
+class Identified(
+    val line: String?,
+    val response: String,
+)
+
+/**
  * Names the characters on a screenshot through the CZN data server, which compares each
  * character figure with every character's card art. Claude cannot tell characters apart
- * reliably from portraits, so the app asks before each screenshot request and gives Claude the
- * result as text ([describe]).
+ * reliably from portraits, so it calls an app tool for this, and the app gives it the result
+ * as text ([describe]).
  */
 class ScreenCharacters(
     private val http: HttpClient,
@@ -41,11 +51,10 @@ class ScreenCharacters(
     private val json = Json { ignoreUnknownKeys = true }
 
     /**
-     * The characters on [jpeg] (full resolution: small figures match better), as the line
-     * [describe] writes, or null when the server could not answer in time. Advice goes on
-     * without the line, so every failure is only logged.
+     * The characters on [jpeg] (full resolution: small figures match better), or null when the
+     * server could not answer in time; failures are logged.
      */
-    suspend fun identify(jpeg: ByteArray): String? =
+    suspend fun identify(jpeg: ByteArray): Identified? =
         try {
             val response =
                 http.post(IDENTIFY_URL) {
@@ -58,7 +67,7 @@ class ScreenCharacters(
             if (response.status.isSuccess()) {
                 val figures = json.decodeFromString<IdentifyResponse>(body).characters
                 Log.d(TAG, "identified ${figures.size} characters")
-                describe(figures)
+                Identified(describe(figures), body)
             } else {
                 Log.w(TAG, "identify failed: ${response.status} $body")
                 null

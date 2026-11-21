@@ -38,14 +38,15 @@ object MessagesRequest {
     const val SET_RUN_CHARACTER = "set_run_character"
     const val ASK_RUN_CHARACTER = "ask_run_character"
     const val ASK_PLAYER = "ask_player"
+    const val IDENTIFY_CHARACTERS = "identify_characters"
 
     /**
+     * History sends each user entry's [RunEntry.screen] (the names line an identify_characters
+     * call found) after its text; the current request gets it as that tool's result instead.
+     *
      * @param turn messages Claude and the app exchanged after [text] in this turn: Claude's
      *   responses that stopped for a tool, each followed by the app's tool results if any.
      * @param character the run's character, or null while unknown.
-     * @param onScreen the characters the data server named on the screenshot
-     *   ([app.dailey.czn.companion.characters.ScreenCharacters.describe]), or null without them.
-     *   Saved as the entry's [RunEntry.screen], which history sends after the saved text.
      */
     fun build(
         history: List<RunEntry>,
@@ -55,7 +56,6 @@ object MessagesRequest {
         cznToken: String,
         character: String? = null,
         turn: List<BetaMessageParam> = emptyList(),
-        onScreen: String? = null,
     ): MessageCreateParams =
         MessageCreateParams
             .builder()
@@ -80,6 +80,7 @@ object MessagesRequest {
             .addTool(SET_RUN_CHARACTER_TOOL)
             .addTool(ASK_RUN_CHARACTER_TOOL)
             .addTool(ASK_PLAYER_TOOL)
+            .addTool(IDENTIFY_CHARACTERS_TOOL)
             .apply {
                 history.forEachIndexed { index, entry ->
                     val texts =
@@ -102,7 +103,6 @@ object MessagesRequest {
                     listOfNotNull(
                         jpeg?.let(::imageBlock),
                         BetaContentBlockParam.ofText(text.ifBlank { SCREEN_ONLY }),
-                        onScreen?.let(BetaContentBlockParam::ofText),
                     ),
                 )
                 turn.forEach(::addMessage)
@@ -180,6 +180,20 @@ object MessagesRequest {
                     ),
             ),
             listOf("name"),
+        )
+
+    private val IDENTIFY_CHARACTERS_TOOL =
+        tool(
+            IDENTIFY_CHARACTERS,
+            """
+            Names the characters drawn on this request's screenshot by comparing each figure with
+            every character's card art. Returns a line "Characters on screen, top to bottom, left
+            to right: ...": "A or B" means one of the two, too close to choose; "unidentified"
+            means no character matched, such as a monster. Card art counts as a figure, so a
+            card screen returns its owner's name for each card. Takes no input.
+            """,
+            emptyMap(),
+            emptyList(),
         )
 
     private val ASK_RUN_CHARACTER_TOOL =
@@ -286,17 +300,25 @@ object MessagesRequest {
 
         - You MUST read the screenshot carefully and confirm every card, character, equipment,
           and partner name with the czn tools before relying on it; card text read from the
-          screen goes to match_card_text. Make independent lookups in parallel. The screen
+          screen goes to match_card_text, every card's text on a screen in one call. Make
+          independent lookups in parallel. The screen
           shows the player's actual values, which can differ from the database's base values;
           prefer the screen. czn tool results leave out empty fields, so a missing field means
           the data has no value for it.
-        - Screens show characters as portraits without names. The app names them for you: a
-          line "Characters on screen, top to bottom, left to right: ..." after the player's
-          message comes from comparing each figure with every character's card art, and is
-          authoritative. "A or B" means one of the two; do not pick one unless the screen
-          shows a name. "unidentified" stays unidentified. Without that line, call the
-          characters unidentified. You MUST NOT name a character from looks, element icons,
-          or class icons.
+        - Screens show characters as pictures without names. Before you name a character the
+          screen shows only as a picture, you MUST call identify_characters; its answer is
+          authoritative, and earlier player messages carry the answer for their screenshot.
+          Names the screen shows as text need no call. "A or B" means one of the two; do not
+          pick one unless the screen shows a name. "unidentified" stays unidentified, as do
+          all characters when the call fails. You MUST NOT name a character from looks,
+          element icons, or class icons.
+        - When you check a card's version (base, Epiphany I to V), you MUST state the version
+          the czn tools matched, then how it differs from what the plan or the player wants.
+          When the screen names a version, often in parentheses after the card's name, that
+          name decides it: the czn tools give it as alias.
+        - You MUST NOT advise a step the screen shows is already done, or call the player's
+          state a match for a plan before you have checked each part of it; name the parts
+          still unchecked.
         - You MUST state only player facts the screen or this run's history shows. You MUST
           NOT invent progress, clears, ownership, or past purchases ("the highest level
           you've cleared"). When comparing two screens, attribute a change only to what both

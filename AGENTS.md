@@ -21,8 +21,11 @@ directory. Before working in a project, read its `AGENTS.md`; shell commands do 
   `runs.db-wal`, and `runs.db-shm` (recent writes sit in the WAL) into one directory, each with
   `adb exec-out run-as app.dailey.czn.companion cat databases/<file> > <file>`, then query with
   `sqlite3 runs.db`. The current session is `run.active = 1`; its messages are `run_entry` by
-  `position` (`screen` holds what the app identified on the screenshot, `tools` the czn tool calls),
-  and an unfinished reply is in `open_turn`. Screenshots are not kept after a reply.
+  `position` (`screen`: characters the app named; `exchange`: every tool call's full input and
+  result), and an unfinished reply is in `open_turn`. The newest 20 screenshots, at full size, are
+  in `files/screenshots` (`run_entry.screenshot` names one; when Claude asked for character
+  names, `<millis>.identify.json` beside it holds each figure's candidates and match scores);
+  copy them with `run-as` too.
 - `docs/game-data-investigation.md`: findings on reading CZN's own game files; nothing implemented.
 - Markdown anywhere: check with `mise run lint` from the repository root.
 

@@ -28,6 +28,8 @@ class OpenTurn(
     val question: String,
     val screen: String,
     val jpeg: ByteArray?,
+    /** The full-size screenshot's file name in [ScreenshotArchive]; empty without one. */
+    val screenshot: String,
     val reply: String,
     val tools: List<String>,
     val asks: List<AnsweredAsk>,
@@ -77,6 +79,7 @@ class RunRepository(
                 row.question,
                 row.screen,
                 row.jpeg,
+                row.screenshot,
                 row.reply,
                 splitTools(row.tools),
                 PlayerAsks.decode(row.asks),
@@ -94,6 +97,7 @@ class RunRepository(
                         question = turn.question,
                         screen = turn.screen,
                         jpeg = turn.jpeg,
+                        screenshot = turn.screenshot,
                         reply = turn.reply,
                         tools = joinTools(turn.tools),
                         asks = PlayerAsks.encode(turn.asks),
@@ -110,7 +114,7 @@ class RunRepository(
 
     /**
      * Saves one completed exchange and closes the open one; both messages are written or neither
-     * is.
+     * is. [screenshot] and [exchange] are kept for debugging (see [RunEntryRow]).
      */
     suspend fun appendExchange(
         user: String,
@@ -118,6 +122,8 @@ class RunRepository(
         tools: List<String>,
         asks: List<AnsweredAsk> = emptyList(),
         screen: String = "",
+        screenshot: String = "",
+        exchange: String = "",
     ) = db.useWriterConnection { connection ->
         connection.immediateTransaction {
             val runId = activeRunId()
@@ -132,6 +138,7 @@ class RunRepository(
                         text = user,
                         createdAt = time,
                         screen = screen,
+                        screenshot = screenshot,
                     ),
                     RunEntryRow(
                         runId = runId,
@@ -141,6 +148,7 @@ class RunRepository(
                         createdAt = time,
                         tools = joinTools(tools),
                         asks = PlayerAsks.encode(asks),
+                        exchange = exchange,
                     ),
                 ),
             )

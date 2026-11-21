@@ -13,6 +13,7 @@ import app.dailey.czn.companion.overlay.OverlaySettings
 import app.dailey.czn.companion.overlay.OverlayStatus
 import app.dailey.czn.companion.run.RunDatabase
 import app.dailey.czn.companion.run.RunRepository
+import app.dailey.czn.companion.run.ScreenshotArchive
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.okhttp.OkHttp
 import io.ktor.client.plugins.HttpTimeout
@@ -56,6 +57,7 @@ class CompanionApp : Application() {
             cznDataAuth,
             RunRepository(runDatabase),
             ScreenCharacters(http, cznDataAuth),
+            ScreenshotArchive(File(filesDir, "screenshots")),
         )
     }
 }

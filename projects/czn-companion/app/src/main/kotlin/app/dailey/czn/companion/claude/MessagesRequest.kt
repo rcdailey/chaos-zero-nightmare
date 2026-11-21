@@ -2,11 +2,14 @@ package app.dailey.czn.companion.claude
 
 import app.dailey.czn.companion.run.EntryKind
 import app.dailey.czn.companion.run.RunEntry
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonObjectBuilder
 import kotlinx.serialization.json.add
 import kotlinx.serialization.json.addJsonObject
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonArray
 import kotlinx.serialization.json.putJsonObject
@@ -17,6 +20,8 @@ import kotlin.io.encoding.Base64
  * - The first system block is exactly [IDENTITY]; any other first block gets a bare 429.
  * - Only the newest user message carries an image, so everything before it stays byte-identical
  *   across turns and the cache breakpoint on the last history message can hit.
+ * - The run's character goes in a system block after the cached app prompt, so setting it costs
+ *   one history cache miss and nothing more.
  */
 object MessagesRequest {
     const val IDENTITY = "You are Claude Code, Anthropic's official CLI for Claude."
@@ -27,12 +32,23 @@ object MessagesRequest {
     const val SCREEN_ONLY = "Advise me on this screen."
     val BETAS = listOf("oauth-2025-04-20", "claude-code-20250219", "mcp-client-2025-11-20")
 
+    /** Tools the app runs itself, in [ClaudeConversation]. */
+    const val SET_RUN_CHARACTER = "set_run_character"
+    const val ASK_RUN_CHARACTER = "ask_run_character"
+
+    /**
+     * @param turn messages Claude and the app exchanged after [text] in this turn: assistant
+     *   content that stopped for an app tool, then the tool results.
+     * @param character the run's character, or null while unknown.
+     */
     fun build(
         history: List<RunEntry>,
         text: String,
         jpeg: ByteArray?,
         cznUrl: String,
         cznToken: String,
+        character: String? = null,
+        turn: List<JsonObject> = emptyList(),
     ): JsonObject =
         buildJsonObject {
             put("model", MODEL)
@@ -44,6 +60,9 @@ object MessagesRequest {
                 addJsonObject {
                     text(APP_PROMPT)
                     cacheControl()
+                }
+                addJsonObject {
+                    text("The run's character: ${character ?: "not known yet"}.")
                 }
             }
             putJsonArray("mcp_servers") {
@@ -59,6 +78,8 @@ object MessagesRequest {
                     put("type", "mcp_toolset")
                     put("mcp_server_name", CZN_SERVER)
                 }
+                add(SET_RUN_CHARACTER_TOOL)
+                add(ASK_RUN_CHARACTER_TOOL)
             }
             putJsonArray("messages") {
                 history.forEachIndexed { index, entry ->
@@ -88,8 +109,78 @@ object MessagesRequest {
                         addJsonObject { text(text.ifBlank { SCREEN_ONLY }) }
                     }
                 }
+                turn.forEachIndexed { index, message ->
+                    add(if (index == turn.lastIndex) message.withCacheBreakpoint() else message)
+                }
             }
         }
+
+    /** [message] with a cache breakpoint on its last content block. */
+    private fun JsonObject.withCacheBreakpoint(): JsonObject {
+        val content = this["content"]?.jsonArray ?: return this
+        val last = content.lastOrNull()?.jsonObject ?: return this
+        val marked = JsonObject(last + ("cache_control" to EPHEMERAL))
+        return JsonObject(this + ("content" to JsonArray(content.dropLast(1) + marked)))
+    }
+
+    private val EPHEMERAL = buildJsonObject { put("type", "ephemeral") }
+
+    private fun tool(
+        name: String,
+        description: String,
+        properties: JsonObjectBuilder.() -> Unit,
+        required: List<String>,
+    ) = buildJsonObject {
+        put("name", name)
+        put("description", description.trimIndent().replace('\n', ' '))
+        putJsonObject("input_schema") {
+            put("type", "object")
+            putJsonObject("properties", properties)
+            putJsonArray("required") { required.forEach(::add) }
+        }
+    }
+
+    private val SET_RUN_CHARACTER_TOOL =
+        tool(
+            SET_RUN_CHARACTER,
+            """
+            Saves the character whose deck this run builds, when the screen shows it beyond doubt.
+            The player sees it and can change it. Use the name exactly as the czn tools spell it.
+            """,
+            {
+                putJsonObject("name") {
+                    put("type", "string")
+                    put("description", "Character name as the czn tools spell it")
+                }
+            },
+            listOf("name"),
+        )
+
+    private val ASK_RUN_CHARACTER_TOOL =
+        tool(
+            ASK_RUN_CHARACTER,
+            """
+            Shows the player a full-screen grid of character cards and waits until they pick the
+            character whose deck this run builds; the pick is saved. Returns the name, or that
+            the player closed the grid without choosing.
+            """,
+            {
+                putJsonObject("candidates") {
+                    put("type", "array")
+                    putJsonObject("items") { put("type", "string") }
+                    put(
+                        "description",
+                        "Names to offer, as the czn tools spell them, for example the team of " +
+                            "three seen earlier; omit to offer every character",
+                    )
+                }
+                putJsonObject("reason") {
+                    put("type", "string")
+                    put("description", "Short title above the grid, for example why you ask")
+                }
+            },
+            emptyList(),
+        )
 
     private fun JsonObjectBuilder.text(value: String) {
         put("type", "text")
@@ -130,5 +221,11 @@ object MessagesRequest {
         - The panel renders Markdown. You SHOULD bold card and choice names. You MUST NOT use
           headings or tables.
         - Earlier messages in this conversation are this run's history. You SHOULD use them.
+        - A run builds one character's deck. The last system block names that character. When
+          it is not known and the screen shows it beyond doubt, you MUST call
+          set_run_character. When advice depends on it and the screen leaves it open, you MUST
+          call ask_run_character, offering only the plausible characters (for example the team
+          of three seen earlier). You MUST NOT ask again once it is known unless the screen
+          contradicts it.
         """.trimIndent()
 }

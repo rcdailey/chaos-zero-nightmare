@@ -31,6 +31,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import java.io.File
 import kotlin.math.max
@@ -45,10 +46,8 @@ class OverlayService : AccessibilityService() {
     private val owner = OverlayOwner()
     private val scope = MainScope()
     private val advice by lazy {
-        AdviceController(
-            scope,
-            (application as CompanionApp).conversation,
-        )
+        val app = application as CompanionApp
+        AdviceController(scope, app.conversation, app.characterRoster)
     }
     private val windowManager by lazy { getSystemService(WindowManager::class.java) }
     private val prefs by lazy { getSharedPreferences("overlay", MODE_PRIVATE) }
@@ -57,6 +56,9 @@ class OverlayService : AccessibilityService() {
     private var overlay: ComposeView? = null
     private var overlayParams: LayoutParams? = null
     private val panelOpen = MutableStateFlow(false)
+
+    /** The full-screen character picker's own window, while it is open. */
+    private var picker: ComposeView? = null
 
     /** The tab's distance from the top of the screen, in pixels. */
     private val tabY by lazy { MutableStateFlow(prefs.getInt(KEY_Y, screenHeight() / 2)) }
@@ -73,11 +75,55 @@ class OverlayService : AccessibilityService() {
     override fun onServiceConnected() {
         owner.start()
         status.setRunning(true)
-        scope.launch {
+        val overGame =
             combine(settings.buttonVisible, gameInFront) { visible, inGame -> visible && inGame }
-                .distinctUntilChanged()
-                .collect { show -> if (show) showOverlay() else hideOverlay() }
+        scope.launch {
+            overGame.distinctUntilChanged().collect { show ->
+                if (show) showOverlay() else hideOverlay()
+            }
         }
+        // The full-screen picker shows over the game alone; it waits while another app is in front.
+        scope.launch {
+            combine(overGame, advice.state) { show, state ->
+                show && state.picker?.inline == false
+            }.distinctUntilChanged()
+                .collect { show -> if (show) showPicker() else hidePicker() }
+        }
+        // Claude's inline question shows in the panel, so the panel opens for it.
+        scope.launch {
+            advice.state
+                .map { it.picker?.inline == true }
+                .distinctUntilChanged()
+                .collect { inline -> if (inline && overlay != null) openPanel() }
+        }
+    }
+
+    private fun showPicker() {
+        if (picker != null) return
+        val view =
+            composeView {
+                val state by advice.state.collectAsStateWithLifecycle()
+                state.picker?.let { CharacterPicker(it, pickerActions) }
+            }
+        windowManager.addView(
+            view,
+            overlayParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT),
+        )
+        picker = view
+    }
+
+    private fun hidePicker() {
+        picker?.let(windowManager::removeView)
+        picker = null
+    }
+
+    private val pickerActions by lazy {
+        PickerActions(
+            onPick = advice::pickCharacter,
+            onClose = advice::closePicker,
+            onStop = advice::stop,
+            onRetry = { advice.retryRoster() },
+        )
     }
 
     /**
@@ -116,6 +162,7 @@ class OverlayService : AccessibilityService() {
     override fun onDestroy() {
         status.setRunning(false)
         overlay?.let(windowManager::removeView)
+        picker?.let(windowManager::removeView)
         owner.destroy()
         scope.cancel()
         super.onDestroy()
@@ -199,7 +246,7 @@ class OverlayService : AccessibilityService() {
                     panelWidth = with(LocalDensity.current) { panelWidth.toDp() },
                     tabActions = tabActions,
                     onTouchableArea = { window.rootSurfaceControl?.setTouchableRegion(it) },
-                ) { Panel(state, advice.draft, panelActions) }
+                ) { Panel(state, advice.draft, panelActions, pickerActions) }
             }
         closeOnOutsideTouch(view)
         windowManager.addView(view, params)
@@ -274,6 +321,8 @@ class OverlayService : AccessibilityService() {
                 setPanelFocusable(true)
             },
             onSend = ::onSend,
+            onStop = advice::stop,
+            onChangeCharacter = advice::openCharacterPicker,
         )
     }
 

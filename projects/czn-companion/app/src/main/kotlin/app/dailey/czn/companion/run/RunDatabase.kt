@@ -19,6 +19,8 @@ data class RunRow(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
     val startedAt: Long,
     val active: Boolean,
+    /** The character whose deck this run builds, as the CZN data server names it. */
+    val character: String? = null,
 )
 
 /** One message in a run's conversation, in order. Text only; screenshots are never stored. */
@@ -46,6 +48,15 @@ interface RunDao {
     @Query("SELECT id FROM run WHERE active = 1 LIMIT 1")
     fun activeRunId(): Flow<Long?>
 
+    @Query("SELECT character FROM run WHERE active = 1 LIMIT 1")
+    fun activeCharacter(): Flow<String?>
+
+    @Query("UPDATE run SET character = :character WHERE id = :runId")
+    suspend fun setCharacter(
+        runId: Long,
+        character: String,
+    )
+
     @Insert
     suspend fun insertRun(run: RunRow): Long
 
@@ -67,8 +78,8 @@ interface RunDao {
 
 @Database(
     entities = [RunRow::class, RunEntryRow::class],
-    version = 2,
-    autoMigrations = [AutoMigration(from = 1, to = 2)],
+    version = 3,
+    autoMigrations = [AutoMigration(from = 1, to = 2), AutoMigration(from = 2, to = 3)],
 )
 abstract class RunDatabase : RoomDatabase() {
     abstract fun runDao(): RunDao

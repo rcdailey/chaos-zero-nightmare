@@ -6,6 +6,7 @@ import androidx.sqlite.driver.AndroidSQLiteDriver
 import app.dailey.czn.companion.auth.AnthropicAuth
 import app.dailey.czn.companion.auth.CznDataAuth
 import app.dailey.czn.companion.auth.TokenStore
+import app.dailey.czn.companion.characters.CharacterRoster
 import app.dailey.czn.companion.claude.ClaudeConversation
 import app.dailey.czn.companion.overlay.OverlaySettings
 import app.dailey.czn.companion.overlay.OverlayStatus
@@ -44,6 +45,7 @@ class CompanionApp : Application() {
             .setDriver(AndroidSQLiteDriver())
             .build()
     }
+    val characterRoster by lazy { CharacterRoster(http, cznDataAuth) }
     val conversation by lazy {
         ClaudeConversation(http, anthropicAuth, cznDataAuth, RunRepository(runDatabase))
     }

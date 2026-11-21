@@ -25,8 +25,11 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.ZeroCornerSize
 import androidx.compose.foundation.text.input.TextFieldState
+import androidx.compose.material3.AssistChip
+import androidx.compose.material3.AssistChipDefaults
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -270,6 +273,8 @@ class PanelActions(
     val onCancelNewRun: () -> Unit = {},
     val onCompose: () -> Unit = {},
     val onSend: (String) -> Unit = {},
+    val onStop: () -> Unit = {},
+    val onChangeCharacter: () -> Unit = {},
 )
 
 /** Below this height the top bar would leave the conversation almost no room. */
@@ -281,6 +286,7 @@ fun Panel(
     state: PanelState,
     draft: TextFieldState,
     actions: PanelActions,
+    pickerActions: PickerActions,
 ) = Surface(
     color = MaterialTheme.colorScheme.primaryContainer,
     contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
@@ -293,7 +299,7 @@ fun Panel(
         val roomForTopBar = maxHeight >= TOP_BAR_MIN_PANEL_HEIGHT
         Column {
             if (roomForTopBar) PanelTopBar(state, actions)
-            PanelBody(state, draft, actions)
+            PanelBody(state, draft, actions, pickerActions)
         }
     }
 }
@@ -332,10 +338,12 @@ private fun PanelBody(
     state: PanelState,
     draft: TextFieldState,
     actions: PanelActions,
+    pickerActions: PickerActions,
 ) = Column(
     Modifier.padding(start = 16.dp, end = 16.dp, bottom = 16.dp),
     verticalArrangement = Arrangement.spacedBy(8.dp),
 ) {
+    RunCharacterChip(state.character, actions.onChangeCharacter)
     if (state.confirmingNewRun) {
         Text("Start a new run? This clears the conversation.")
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -343,14 +351,32 @@ private fun PanelBody(
             OutlinedButton(onClick = actions.onCancelNewRun) { Text("Keep this run") }
         }
     }
-    Conversation(state, Modifier.weight(1f))
+    Conversation(state, pickerActions, Modifier.weight(1f))
     state.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
     AskRow(state, draft, actions)
 }
 
+/** The run's character, which Claude's advice assumes; a tap opens the picker to change it. */
+@Composable
+private fun RunCharacterChip(
+    character: String?,
+    onClick: () -> Unit,
+) = AssistChip(
+    onClick = onClick,
+    label = { Text(character?.let { "Run: $it" } ?: "Set run character") },
+    leadingIcon = {
+        Icon(
+            painterResource(R.drawable.ic_person),
+            contentDescription = null,
+            modifier = Modifier.size(AssistChipDefaults.IconSize),
+        )
+    },
+)
+
 @Composable
 private fun Conversation(
     state: PanelState,
+    pickerActions: PickerActions,
     modifier: Modifier,
 ) {
     val listState = rememberLazyListState()
@@ -366,6 +392,9 @@ private fun Conversation(
         reverseLayout = true,
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
+        state.picker?.takeIf { it.inline }?.let { picker ->
+            item(key = "inline-picker") { InlineCharacterChoice(picker, pickerActions) }
+        }
         state.pendingQuestion?.let { question ->
             item(key = "pending-reply") {
                 Reply(state.streaming, state.pendingTools, complete = false)
@@ -503,12 +532,27 @@ private fun AskRow(
                 Box(Modifier.matchParentSize().clickable(onClick = actions.onCompose))
             }
         }
-        Button(
-            onClick = { actions.onSend(draft.text.trim().toString()) },
-            enabled = !state.busy,
-            modifier = Modifier.padding(start = 8.dp),
-        ) { Text(if (draft.text.isBlank()) "Read screen" else "Send") }
+        AskButton(state.busy, draft, actions)
     }
+}
+
+/** Stop while a reply runs; otherwise read the screen (no text) or send the typed question. */
+@Composable
+private fun AskButton(
+    busy: Boolean,
+    draft: TextFieldState,
+    actions: PanelActions,
+) {
+    val (icon, label) =
+        when {
+            busy -> R.drawable.ic_stop to "Stop"
+            draft.text.isBlank() -> R.drawable.ic_photo_camera to "Read screen"
+            else -> R.drawable.ic_send to "Send"
+        }
+    FilledIconButton(
+        onClick = { if (busy) actions.onStop() else actions.onSend(draft.text.trim().toString()) },
+        modifier = Modifier.padding(start = 8.dp),
+    ) { Icon(painterResource(icon), contentDescription = label) }
 }
 
 @PreviewLightDark
@@ -543,7 +587,14 @@ private fun PanelPreviewContent() =
             pendingTools = listOf("get_card: Radiant Sword Flow", "find_teams: Rossweisse"),
             streaming = "<seen>Same offer.</seen>\n\nRadiant Sword Flow needs more Justice",
             busy = true,
+            character = "Rossweisse",
+            picker =
+                PickerState(
+                    candidates = listOf("Mei Lin", "Veronica", "Tiphera"),
+                    forReply = true,
+                ),
         ),
         TextFieldState(),
         PanelActions(),
+        PickerActions(),
     )

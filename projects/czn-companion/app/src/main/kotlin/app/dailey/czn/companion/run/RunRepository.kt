@@ -36,6 +36,16 @@ class RunRepository(
             }
         }
 
+    /** The active run's character; null until one is set, and again after [newRun]. */
+    val character: Flow<String?> = dao.activeCharacter()
+
+    suspend fun characterNow(): String? = dao.activeRun()?.character
+
+    suspend fun setCharacter(name: String) =
+        db.useWriterConnection { connection ->
+            connection.immediateTransaction { dao.setCharacter(activeRunId(), name) }
+        }
+
     suspend fun entriesNow(): List<RunEntry> =
         dao
             .activeRun()
@@ -50,8 +60,7 @@ class RunRepository(
         tools: List<String>,
     ) = db.useWriterConnection { connection ->
         connection.immediateTransaction {
-            val runId =
-                dao.activeRun()?.id ?: dao.insertRun(RunRow(startedAt = now(), active = true))
+            val runId = activeRunId()
             val next = dao.lastPosition(runId) + 1
             val time = now()
             dao.insertEntries(
@@ -83,6 +92,10 @@ class RunRepository(
                 dao.insertRun(RunRow(startedAt = now(), active = true))
             }
         }
+
+    /** The active run, started first if there is none; call inside a write transaction. */
+    private suspend fun activeRunId() =
+        dao.activeRun()?.id ?: dao.insertRun(RunRow(startedAt = now(), active = true))
 
     private fun toEntry(row: RunEntryRow) =
         RunEntry(

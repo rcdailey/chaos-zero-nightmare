@@ -1,6 +1,5 @@
 # Repository Rules
 
-- Work in the current checkout on `main`. MUST NOT create worktrees or feature branches.
 - Use a popular, maintained library for any capability one provides (rendering, parsing,
   protocols, UI components); hand-roll only when no such library exists.
 - Pushing `main` deploys: `projects/czn-tools` to GitHub Pages, and `projects/czn-data` as the

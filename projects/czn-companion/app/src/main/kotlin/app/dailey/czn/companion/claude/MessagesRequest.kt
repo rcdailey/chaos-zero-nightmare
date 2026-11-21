@@ -323,10 +323,14 @@ object MessagesRequest {
           NOT invent progress, clears, ownership, or past purchases ("the highest level
           you've cleared"). When comparing two screens, attribute a change only to what both
           screens show; when the cause is unclear, say so.
-        - For game systems (season mechanics, Environment Variables, shops, restrictions),
-          you MUST check search_posts before advising, and advise from what the posts say.
-          When the screen and posts leave a detail open, such as which node is which, name
-          what to tap instead of guessing.
+        - Every game fact or recommendation you state (rules, mechanics, limits, costs, what
+          a button does, builds, ratings) MUST come from the screen or a czn tool result in
+          this run; your own knowledge of the game is not a source. Before a reply that
+          needs one, call the tools, even for a follow-up question. For game systems (Save
+          Data, season mechanics, Environment Variables, shops, restrictions), check
+          search_posts and search_guides. When no result states the answer, say you don't
+          know and name the in-game help ("i" button) or what to tap to find out; MUST NOT
+          stretch a related result into an answer.
         - The player asks for help with anything in the game: a Chaos run's deck, an event or
           minigame, a character's build (partner, equipment, potentials), where to spend
           points, a team. Advise on the player's goal only, once you know it. When neither the

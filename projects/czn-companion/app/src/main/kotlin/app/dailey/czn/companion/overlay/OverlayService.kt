@@ -11,6 +11,9 @@ import android.util.Log
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
+import android.view.WindowInsets
+import android.view.WindowInsetsAnimation
+import android.view.WindowInsetsAnimation.Callback.DISPATCH_MODE_STOP
 import android.view.WindowManager
 import android.view.WindowManager.LayoutParams
 import android.view.accessibility.AccessibilityEvent
@@ -26,6 +29,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import app.dailey.czn.companion.CompanionApp
 import app.dailey.czn.companion.CompanionTheme
 import app.dailey.czn.companion.claude.Screenshot
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.MainScope
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
@@ -34,6 +38,7 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
 import kotlin.math.max
 import kotlin.math.roundToInt
@@ -197,12 +202,39 @@ class OverlayService : AccessibilityService() {
     }
 
     private fun onSend(question: String) {
-        setPanelFocusable(false)
         scope.launch {
+            hideKeyboard()
+            setPanelFocusable(false)
             val screenshot = captureGame()
             openPanel()
             advice.ask(question, screenshot)
         }
+    }
+
+    /**
+     * Closes the keyboard, a system window that hiding the overlay leaves on screen, and waits up
+     * to [KEYBOARD_HIDE_MILLIS] for its closing animation to end, so screenshots show the game.
+     */
+    private suspend fun hideKeyboard() {
+        val view = overlay ?: return
+        if (view.rootWindowInsets?.isVisible(WindowInsets.Type.ime()) != true) return
+        val hidden = CompletableDeferred<Unit>()
+        view.setWindowInsetsAnimationCallback(
+            object : WindowInsetsAnimation.Callback(DISPATCH_MODE_STOP) {
+                override fun onProgress(
+                    insets: WindowInsets,
+                    running: List<WindowInsetsAnimation>,
+                ) = insets
+
+                override fun onEnd(animation: WindowInsetsAnimation) {
+                    if (animation.typeMask and WindowInsets.Type.ime() != 0) hidden.complete(Unit)
+                }
+            },
+        )
+        view.windowInsetsController?.hide(WindowInsets.Type.ime())
+        withTimeoutOrNull(KEYBOARD_HIDE_MILLIS) { hidden.await() }
+            ?: Log.w(TAG, "keyboard still closing at capture")
+        view.setWindowInsetsAnimationCallback(null)
     }
 
     /** Screenshot of the game alone: the app's windows are hidden while it is taken. */
@@ -389,5 +421,7 @@ class OverlayService : AccessibilityService() {
 
         /** Time for the hidden tab to leave the composited frame before the screenshot. */
         const val HIDE_SETTLE_MILLIS = 150L
+
+        const val KEYBOARD_HIDE_MILLIS = 1_000L
     }
 }

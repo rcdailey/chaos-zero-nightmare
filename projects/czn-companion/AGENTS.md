@@ -78,6 +78,9 @@ Verify each change at the cheapest level that exercises it:
 4. Emulator (KVM is available; `android emulator`, headless) only for the app's own screens.
 
 - Device waits: poll for the expected state (window focus, logcat line, capture) every second or
-  less with a timeout; never a fixed sleep longer than 2 seconds.
+  less with a timeout; never a fixed sleep longer than 2 seconds. To wait for advice, clear logcat
+  (`adb logcat -c`) before sending, then poll for `CznAdvice: reply done` and capture at once.
+- Tap in device pixels (`adb shell wm size`); a capture shown to you may be scaled down. The
+  overlay's touchable region is in `adb shell dumpsys window windows`.
 - `android layout` and `android input` selectors read accessibility nodes: they work on the app's
   screens, not the game's. In the game, drive input by screen coordinates from a capture.

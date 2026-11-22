@@ -49,6 +49,7 @@ from .render import render
 log = logging.getLogger(__name__)
 
 IDENTIFY_MAX_BYTES = 10 * 1024 * 1024
+LOG_ARGUMENT_CHARS = 500
 # Fields tools leave out of their replies: build bookkeeping (source: which scraper a merged row
 # came from), ids and slugs that only join tables, art URLs, and Prydwen's spelling of a name.
 INTERNAL_FIELDS = frozenset(
@@ -477,6 +478,33 @@ def _for_model(value: object) -> object:
     return value
 
 
+def _deck_duplicates(cards: list[dict], starting: set[str]) -> list[str]:
+    """The cards a deck holds more than one of, as "Sword Resonance x4: II x4 (3 Duplicates)".
+    A run gains a unique card once, so its further copies are Duplicates; starting cards (base
+    names in starting) can begin with several copies, so only their count is given."""
+    versions: dict[str, Counter] = {}
+    for card in cards:
+        name = card.get("name") or ""
+        base = re.sub(r"\s+(I|II|III|IV|V)$", "", name)
+        variant = name[len(base) :].strip() or "base"
+        versions.setdefault(base, Counter())[variant] += card.get("count") or 1
+    lines = []
+    for base, counts in versions.items():
+        total = sum(counts.values())
+        if total > 1:
+            held = ", ".join(f"{variant} x{n}" for variant, n in counts.items())
+            gained = "starting card" if base in starting else f"{total - 1} Duplicates"
+            lines.append(f"{base} x{total}: {held} ({gained})")
+    return lines
+
+
+def _log_arguments(arguments: dict) -> str:
+    """A tool call's arguments as one JSON string for its log line, cut to LOG_ARGUMENT_CHARS
+    so card text sent to match_card_text cannot flood the log."""
+    text = json.dumps({k: v for k, v in arguments.items() if v is not None}, default=str)
+    return text if len(text) <= LOG_ARGUMENT_CHARS else text[:LOG_ARGUMENT_CHARS] + "..."
+
+
 def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> MCPServer:
     mcp = MCPServer(
         "czn-data",
@@ -485,11 +513,24 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
     )
 
     def tool(function):
-        """Register function as an MCP tool whose reply is the plain text of its result."""
+        """Register function as an MCP tool whose reply is the plain text of its result. Every
+        call logs one ``tool call`` line: the tool, its arguments, seconds, and reply size, or
+        the error it failed with."""
 
         @functools.wraps(function)
         async def text_reply(*args, **kwargs) -> str:
-            return render(_for_model(await function(*args, **kwargs)))
+            started = time.monotonic()
+            fields = {"tool": function.__name__, "arguments": _log_arguments(kwargs)}
+            try:
+                reply = render(_for_model(await function(*args, **kwargs)))
+            except Exception as error:
+                fields |= {"seconds": round(time.monotonic() - started, 3), "error": str(error)}
+                level = logging.INFO if isinstance(error, ToolError) else logging.ERROR
+                log.log(level, "tool call failed", extra=fields, exc_info=level == logging.ERROR)
+                raise
+            fields |= {"seconds": round(time.monotonic() - started, 3), "reply_chars": len(reply)}
+            log.info("tool call", extra=fields)
+            return reply
 
         mcp.tool(structured_output=False)(text_reply)
         return function
@@ -516,9 +557,6 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
         return JSONResponse({"characters": rows})
 
     identifier = Identifier()
-    # One screenshot at a time: matching is CPU-bound, and parallel runs would each add the
-    # models' working memory.
-    identifying = anyio.Lock()
 
     @mcp.custom_route("/identify", methods=["POST"])
     async def identify(request: Request) -> JSONResponse:
@@ -542,8 +580,9 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
         prints = {row["name"]: row["print"] for row in rows}
         started = time.monotonic()
         try:
-            async with identifying:
-                figures = await anyio.to_thread.run_sync(identifier.identify, image, prints)
+            figures = await anyio.to_thread.run_sync(
+                identifier.identify, image, prints, limiter=search.MODELS
+            )
         except UnidentifiedImageError:
             return JSONResponse({"error": "body is not a readable image"}, 400)
         log.info(
@@ -950,7 +989,7 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
         )
 
     @tool
-    async def search_guides(query: str, limit: int = 5, offset: int = 0) -> dict:
+    async def search_guides(query: str, limit: int = 3, offset: int = 0) -> dict:
         """Search every scraped Prydwen page (guides, tier list, team database, character
         reviews and builds), split into sections. Use it for strategy and opinions the other
         tools do not cover. query: a question or words; results come best answer first,
@@ -1060,9 +1099,10 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
         return _by_source(_page(rows, limit, offset), source_fields)
 
     @tool
-    async def search_game_systems(query: str, limit: int = 5, offset: int = 0) -> dict:
+    async def search_game_systems(query: str, limit: int = 3, offset: int = 0) -> dict:
         """Search how the game works: the game's own Help topics and other rule text from its
-        data files (tutorial dialogue, event descriptions, popup messages), and Game8's
+        data files (tip pages such as the Chaos zone types, keyword tooltips such as Retain or
+        Weakness Attack, tutorial dialogue, event descriptions, popup messages), and Game8's
         guides, split into sections. Covers game systems (Save Data and its scoring, Build
         Presets, Distortion Adaptation, Epiphany, stress, Link Crash, potentials, gacha),
         Chaos modes, areas and Waypoints, Simulation and boss modes (Full-Scale Offensive,
@@ -1254,7 +1294,8 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
         5), with the share of decks that drop each; the Ego skill is never one. equipment: each
         item with its slot, the share of leaderboard decks wearing it, and how many Prydwen
         decks list it. prydwen_decks are Prydwen's decks, each with its deck code (to paste
-        into the game's deck import) when Prydwen gives one. Names are the game's; use
+        into the game's deck import) when Prydwen gives one, and duplicates: the cards the deck
+        holds more than one of, which are where its Duplicates go. Names are the game's; use
         get_card for card text."""
         found = await _find_character(character)
         if found is None:
@@ -1276,6 +1317,11 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
             f" {DECK_NOTES} AS notes, url FROM deck WHERE character_slug = %(slug)s",
             slug,
         )
+        starting = {c["card"] for c in cards if c.get("category") == "starting"}
+        starting |= {r["card"] for r in removals}
+        for deck in decks:
+            if duplicates := _deck_duplicates(deck.get("cards") or [], starting):
+                deck["duplicates"] = duplicates
         plan = {
             "character": found["name"],
             "season": season,

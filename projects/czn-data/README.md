@@ -251,9 +251,12 @@ The scraper exits non-zero on any failure, including a failed metrics export. It
 (`time`, `level`, `msg`, plus fields such as `url` and `error`) that vlagent maps to VictoriaLogs
 fields. A scrape logs `run started` first, then `reading robots.txt` and each `reading sitemap`,
 then `discovered pages` (`count`, and `due` to download), a `fetch progress` line about once a
-minute (`done`, `total`, `fetched`, `fetch_error`), and finally `run finished` and the metrics
-export outcome. Successful pages get no line of their own. Alert rules for vmalert are in
-[deploy/alerts.yaml](deploy/alerts.yaml).
+minute (`done`, `total`, `fetched`, `fetch_error`), and finally `run finished` (with `seconds`)
+and the metrics export outcome. Successful pages get no line of their own. A build logs `build
+finished` (`ok`, `seconds`). The server logs one `tool call` line per MCP tool call (`tool`,
+`arguments`, `seconds`, `reply_chars`), or `tool call failed` with `error`. The pod label
+`observability.home-ops/log-format: json` makes the collector read these fields. Alert rules for
+vmalert are in [deploy/alerts.yaml](deploy/alerts.yaml).
 
 At the end of each run the scraper sends its metrics once over OTLP/HTTP and waits for the
 receiver to accept them before it exits. The names below are the ones VictoriaMetrics stores

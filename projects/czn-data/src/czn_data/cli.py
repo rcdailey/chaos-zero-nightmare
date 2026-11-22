@@ -180,6 +180,10 @@ def _build_step() -> bool:
     started = time.time()
     with _connect() as conn:
         result = _build(conn)
+    logging.getLogger("czn_data").info(
+        "build finished",
+        extra={"ok": result is not None, "seconds": round(time.time() - started, 1)},
+    )
     exported = _export(lambda: export_metrics(result, started))
     return result is not None and exported
 
@@ -218,6 +222,7 @@ def _scrape_e7bot(allow_shrink: bool) -> bool:
         extra={
             "command": "scrape-e7bot",
             "ok": result.ok,
+            "seconds": round(time.time() - started, 1),
             "requests": dict(result.requests),
             "blocked": result.blocked,
             "validation_failures": dict(result.validation_failures),
@@ -241,6 +246,7 @@ def _scrape_stove(allow_shrink: bool) -> bool:
         extra={
             "command": "scrape-stove",
             "ok": result.ok,
+            "seconds": round(time.time() - started, 1),
             "requests": dict(result.requests),
             "articles": dict(result.articles),
             "blocked": result.blocked,
@@ -265,6 +271,7 @@ def _scrape_game8(allow_shrink: bool) -> bool:
         extra={
             "command": "scrape-game8",
             "ok": result.ok,
+            "seconds": round(time.time() - started, 1),
             "requests": dict(result.requests),
             "pages": dict(result.pages),
             "blocked": result.blocked,
@@ -289,6 +296,7 @@ def _scrape_gamefiles(allow_shrink: bool) -> bool:
         extra={
             "command": "scrape-gamefiles",
             "ok": result.ok,
+            "seconds": round(time.time() - started, 1),
             "requests": dict(result.requests),
             "files": dict(result.files),
             "blocked": result.blocked,
@@ -320,7 +328,12 @@ def _enrich() -> bool:
         compute_identities(conn, MODEL, Identifier().print_of, result)
     log.info(
         "run finished",
-        extra={"command": "enrich", "ok": result.ok, "failures": dict(result.failures)},
+        extra={
+            "command": "enrich",
+            "ok": result.ok,
+            "seconds": round(time.time() - started, 1),
+            "failures": dict(result.failures),
+        },
     )
     return _export(lambda: export_metrics(result, started)) and result.ok
 
@@ -345,6 +358,7 @@ def _prydwen(command: str, allow_shrink: bool) -> bool:
             extra={
                 "command": command,
                 "ok": result.ok,
+                "seconds": round(time.time() - started, 1),
                 "pages": dict(result.pages),
                 "fetches": dict(result.fetches),
                 "blocked": result.blocked,

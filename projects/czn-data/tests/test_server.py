@@ -587,6 +587,44 @@ def test_search_game_systems_serves_tutorial_event_and_message_text(call, conn):
     assert "Wibble OK" not in preset  # a label, not an explanation
 
 
+def test_search_game_systems_serves_tip_pages_and_keyword_tooltips(call, conn):
+    from czn_data.gamefiles import TEXT
+
+    add_game_files(
+        conn,
+        {
+            TEXT: [
+                {"id": "tt_pg@title@006", "text": "Waypoint Area"},
+                {"id": "tt_pg@desc@006", "text": "After the <cc>Waypoint</>, Save Data is saved."},
+                {"id": "tt_outgame@title@ref@savedata_018", "text": "Equipment Refinement"},
+                {"id": "tt_pg@desc@savedata@018", "text": "Refinement effects cost no points."},
+                {"id": "tt_outgame@title@ref@town_01", "text": "Ark City"},
+                {"id": "tt_outgame@desc@001", "text": "The ID Card shows Zorblax."},
+                {"id": "tooltip@title@talent_retain", "text": "Retain"},
+                {"id": "tooltip@desc@talent_retain", "text": "This card is not discarded."},
+                {"id": "tooltip@title@t_1025_c1", "text": "Quuxite"},
+            ]
+        },
+    )
+
+    waypoint = call("search_game_systems", query="waypoint area")
+    refinement = call("search_game_systems", query="equipment refinement points")
+    retain = call("search_game_systems", query="retain")
+
+    def first_page(reply: str) -> str:
+        return lines_with(reply, "; origin: ")[0]
+
+    assert first_page(waypoint).startswith("- Waypoint Area; origin: Game text, tip page")
+    assert "After the Waypoint, Save Data is saved." in waypoint
+    # A Save Data tip page takes its title from the matching reference title.
+    assert first_page(refinement).startswith("- Equipment Refinement; origin: Game text, tip page")
+    assert first_page(retain).startswith("- Retain; origin: Game text, keyword tooltip")
+    assert "This card is not discarded." in retain
+    # A title without a description, or a description without its own title, explains nothing.
+    everything = call("search_game_systems", query="quuxite zorblax ark city")
+    assert "Quuxite" not in everything and "Zorblax" not in everything
+
+
 def test_game_help_wins_a_tie_with_game8(call, conn):
     from czn_data.gamefiles import HELP_MENUS, HELP_PAGES, TEXT
 
@@ -909,6 +947,44 @@ def test_get_character_unknown_section_lists_the_real_ones(call):
     assert top_field(reply, "sections") is None
     assert "No section 'ratings'" in top_field(reply, "note")
     assert "Pros" in top_field(reply, "note")
+
+
+def test_plan_deck_names_where_each_decks_duplicates_go(call, conn):
+    # The fixture deck holds three Strikes, a starting card, which a deck can begin with.
+    starting = top_field(call("plan_deck", character="mei lin"), "prydwen_decks")
+    assert "duplicates: Strike x3: base x3 (starting card)" in starting
+
+    # The same deck holding two copies of a unique card instead: one is a Duplicate.
+    two_spires = CHARACTER_HTML.replace(
+        '<p class="name White">Strike</p></div>\n            '
+        '<span class="pw-card-count-badge-preview">x 2</span>',
+        '<p class="name White">Rising Dragon Spire IV</p></div>\n            '
+        '<span class="pw-card-count-badge-preview">x 2</span>',
+        1,
+    )
+    assert two_spires != CHARACTER_HTML
+    store.save_page(
+        conn,
+        CHARACTER_URL,
+        page_kind(CHARACTER_URL),
+        two_spires,
+        datetime.now(UTC),
+        parse_page(CHARACTER_URL, two_spires),
+        None,
+    )
+    unique = top_field(call("plan_deck", character="mei lin"), "prydwen_decks")
+    assert "Rising Dragon Spire x2: IV x2 (1 Duplicates)" in unique
+
+
+def test_every_tool_call_logs_its_tool_arguments_time_and_reply_size(call, caplog):
+    caplog.set_level("INFO", logger="czn_data.server")
+    reply = call("plan_deck", character="mei lin")
+    with pytest.raises(Exception, match="Unknown tool"):
+        call("no_such_tool")
+
+    (record,) = [r for r in caplog.records if r.getMessage() == "tool call"]
+    assert (record.tool, json.loads(record.arguments)) == ("plan_deck", {"character": "mei lin"})
+    assert record.reply_chars == len(reply) and record.seconds >= 0
 
 
 def test_plan_deck_for_unknown_character_says_no_match(call):

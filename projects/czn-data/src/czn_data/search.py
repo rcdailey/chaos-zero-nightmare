@@ -37,6 +37,11 @@ NAMED_MIN = 0.3
 NAMED_WEIGHT = 2.0
 _NAMED = "greatest(similarity(%(query)s, title), coalesce(similarity(%(query)s, heading), 0))"
 
+# One model run at a time in the server process, for searches and screenshot identification
+# alike: each parallel run adds about 80 MiB of working memory, and a companion turn's parallel
+# tool calls pushed the pod past its memory limit (OOM kill, 2026-11-22).
+MODELS = anyio.CapacityLimiter(1)
+
 # Sources from the game's own files: they describe the build the game runs now, so they count as
 # newer than every other source whatever their published_at (the time the files were fetched).
 GAME_SOURCES = ("help", "game_text")
@@ -96,7 +101,7 @@ async def search(
     each a passage row (source, key, position, title, heading, text, published_at) with its
     score. within, when given, limits the search to those (key, position) passages before
     candidates are picked, so a filter drops none of its matches."""
-    vector = await anyio.to_thread.run_sync(embed.query, query)
+    vector = await anyio.to_thread.run_sync(embed.query, query, limiter=MODELS)
     cursor = conn.cursor(row_factory=dict_row)
     params = {
         "sources": list(sources),
@@ -107,7 +112,7 @@ async def search(
     }
     rows = await (await cursor.execute(_CANDIDATES_SQL, params)).fetchall()
     texts = [f"{r['title']}\n{r['heading'] or ''}\n{r['text']}" for r in rows]
-    relevance = await anyio.to_thread.run_sync(rerank.scores, query, texts)
+    relevance = await anyio.to_thread.run_sync(rerank.scores, query, texts, limiter=MODELS)
     ages = sorted({age for row in rows if (age := _age(row)) is not None})
     for row, score in zip(rows, relevance, strict=True):
         age = _age(row)

@@ -384,7 +384,13 @@ TEXT_KINDS = {
     "tutorial": "tutorial dialogue",
     "event": "event description",
     "message": "game messages",
+    "tip": "tip page",
+    "keyword": "keyword tooltip",
 }
+# Title and description strings that pair into one GameText: the in-game tip pages (``tt_pg``,
+# such as the Chaos zone types; ``tt_outgame``, the menus' reference pages) and the keyword
+# tooltips (``tooltip``, such as Retain). Key: family -> TEXT_KINDS kind.
+TITLED_FAMILIES = {"tt_pg": "tip", "tt_outgame": "tip", "tooltip": "keyword"}
 
 
 # Messages shorter than this many words are labels and buttons, not explanations.
@@ -425,6 +431,10 @@ def game_texts(tables: dict[str, list[dict]]) -> list[GameText]:
     for script, lines in sorted(scripts.items()):
         text = "\n".join(line for _, line in sorted(lines))
         texts.append(GameText(f"tutorial:{script}", "Tutorial", text))
+    help_titles = set()
+    for topic in help_topics(tables):
+        help_titles |= {topic.title} | {title for title, _ in topic.pages if title}
+    texts.extend(_titled_texts(strings, help_titles))
     for feature, messages in sorted(features.items()):
         chunks: list[list[str]] = [[]]
         for message in messages:
@@ -435,6 +445,40 @@ def game_texts(tables: dict[str, list[dict]]) -> list[GameText]:
             GameText(f"message:{feature}:{n}", f"Messages: {feature}", "\n".join(chunk))
             for n, chunk in enumerate(chunks)
         )
+    return texts
+
+
+def _titled_texts(strings: dict[str, str], help_titles: set[str]) -> list[GameText]:
+    """Each TITLED_FAMILIES description with its title: ``<family>@desc@<key>`` pairs with
+    ``<family>@title@<key>``. Keys match after dropping ``ref@``, turning ``@`` into ``_`` and
+    leading zeros off numbers, so ``tt_pg@desc@savedata@001`` meets
+    ``tt_outgame@title@ref@savedata_1``; a tt_pg description without a tt_pg title takes the
+    tt_outgame one, where the game keeps the Save Data titles. Titles without a description
+    and descriptions without a title are left out, and so is a title already in help_titles
+    or taken by an earlier text: the in-game Help shows most tip pages again, whole."""
+
+    def key(rest: str) -> str:
+        rest = rest.removeprefix("ref@").replace("@", "_")
+        return re.sub(r"\d+", lambda number: str(int(number[0])), rest)
+
+    titles: dict[tuple[str, str], str] = {}
+    descriptions: dict[tuple[str, str], str] = {}
+    for string_id, text in strings.items():
+        found = re.fullmatch(r"([a-z_]+)@(title|desc)@(.+)", string_id)
+        if not found or found[1] not in TITLED_FAMILIES or not text.strip():
+            continue
+        side = titles if found[2] == "title" else descriptions
+        side[(found[1], key(found[3]))] = text
+    texts = []
+    taken = set(help_titles)
+    for (family, page), text in sorted(descriptions.items()):
+        title = titles.get((family, page))
+        if title is None and family == "tt_pg":
+            title = titles.get(("tt_outgame", page))
+        if title and title not in taken:
+            taken.add(title)
+            kind = TITLED_FAMILIES[family]
+            texts.append(GameText(f"{kind}:{family}:{page}", title, text))
     return texts
 
 

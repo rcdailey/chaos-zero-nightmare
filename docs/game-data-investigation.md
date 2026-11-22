@@ -49,6 +49,22 @@ partner that unlocks extra Epiphanies is equipped, and for close calls between s
 The game files may also hold run tables (events, item pools, drop odds) that Prydwen does not
 cover. Those tables were not inspected.
 
+### Known text gaps
+
+Checked 2026-11-22 against the English strings (`text/en/text.db`) and every scraped source, for
+topics the companion could not answer during a Chaos run:
+
+- Memory Atelier crafting and Memory Refinement: the strings name no Atelier, and every
+  Refinement string is about equipment or town research. Only one Stove post mentions the
+  Atelier. No source states crafting costs, refinement odds, or what Processing does.
+- Pacts: the strings hold only the pact picker's prompts ("Select a pact according to the
+  Revelation.", "All 2 types of pacts are engraved."), not what each pact does.
+- Overload: a status card and a monster gimmick title; no explanation in a tip page, keyword
+  tooltip, or Help topic.
+- Planned Revelation: the event's name and season skills that add Etched Memory searches; its
+  choices and rewards are only in Stove posts and Game8, which `search_posts` and
+  `search_game_systems` serve.
+
 ## How the game gets its data
 
 - The Android app (APK v1.0.853) ships no game data. After the first launch it downloads data

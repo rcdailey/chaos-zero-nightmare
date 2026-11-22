@@ -58,7 +58,11 @@ INTERNAL_FIELDS = frozenset(
 DECK_NOTES = r"regexp_replace(notes, '\s*Note: This is not an exhaustive list.*$', '', 's')"
 
 LOOKUP_SQL = """
-SELECT entity.* FROM (
+SELECT kind, name, summary, url, data_fetched_at FROM (
+SELECT entity.*, d.holds, d.described,
+       bool_or(d.holds OR d.described) OVER () AS any_close,
+       row_number() OVER (ORDER BY {match} DESC, {order}, name) AS rank
+FROM (
     SELECT 'character' AS kind, name, concat_ws(' ', rarity || '*', element, class) AS summary,
            url, data_fetched_at FROM character
     UNION ALL
@@ -100,14 +104,17 @@ SELECT entity.* FROM (
 , LATERAL (
     SELECT entity.kind = 'effect'
            AND to_tsvector('english', summary) @@ plainto_tsquery('english', %(name)s)
-           AS described
+           AS described,
+           name ILIKE '%%' || %(name)s || '%%' AS holds
 ) d
 WHERE (%(kind)s::text IS NULL OR entity.kind = %(kind)s)
   AND ({match} OR d.described)
--- Names holding the query first, then effects whose description uses it, then fuzzy name
--- matches: a loose spelling match ("Ionization" for "Polarization") must not outrank an effect
--- that is about the term.
-ORDER BY name ILIKE '%%' || %(name)s || '%%' DESC, d.described DESC, {match} DESC, {order}, name
+) found
+-- Fuzzy spelling matches only stand in for a typo: when a name holds the query or an effect's
+-- description uses it, a loose match ("Ionization" for "Polarization") is noise.
+WHERE holds OR described OR NOT any_close
+-- Names holding the query first, then effects whose description uses it.
+ORDER BY holds DESC, described DESC, rank
 LIMIT %(limit)s
 """
 # Which cards a Divine Epiphany applies to, as text: "Attack, Skill | cost 1".

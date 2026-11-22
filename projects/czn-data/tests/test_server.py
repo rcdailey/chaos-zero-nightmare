@@ -651,7 +651,12 @@ def test_lookup_accepts_keyword_as_effect_and_rejects_unknown_kinds(call, effect
 
 def test_lookup_finds_terms_defined_inside_other_effects(call, effects):
     found = lines_with(call("lookup", name="Polarization", kind="effect"), "- ")
-    assert found[0].startswith("- Equilux;")
+    assert [line.split(";")[0] for line in found] == ["- Equilux"]
+
+
+def test_lookup_falls_back_to_similar_spellings_only_when_nothing_else_matches(call, effects):
+    (found,) = lines_with(call("lookup", name="Ionizaton", kind="effect"), "- ")
+    assert found.startswith("- Ionization;")
 
 
 def test_get_partner_returns_ego_skill(call, conn):

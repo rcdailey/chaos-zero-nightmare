@@ -32,6 +32,7 @@ DERIVED_TABLES = (
     "partner_rank",
     "synergy",
     "banner",
+    "guide_section",
 )
 JSON_COLUMNS = {"sections", "stats", "bonuses", "cards", "slots"}
 

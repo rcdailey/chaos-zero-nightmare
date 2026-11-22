@@ -5,11 +5,16 @@ It only reads; give it a database role with SELECT rights. Tools read the merged
 directly. Results read from a stored record carry its URL and the time that data was fetched,
 so answers can be cited and checked for staleness.
 
+MCP tools serve Claude only: they reply in plain text (``czn_data.render``) without the fields
+only programs use (INTERNAL_FIELDS). Programs, such as the companion app, use the REST routes,
+which reply in JSON.
+
 Auth: the server is an OAuth 2.1 resource server. It validates JWT access tokens issued by an
 OIDC provider (``OIDC_ISSUER``) and advertises that provider to MCP clients such as claude.ai,
 which run the login flow themselves.
 """
 
+import functools
 import json
 import logging
 import os
@@ -38,10 +43,18 @@ from starlette.responses import JSONResponse
 from . import embed
 from .identity import MODEL as IDENTITY_MODEL
 from .identity import Identifier
+from .render import render
 
 log = logging.getLogger(__name__)
 
 IDENTIFY_MAX_BYTES = 10 * 1024 * 1024
+# Fields tools leave out of their replies: build bookkeeping (source: which scraper a merged row
+# came from), ids and slugs that only join tables, art URLs, and Prydwen's spelling of a name.
+INTERNAL_FIELDS = frozenset(
+    {"source", "game_id", "slug", "character_slug", "image_url", "prydwen_name"}
+)
+# Deck notes end with a disclaimer and the Team Database links that every deck repeats.
+DECK_NOTES = r"regexp_replace(notes, '\s*Note: This is not an exhaustive list.*$', '', 's')"
 
 LOOKUP_SQL = """
 SELECT entity.* FROM (
@@ -149,8 +162,8 @@ CHARACTER_SECTIONS = {
     "manifest_egos": "SELECT level, name, text, performance, review FROM manifest_ego"
     " WHERE character_slug = %(slug)s ORDER BY level",
     "teams": "SELECT name, tier, members FROM team WHERE character_slug = %(slug)s",
-    "decks": "SELECT name, code, farming_zone, partner, equipment, fragments, cards, notes"
-    " FROM deck WHERE character_slug = %(slug)s",
+    "decks": "SELECT name, code, farming_zone, partner, equipment, fragments, cards,"
+    f" {DECK_NOTES} AS notes FROM deck WHERE character_slug = %(slug)s",
     "equipment": "SELECT tab, best, slots, notes FROM character_equipment"
     " WHERE character_slug = %(slug)s",
     "seasonal_powers": "SELECT season, best, text FROM seasonal_power"
@@ -296,7 +309,8 @@ picks AS (
     FROM lb_picks l FULL JOIN pd_picks p ON p.base = l.base AND p.variant = l.variant
 )
 SELECT picks.base AS card, base.category, base.cost, base.color,
-       jsonb_agg(jsonb_strip_nulls(jsonb_build_object(
+       -- json, not jsonb, keeps the field order: the variant names each version.
+       json_agg(json_strip_nulls(json_build_object(
            'variant', coalesce(nullif(picks.variant, ''), 'base'),
            'rating', r.rating,
            'leaderboard_share', round(picks.lb_decks::numeric / nullif(total.n, 0), 2),
@@ -387,8 +401,20 @@ PAGE_CHARS = 15_000
 # characters); their descriptions state the number.
 LIST_PAGE = 30
 
-# Sections closest in meaning that search_posts merges with its word matches.
+# Sections closest in meaning that the search tools merge with their word matches.
 MEANING_CANDIDATES = 20
+# The guide sections (Game8 or Prydwen, as base) closest in meaning to the query, ranked. Equal
+# similarities share a rank, so a tie does not order sections by accident.
+_MEANING = f"""
+    SELECT url, position, rank FROM (
+        SELECT url, position, rank() OVER (ORDER BY similarity DESC NULLS LAST) AS rank
+        FROM base, LATERAL (
+            SELECT sum(a * b) AS similarity
+            FROM unnest(embedding, %(vector)s::real[]) AS pair(a, b)
+        ) s
+    ) ranked
+    WHERE rank <= {MEANING_CANDIDATES}
+"""
 # Weight of the newest-first ranking next to the two relevance rankings (each weight 1).
 RECENCY_WEIGHT = 0.5
 # Words players use that the official posts never do, mapped to the heading words the posts use
@@ -413,8 +439,8 @@ def _synonym_headings(query: str) -> str | None:
 
 LIST_ENCOUNTERS_SQL = f"""
 SELECT e.name, e.pack, e.chaos, e.any_chaos, e.reward_classes,
-       (SELECT jsonb_agg(jsonb_build_object('stage', o.stage, 'answer', o.text,
-                                            'gives', o.reward_classes)
+       (SELECT json_agg(json_build_object('answer', o.text, 'stage', o.stage,
+                                          'gives', o.reward_classes)
                          ORDER BY o.stage, o.position)
         FROM encounter_option o
         WHERE o.encounter_id = e.id
@@ -440,18 +466,23 @@ def _database_url() -> str:
 async def _query(sql: str, params: dict | None = None) -> list[dict]:
     async with await psycopg.AsyncConnection.connect(_database_url(), row_factory=dict_row) as conn:
         rows = await (await conn.execute(sql, params or {})).fetchall()
-    return [_jsonable(row) for row in rows]
+    return [_present(row) for row in rows]
 
 
-def _jsonable(row: dict) -> dict:
-    """Drop null and empty fields to save model tokens; keep 0 and False, which carry meaning.
-    Also drop source (which scraper a merged row came from): it is build bookkeeping that
-    tools selecting whole rows would otherwise pass to the model."""
-    return {
-        k: v.isoformat() if hasattr(v, "isoformat") else v
-        for k, v in row.items()
-        if k != "source" and v is not None and v != "" and v != [] and v != {}
-    }
+def _present(row: dict) -> dict:
+    """Drop null and empty fields to save model tokens; keep 0 and False, which carry meaning."""
+    return {k: v for k, v in row.items() if v is not None and v != "" and v != [] and v != {}}
+
+
+def _for_model(value: object) -> object:
+    """value without INTERNAL_FIELDS and null fields, at any depth."""
+    if isinstance(value, dict):
+        return {
+            k: _for_model(v) for k, v in value.items() if k not in INTERNAL_FIELDS and v is not None
+        }
+    if isinstance(value, list):
+        return [_for_model(item) for item in value]
+    return value
 
 
 def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> MCPServer:
@@ -461,9 +492,36 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
         token_verifier=verifier,
     )
 
+    def tool(function):
+        """Register function as an MCP tool whose reply is the plain text of its result."""
+
+        @functools.wraps(function)
+        async def text_reply(*args, **kwargs) -> str:
+            return render(_for_model(await function(*args, **kwargs)))
+
+        mcp.tool(structured_output=False)(text_reply)
+        return function
+
     @mcp.custom_route("/healthz", methods=["GET"])
     async def healthz(request: Request) -> JSONResponse:
         return JSONResponse({"status": "ok"})
+
+    async def authorized(request: Request) -> bool:
+        """Custom routes are outside the MCP auth middleware: they take the same Bearer token,
+        checked here."""
+        if verifier is None:
+            return True
+        token = request.headers.get("authorization", "").removeprefix("Bearer ").strip()
+        return bool(token) and await verifier.verify_token(token) is not None
+
+    @mcp.custom_route("/characters", methods=["GET"])
+    async def characters(request: Request) -> JSONResponse:
+        """REST endpoint for the companion app: every character's name and card art URL, by
+        name."""
+        if not await authorized(request):
+            return JSONResponse({"error": "invalid or missing Bearer token"}, 401)
+        rows = await _query("SELECT name, image_url FROM character ORDER BY name")
+        return JSONResponse({"characters": rows})
 
     identifier = Identifier()
     # One screenshot at a time: matching is CPU-bound, and parallel runs would each add the
@@ -474,12 +532,9 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
     async def identify(request: Request) -> JSONResponse:
         """REST endpoint for the companion app: names the characters on a game screenshot (see
         ``czn_data.identity``). The body is the JPEG or PNG; the Bearer token is the same one
-        the MCP endpoint takes. Custom routes are outside the MCP auth middleware, so the token
-        is checked here."""
-        if verifier is not None:
-            token = request.headers.get("authorization", "").removeprefix("Bearer ").strip()
-            if not token or await verifier.verify_token(token) is None:
-                return JSONResponse({"error": "invalid or missing Bearer token"}, 401)
+        the MCP endpoint takes (see authorized)."""
+        if not await authorized(request):
+            return JSONResponse({"error": "invalid or missing Bearer token"}, 401)
         if request.headers.get("content-type") not in ("image/jpeg", "image/png"):
             return JSONResponse({"error": "send the screenshot as image/jpeg or image/png"}, 400)
         image = await request.body()
@@ -511,7 +566,7 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
             {"model": IDENTITY_MODEL, "characters": [asdict(figure) for figure in figures]}
         )
 
-    @mcp.tool()
+    @tool
     async def lookup(name: str, kind: LookupKind | None = None, limit: int = 10) -> list[dict]:
         """Fuzzy-find any named game entity, tolerant of typos and partial names. Use it first
         for any name read from the screen, then the specific tools for details.
@@ -531,7 +586,7 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
         kind = LOOKUP_KIND_ALIASES.get(kind, kind) if kind else None
         return await _query(LOOKUP_SQL, {"name": name, "kind": kind, "limit": min(limit, 50)})
 
-    @mcp.tool()
+    @tool
     async def get_partner(name: str) -> dict | None:
         """The best-matching partner: rarity, class, passive, EGO skill (name, EP cost, text)
         and base stats. Use recommended_by for which characters' guides rank it. The
@@ -542,7 +597,7 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
         )
         return found[0] if found else None
 
-    @mcp.tool()
+    @tool
     async def get_card(name: str) -> list[dict]:
         """Every version of the best-matching card: the base card and its Epiphany variants
         (I-V), each with full text, cost, tags, Prydwen's star rating (1 to 5) and its own
@@ -564,7 +619,7 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
             {"name": name},
         )
 
-    @mcp.tool()
+    @tool
     async def get_character(name: str, section: str | None = None) -> dict | None:
         """Profile of the best-matching character. Without section: rarity, element, class,
         gender (from the game data; for characters only Prydwen has, judged from the art by an
@@ -608,7 +663,7 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
         missing = f"No section {section!r}. Sections: {', '.join(available)}."
         return header | {"note": " ".join(filter(None, [header.get("note"), missing]))}
 
-    @mcp.tool()
+    @tool
     async def match_card_text(
         texts: list[str], character: str | None = None, limit: int = 3
     ) -> list[dict]:
@@ -655,15 +710,16 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
         rows.sort(key=lambda row: -row["match"])
         return rows[:limit]
 
-    @mcp.tool()
-    async def find_teams(character: str) -> list[dict]:
-        """Up to 30 teams that include the best-matching character: first teams in Prydwen's
-        guides (name, tier, members, listed_for: the characters whose pages list it), then
-        lineups of the newest leaderboard season (season, members, teams: how many ranked teams
-        used the lineup, best_rank), most used first. Use it for "which
+    @tool
+    async def find_teams(character: str) -> dict | None:
+        """Up to 30 teams that include the best-matching character, in two lists:
+        prydwen_teams, the teams in Prydwen's guides (name, tier, members, listed_for: the
+        characters whose pages list it), and leaderboard, the lineups of the newest
+        leaderboard season (season, members, teams: how many ranked teams used the lineup,
+        best_rank), most used first. Use it for "which
         team should X be in"; synergies ranks single characters to pair with X, with reasons;
         get_character section teams lists only the teams on X's own guide page."""
-        return await _query(
+        found = await _query(
             f"""
             WITH member AS (
                 SELECT name FROM (
@@ -701,16 +757,22 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
             """,
             {"name": character},
         )
+        # Two lists, so each states once what all its rows share (season, source page).
+        return {
+            group: [{k: v for k, v in row.items() if k != "source"} for row in rows]
+            for group, source in (("prydwen_teams", "prydwen"), ("leaderboard", "leaderboard"))
+            if (rows := [row for row in found if row["source"] == source])
+        } or None
 
-    @mcp.tool()
+    @tool
     async def list_characters(
         gender: str | None = None,
         element: str | None = None,
         character_class: str | None = None,
         rarity: int | None = None,
     ) -> list[dict]:
-        """Every character, one short line each (name, rarity, element, class, gender, card art
-        image_url), optionally filtered: gender female or male, element (Passion, Justice,
+        """Every character, one short line each (name, rarity, element, class, gender),
+        optionally filtered: gender female or male, element (Passion, Justice,
         Order, Void, Instinct), character_class (Striker, Vanguard, Ranger, Hunter, Controller,
         Psionic), rarity 4 or 5. It cannot tell who a portrait on a game screen shows; the
         companion app names those from the screenshot."""
@@ -719,7 +781,7 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
             {"gender": gender, "element": element, "class": character_class, "rarity": rarity},
         )
 
-    @mcp.tool()
+    @tool
     async def synergies(character: str) -> list[dict]:
         """Characters Prydwen's guides recommend using with the best-matching character, best
         supported first. sources says where each is named: the character's own synergy list
@@ -728,7 +790,7 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
         use with X"; find_teams gives whole lineups, including leaderboard ones."""
         return await _query(SYNERGIES_SQL, {"name": character})
 
-    @mcp.tool()
+    @tool
     async def recommended_by(name: str) -> list[dict]:
         """Which characters' guides recommend the best-matching equipment item, memory
         fragment set, or partner, and where: deck, equipment tab, fragment or partner
@@ -744,6 +806,18 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
             {"name": name},
         )
         return found[0] if found else None
+
+    def _by_source(listing: dict, source_fields: tuple[str, ...]) -> dict:
+        """listing with its section rows grouped under the post or page they come from (the
+        source_fields every section of it repeats), in order of each source's best section."""
+        groups: dict[tuple, dict] = {}
+        for row in listing["results"]:
+            key = tuple(row.get(field) for field in source_fields)
+            group = groups.setdefault(
+                key, {f: row[f] for f in source_fields if f in row} | {"sections": []}
+            )
+            group["sections"].append({k: v for k, v in row.items() if k not in source_fields})
+        return listing | {"results": list(groups.values())}
 
     async def _listing(sql: str, params: dict, offset: int | None = None) -> dict:
         """A list tool's reply: total matches, and the rows shown. offset is given by tools
@@ -770,7 +844,7 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
             )
         return reply
 
-    @mcp.tool()
+    @tool
     async def list_cards(
         character: str | None = None,
         category: str | None = None,
@@ -823,7 +897,7 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
             listing["note"] = f"No cards for {found['name']} in either source yet."
         return listing
 
-    @mcp.tool()
+    @tool
     async def list_equipment(
         slot: str | None = None,
         rarity: str | None = None,
@@ -867,39 +941,72 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
             offset=offset,
         )
 
-    @mcp.tool()
-    async def search_guides(query: str, limit: int = 5) -> list[dict]:
-        """Full-text search over every scraped Prydwen page (guides, tier list, team database,
-        character reviews). Returns the best pages with highlighted excerpts; get_page reads
-        a page's text in parts. Use it for strategy and opinions the other tools do not cover;
-        official news, events and patch notes are in search_posts, and how game systems and
-        modes work in search_game_systems. limit is at most 20."""
-        return await _query(
-            """
-            SELECT url, title, page.data_fetched_at,
-                   ts_headline('english', body, q,
-                       'MaxFragments=3, MaxWords=40, MinWords=10') AS excerpt
-            -- Any query word matches (players name things the guides never do, such as the
-            -- Policy Office). Pages with more of the query's words come first; ts_rank alone
-            -- would put a page repeating one common word ("team") above one with every word.
-            -- Ties rank by the all-words query, which favors the words appearing close
-            -- together over one of them repeating.
-            FROM prydwen.document JOIN prydwen.page USING (url),
-                 CAST(replace(plainto_tsquery('english', %(q)s)::text, '&', '|') AS tsquery) q,
-                 websearch_to_tsquery('english', %(q)s) every_word,
-                 LATERAL (
-                     SELECT count(*) AS matched
-                     FROM unnest(tsvector_to_array(to_tsvector('english', %(q)s))) word
-                     WHERE search @@ quote_literal(word)::tsquery
-                 ) m
-            WHERE search @@ q
-            ORDER BY matched DESC, ts_rank(search, every_word) DESC, ts_rank(search, q) DESC
-            LIMIT %(limit)s
+    @tool
+    async def search_guides(query: str, limit: int = 5, offset: int = 0) -> dict:
+        """Search every scraped Prydwen page (guides, tier list, team database, character
+        reviews and builds), split into sections. Use it for strategy and opinions the other
+        tools do not cover; official news, events and patch notes are in search_posts, and how
+        game systems and modes work in search_game_systems. query: a question or words;
+        matches the sections' words and their page titles, and sections close in meaning.
+        results groups the matching sections by page (page_title, url); each section has its
+        heading ("A > B"), text, and offset and length (where text sits in get_page's body;
+        read around it when a section refers to another one). total counts every matching
+        section; offset pages through them (at most 20 sections per call)."""
+        vector = await anyio.to_thread.run_sync(embed.query, query)
+        # Words and meaning merged by reciprocal rank fusion, as in search_game_systems. Any
+        # query word matches (players name things the guides never do, such as the Policy
+        # Office). In the words ranking, sections with more of the query's words come first;
+        # ts_rank alone would put a section repeating one common word ("team") above one with
+        # every word. Ties rank by the all-words query, which favors the words appearing close
+        # together over one of them repeating. A section's page title counts as its words, so
+        # "Rossweisse partners" finds the Best Partners section of Rossweisse's page.
+        listing = await _listing(
+            f"""
+            WITH base AS (
+                SELECT s.*, d.title, p.data_fetched_at,
+                       s.search || to_tsvector('english', d.title) AS words_in
+                FROM guide_section s JOIN prydwen.document d USING (url)
+                     JOIN prydwen.page p USING (url)
+            ),
+            words AS (
+                SELECT url, position,
+                       row_number() OVER (ORDER BY matched DESC,
+                           ts_rank(words_in, every_word) DESC, ts_rank(words_in, q) DESC,
+                           url, position) AS rank
+                FROM base,
+                     CAST(replace(plainto_tsquery('english', %(words)s)::text, '&', '|')
+                          AS tsquery) q,
+                     websearch_to_tsquery('english', %(words)s) every_word,
+                     LATERAL (
+                         SELECT count(*) AS matched
+                         FROM unnest(tsvector_to_array(to_tsvector('english', %(words)s))) word
+                         WHERE words_in @@ quote_literal(word)::tsquery
+                     ) m
+                WHERE words_in @@ q
+            ),
+            meaning AS ({_MEANING}),
+            fused AS (
+                SELECT url, position, sum(1.0 / (60 + rank)) AS score
+                FROM (SELECT * FROM words UNION ALL SELECT * FROM meaning) ranked
+                GROUP BY url, position
+            )
+            SELECT title AS page_title, heading, text, url, "offset", length, data_fetched_at,
+                   count(*) OVER () AS total
+            FROM base JOIN fused USING (url, position)
+            ORDER BY fused.score DESC, url, position
+            LIMIT %(limit)s OFFSET %(offset)s
             """,
-            {"q": query, "limit": max(1, min(limit, 20))},
+            {
+                "words": query,
+                "vector": vector,
+                "limit": max(1, min(limit, 20)),
+                "offset": max(offset, 0),
+            },
+            offset=max(offset, 0),
         )
+        return _by_source(listing, ("page_title", "url", "data_fetched_at"))
 
-    @mcp.tool()
+    @tool
     async def list_banners() -> list[dict]:
         """Gacha banners that are live or upcoming, from Prydwen's banner schedule (Global
         server): name, kind (character or partner), rarity, rerun, season phase, start and end
@@ -915,7 +1022,7 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
             """
         )
 
-    @mcp.tool()
+    @tool
     async def search_posts(
         query: str | None = None, active_on: str | None = None, limit: int = 5, offset: int = 0
     ) -> dict:
@@ -925,11 +1032,12 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
         rewards; list_banners gives the banner schedule itself. query: a question or words;
         matches the posts' words, titles and headings (typos tolerated), and sections close in
         meaning. active_on: a date (YYYY-MM-DD, or today) to get only sections whose period
-        covers it, which answers "what events are on now". Give either or both. Each result
-        has the post title, board, posted_at, the section heading ("■ Section > ◆
-        Subsection"), its full text, its period (starts_on, ends_on) when the post gives one,
-        and the post url. Images in posts (some calendars) are not included. total counts
-        every match; offset pages through them (at most 20 per call)."""
+        covers it, which answers "what events are on now". Give either or both. results
+        groups the matching sections by post (post title, board, posted_at, url); each
+        section has its heading ("■ Section > ◆ Subsection"), its full text, and its period
+        (starts_on, ends_on) when the post gives one. Images in posts (some calendars) are not
+        included. total counts every matching section; offset pages through them (at most 20
+        sections per call)."""
         if query is None and active_on is None:
             raise ToolError("Give query, active_on, or both.")
         day = None
@@ -944,7 +1052,7 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
         vector = await anyio.to_thread.run_sync(embed.query, query) if query else None
         # Two rankings merged by reciprocal rank fusion: sections matching the query's words
         # (or, with typos, a title or heading), and the sections closest in meaning.
-        return await _listing(
+        listing = await _listing(
             f"""
             WITH base AS (
                 SELECT * FROM post_section
@@ -965,14 +1073,16 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
                   AND (search @@ q OR {_name_match("post_title")} OR {_name_match("heading")})
             ),
             meaning AS (
-                SELECT article_id, position, row_number() OVER (ORDER BY similarity DESC) AS rank
-                FROM base, LATERAL (
-                    SELECT sum(a * b) AS similarity
-                    FROM unnest(embedding, %(vector)s::real[]) AS pair(a, b)
-                ) s
-                WHERE %(vector)s::real[] IS NOT NULL
-                ORDER BY similarity DESC NULLS LAST
-                LIMIT {MEANING_CANDIDATES}
+                SELECT article_id, position, rank FROM (
+                    SELECT article_id, position,
+                           rank() OVER (ORDER BY similarity DESC NULLS LAST) AS rank
+                    FROM base, LATERAL (
+                        SELECT sum(a * b) AS similarity
+                        FROM unnest(embedding, %(vector)s::real[]) AS pair(a, b)
+                    ) s
+                    WHERE %(vector)s::real[] IS NOT NULL
+                ) ranked
+                WHERE rank <= {MEANING_CANDIDATES}
             ),
             synonyms AS (
                 SELECT article_id, position,
@@ -1012,8 +1122,9 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
             },
             offset=max(offset, 0),
         )
+        return _by_source(listing, ("post_title", "board", "posted_at", "url", "data_fetched_at"))
 
-    @mcp.tool()
+    @tool
     async def search_game_systems(query: str, limit: int = 5, offset: int = 0) -> dict:
         """Search Game8's guides on how the game works, split into sections: game systems
         (Save Data, Distortion Adaptation, Epiphany, stress, Link Crash, potentials, gacha),
@@ -1021,16 +1132,17 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
         events, seasons, missions, and a glossary. Use it for "how does X work" and "what is
         X"; characters, cards and equipment are in the other tools. query: a question or
         words; matches words, page titles and headings (typos tolerated), and sections close
-        in meaning. Each result is one section: page_title, heading (its parent headings, "A
-        > B"), text, page_summary (the page's opening), updated_at (when Game8 last updated
-        the page), url, and offset and length (where text sits in get_page's body; read
-        around it when a section refers to another one). Game8 pages can be out of date: the
-        official posts (search_posts) win when they disagree. total counts every match;
-        offset pages through them (at most 20 per call)."""
+        in meaning. results groups the matching sections by page (page_title, page_summary:
+        the page's opening, updated_at: when Game8 last updated it, url); each section has its
+        heading (its parent headings, "A > B"), text, and offset and length (where text sits
+        in get_page's body; read around it when a section refers to another one). Game8 pages
+        can be out of date: the official posts (search_posts) win when they disagree. total
+        counts every matching section; offset pages through them (at most 20 sections per
+        call)."""
         vector = await anyio.to_thread.run_sync(embed.query, query)
         # Ranked like search_posts: words, titles and headings, and meaning, merged by
         # reciprocal rank fusion; newer pages win close calls.
-        return await _listing(
+        listing = await _listing(
             f"""
             WITH base AS (
                 SELECT s.*, p.title, p.summary, p.updated_at, p.data_fetched_at
@@ -1047,15 +1159,7 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
                           AS tsquery) q
                 WHERE search @@ q OR {_name_match("title")} OR {_name_match("heading")}
             ),
-            meaning AS (
-                SELECT url, position, row_number() OVER (ORDER BY similarity DESC) AS rank
-                FROM base, LATERAL (
-                    SELECT sum(a * b) AS similarity
-                    FROM unnest(embedding, %(vector)s::real[]) AS pair(a, b)
-                ) s
-                ORDER BY similarity DESC NULLS LAST
-                LIMIT {MEANING_CANDIDATES}
-            ),
+            meaning AS ({_MEANING}),
             relevance AS (
                 SELECT url, position, sum(1.0 / (60 + rank)) AS score
                 FROM (SELECT * FROM words UNION ALL SELECT * FROM meaning) ranked
@@ -1082,8 +1186,11 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
             },
             offset=max(offset, 0),
         )
+        return _by_source(
+            listing, ("page_title", "page_summary", "updated_at", "url", "data_fetched_at")
+        )
 
-    @mcp.tool()
+    @tool
     async def get_page(url: str, offset: int = 0, length: int = PAGE_CHARS) -> dict | None:
         """Text of one scraped page, by URL: a prydwen.gg URL from search_guides or another
         tool (url or prydwen_url), or a game8.co URL from search_game_systems. Other URLs
@@ -1114,7 +1221,7 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
             )
         return page
 
-    @mcp.tool()
+    @tool
     async def data_status() -> dict:
         """Freshness of each source. prydwen: page counts, oldest and newest fetch times, and
         pages whose latest version failed to parse. e7bot: when the served game data was
@@ -1175,7 +1282,7 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
             "game8": game8[0],
         }
 
-    @mcp.tool()
+    @tool
     async def plan_deck(character: str) -> dict | None:
         """Plan the one character's deck to build this Chaos run (players build one per run;
         copy events are too rare for two). Uses the newest leaderboard season's Save Data decks
@@ -1204,8 +1311,8 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
         removals = await _query(PLAN_REMOVALS_SQL, params)
         equipment = await _query(PLAN_EQUIPMENT_SQL, params)
         decks = await _query(
-            "SELECT name, code, farming_zone, partner, equipment, fragments, cards, notes, url"
-            " FROM deck WHERE character_slug = %(slug)s",
+            "SELECT name, code, farming_zone, partner, equipment, fragments, cards,"
+            f" {DECK_NOTES} AS notes, url FROM deck WHERE character_slug = %(slug)s",
             slug,
         )
         plan = {
@@ -1224,7 +1331,7 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
             )
         return plan
 
-    @mcp.tool()
+    @tool
     async def get_encounter(name: str, chaos: str | None = None) -> dict | None:
         """The best-matching Chaos event (question-mark node) by name, with every stage it can
         reach. stages: each stage's answers with requirements, what each gives (rewards:
@@ -1244,6 +1351,9 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
         )
         stages: dict[int, list[dict]] = {}
         for option in options:
+            # type is the game's reward code, which class and text already state.
+            for reward in option.get("rewards", []):
+                reward.pop("type", None)
             stages.setdefault(option.pop("stage"), []).append(option)
         event = found[0]
         del event["id"]
@@ -1251,7 +1361,7 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
             "stages": [{"stage": n, "answers": answers} for n, answers in stages.items()]
         }
 
-    @mcp.tool()
+    @tool
     async def list_encounters(
         chaos: str | None = None,
         reward: Literal["copy", "removal", "epiphany", "divine_epiphany", "equipment", "card"]
@@ -1269,7 +1379,7 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
         params = {"chaos": await _resolve_chaos(chaos), "reward": reward, "offset": offset}
         return await _listing(LIST_ENCOUNTERS_SQL, params, offset=offset)
 
-    @mcp.tool()
+    @tool
     async def list_divine_epiphanies(
         card_type: str | None = None,
         cost: int | None = None,
@@ -1279,11 +1389,10 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
         """Divine Epiphanies that can be added to a card: optionally only those that apply to a
         card type (Attack, Skill, Upgrade) and a card cost, or that a god offers (Vitor,
         Caligo, Circen, Diallos, Nihilum, Secred). Each has its effect text, the card types and
-        cost range it applies to (applies_to), and the gods that offer it; url and
-        data_fetched_at, shared by all, are given once. total counts every match; results
-        holds 30 from offset, and note says how to read on."""
+        cost range it applies to (applies_to), and the gods that offer it. total counts every
+        match; results holds 30 from offset, and note says how to read on."""
         offset = max(offset, 0)
-        reply = await _listing(
+        return await _listing(
             f"""
             SELECT text, {DIVINE_APPLIES} AS applies_to, gods, rarities, url,
                    data_fetched_at, count(*) OVER () AS total
@@ -1299,11 +1408,6 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
             {"type": card_type, "cost": cost, "god": god, "offset": offset},
             offset=offset,
         )
-        for row in reply["results"]:
-            for shared in ("url", "data_fetched_at"):
-                if shared in row:
-                    reply[shared] = row.pop(shared)
-        return reply
 
     async def _resolve_chaos(name: str | None) -> str | None:
         """The Chaos name the data uses for name; an unknown name raises an error listing the

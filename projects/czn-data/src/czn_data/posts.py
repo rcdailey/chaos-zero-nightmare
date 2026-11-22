@@ -24,7 +24,7 @@ from itertools import pairwise
 from bs4 import BeautifulSoup
 from dateutil import parser as dateparser
 
-from .parse import text_of
+from .text import text_of
 
 # Longest section kept whole; longer ones become chunks of about this size, each repeating the
 # last OVERLAP_CHARS of lines of the one before, so a fact split across chunks is still found.

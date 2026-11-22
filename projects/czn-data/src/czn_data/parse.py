@@ -17,7 +17,10 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from urllib.parse import urlparse
 
-from bs4 import BeautifulSoup, Comment, Tag
+from bs4 import BeautifulSoup, Tag
+
+from .sections import GuidePage, split_at_headings
+from .text import text_of
 
 GAME_PATH = "/chaos-zero-nightmare"
 
@@ -72,10 +75,11 @@ def parse_page(url: str, html: str) -> ParsedPage:
     soup = BeautifulSoup(html, "lxml")
     for tag in soup(["script", "style", "noscript", "template"]):
         tag.decompose()
-    root = _content_root(soup)
-    page = ParsedPage(title=_title(soup, root), body=text_of(root, separate_spans=True))
-    if not page.body:
+    root = content_root(soup)
+    guide = _split_page(url, root, page_title(soup, root))
+    if not guide.sections and not guide.summary:
         raise ParseError("document.body", "page has no text content")
+    page = ParsedPage(guide.title, guide.body)
     kind = page_kind(url)
     if kind == "partners":
         page.records = parse_partners(html)
@@ -83,40 +87,26 @@ def parse_page(url: str, html: str) -> ParsedPage:
         page.records = parser(root, url)
     if kind == "character":
         _add_deck_codes(page.records.get("deck", []), html)
+    page.records["guide_section"] = [vars(section) for section in guide.sections]
     return page
 
 
-def text_of(el: Tag | None, separate_spans: bool = False) -> str:
-    """Visible text with line breaks kept at block boundaries and spacing normalized.
-
-    separate_spans puts a space after every span. Prydwen lays out table-like rows as adjacent
-    spans ("Scarlet", "E4") that otherwise fuse ("ScarletE4"), which full-text search cannot
-    find; field values keep spans joined, since their inline markup can split one word."""
-    if el is None:
-        return ""
-    el = copy.copy(el)
-    # Source line breaks are layout-insignificant, as in a browser; breaks come from markup.
-    for string in el.find_all(string=True):
-        if isinstance(string, Comment):
-            string.extract()
-        else:
-            string.replace_with(re.sub(r"\s+", " ", string))
-    for br in el.find_all("br"):
-        br.replace_with("\n")
-    for block in el.find_all(["p", "div", "li", "tr", "h1", "h2", "h3", "h4", "h5", "h6"]):
-        block.insert_before("\n")
-        block.insert_after("\n")
-    for cell in el.find_all(["td", "th"]):
-        cell.insert_after(" | ")
-    if separate_spans:
-        for span in el.find_all("span"):
-            span.insert_after(" ")
-    text = el.get_text().replace("\u200b", "")
-    lines = (re.sub(r"[ \t\xa0]+", " ", line).strip(" |") for line in text.split("\n"))
-    return "\n".join(line for line in lines if line)
+def _split_page(url: str, root: Tag, title: str) -> GuidePage:
+    """The page's text split at its h2 and h3 headings; deeper headings are labels inside a
+    section (a deck's setup and cards). On character pages every h3 follows one h2 ("Tiphera
+    Introduction") without belonging to it, so there both are top-level headings. Text before
+    the h1 is the site's menu and is dropped; every Prydwen page has one h1 (2026-11)."""
+    root = copy.copy(root)
+    if h1 := root.find("h1"):
+        for before in h1.find_all_previous(string=True):
+            if root in before.parents:
+                before.extract()
+        h1.decompose()
+    levels = {"h2": 0, "h3": 0 if page_kind(url) == "character" else 1}
+    return split_at_headings(root, title, levels, separate_spans=True)
 
 
-def _content_root(soup: BeautifulSoup) -> Tag:
+def content_root(soup: BeautifulSoup) -> Tag:
     # Next.js streams the page body into a hidden Suspense container; fall back to <body>.
     root = soup.find(id="S:1") or soup.find("main") or soup.body
     if root is None:
@@ -126,7 +116,7 @@ def _content_root(soup: BeautifulSoup) -> Tag:
     return root
 
 
-def _title(soup: BeautifulSoup, root: Tag) -> str:
+def page_title(soup: BeautifulSoup, root: Tag) -> str:
     h1 = root.find("h1")
     if h1:
         return text_of(h1).replace("\n", " ")

@@ -47,3 +47,5 @@ passes Claude each tool's name, description, and parameter schema, and documents
   while advising in the app, such as reading screenshots, run flow, reply format, and rules that
   span all czn tool results.
 - MUST NOT set MCP server `instructions`; put the guidance in one of the places above.
+- MCP tools serve Claude only and reply in plain text; programs MUST call REST routes, which reply
+  in JSON (`projects/czn-data/README.md`).

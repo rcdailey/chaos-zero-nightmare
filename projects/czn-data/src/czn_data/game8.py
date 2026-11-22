@@ -25,10 +25,11 @@ from opentelemetry.metrics import Meter
 
 from . import metrics
 from .fetch import Blocked, FetchFailed, sitemap_date
-from .parse import ParseError, text_of
-from .posts import chunk_lines
+from .parse import ParseError
 from .scrape import MAX_AGE
+from .sections import GuidePage, split_at_headings
 from .store import SHRINK_LIMIT
+from .text import text_of
 
 log = logging.getLogger(__name__)
 
@@ -70,12 +71,7 @@ NOT_SYSTEM_GUIDE = re.compile(
     re.IGNORECASE,
 )
 CONTENT = ".archive-style-wrapper"
-# Sections that only link to other pages.
-NAVIGATION = re.compile(r"Related Guides", re.IGNORECASE)
 _HEADING_LEVELS = {"h2": 0, "h3": 1, "h4": 2}
-# Marks heading lines through text_of; a private-use character, since it treats control
-# characters as spaces.
-_MARK = "\ue000"
 
 
 @dataclass
@@ -218,33 +214,9 @@ def _store_pages(conn, get, selected: set[str], listed: dict, allow_shrink: bool
         result.pages["removed"] += len(removed)
 
 
-@dataclass
-class GuideSection:
-    """One section of a page, or one piece of a long one: ``heading`` names its parents
-    ("A > B > C"); ``offset`` and ``length`` locate ``text`` in the page's ``body``."""
-
-    position: int
-    heading: str
-    text: str
-    offset: int
-    length: int
-
-
-@dataclass
-class GuidePage:
-    """A page as search serves it: ``summary`` is its text before the first heading, ``body``
-    the whole text (title, summary, then each section under its heading path)."""
-
-    title: str
-    summary: str
-    body: str
-    sections: list[GuideSection]
-
-
 def split_page(html: str) -> GuidePage:
-    """Split a page at its headings (h2 to h4). Tables become one line per row, the table of
-    contents and the related-guide link lists are dropped, and a section longer than
-    ``posts.MAX_CHARS`` becomes overlapping pieces."""
+    """Split a page at its headings (h2 to h4; see ``czn_data.sections``). Tables become one
+    line per row, and the table of contents is dropped."""
     soup = BeautifulSoup(html, "lxml")
     titled = soup.select_one("h1.p-archiveHeader__title") or soup.find("h1")
     title = text_of(titled) if titled else ""
@@ -253,37 +225,7 @@ def split_page(html: str) -> GuidePage:
         raise ParseError("page.content", "page has no guide content")
     for gone in root(["script", "style", "noscript"]) + root.select(".a-outline"):
         gone.decompose()
-    for heading in root.find_all(list(_HEADING_LEVELS)):
-        level = _HEADING_LEVELS[heading.name]
-        heading.string = f"{_MARK}{level}{_MARK}{text_of(heading)}"
-
-    summary: list[str] = []
-    raw: list[tuple[str, list[str]]] = []
-    path: list[str] = []
-    for line in text_of(root).split("\n"):
-        if not line.startswith(_MARK):
-            (raw[-1][1] if raw else summary).append(line)
-            continue
-        _, level, name = line.split(_MARK, 2)
-        path = [*path[: int(level)], name]
-        raw.append((" > ".join(path), []))
-
-    body = "\n".join(filter(None, [title, *summary]))
-    sections: list[GuideSection] = []
-    for heading, lines in raw:
-        # Game8 writes "TBD" in sections it has not filled yet.
-        if NAVIGATION.search(heading.split(" > ")[0]) or lines in ([], ["TBD"]):
-            continue
-        text = "\n".join(lines)
-        body += f"\n\n{heading}\n"
-        start = len(body)
-        body += text
-        found = 0
-        for chunk in chunk_lines(lines):
-            found = text.find(chunk, found)
-            sections.append(GuideSection(len(sections), heading, chunk, start + found, len(chunk)))
-            found += 1
-    return GuidePage(title, "\n".join(summary), body, sections)
+    return split_at_headings(root, title, _HEADING_LEVELS)
 
 
 def export_metrics(result: Game8Result, started: float) -> bool:

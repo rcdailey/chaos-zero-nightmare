@@ -140,6 +140,7 @@ COLUMNS = {
     ),
     "game8_page": "url title summary body updated_at data_fetched_at",
     "game8_section": "url position heading text offset length embedding",
+    "guide_section": "url position heading text offset length embedding",
 }
 JSON_COLUMNS = {"sections", "stats", "bonuses", "rewards", "cards"}
 
@@ -251,10 +252,16 @@ class _Sources:
                 " WHERE embedding IS NOT NULL"
                 " UNION ALL SELECT title, heading, text, embedding"
                 " FROM game8_section JOIN game8_page USING (url) WHERE embedding IS NOT NULL"
+                " UNION ALL SELECT title, heading, text, embedding"
+                " FROM guide_section JOIN prydwen.document USING (url) WHERE embedding IS NOT NULL"
             )
         }
         self.game8_pages = conn.execute(
             "SELECT url, html, lastmod, fetched_at FROM game8.page ORDER BY url"
+        ).fetchall()
+        self.guide_sections = cursor.execute(
+            "SELECT s.*, d.title FROM prydwen.guide_section s JOIN prydwen.document d USING (url)"
+            " ORDER BY url, position"
         ).fetchall()
 
     def items(self, path: str) -> tuple[list, datetime | None]:
@@ -279,6 +286,7 @@ def _merge(sources: _Sources, result: BuildResult) -> dict[str, list[dict]]:
         "leaderboard_deck": decks,
         "post_section": _post_sections(sources),
         **_game8(sources),
+        "guide_section": _guide_sections(sources),
         "character": characters,
         "card": cards,
         "potential": _potentials(sources, slugs),
@@ -353,6 +361,13 @@ def _game8(sources: _Sources) -> dict[str, list[dict]]:
             passages.append((page.title, section.heading, section.text))
     _embed(sources, sections, passages)
     return {"game8_page": pages, "game8_section": sections}
+
+
+def _guide_sections(sources: _Sources) -> list[dict]:
+    """Prydwen's page sections (see ``czn_data.parse``), with their embeddings."""
+    rows = [{k: v for k, v in s.items() if k != "title"} for s in sources.guide_sections]
+    _embed(sources, rows, [(s["title"], s["heading"], s["text"]) for s in sources.guide_sections])
+    return rows
 
 
 def _embed(sources: _Sources, rows: list[dict], passages: list[tuple]) -> None:
@@ -742,7 +757,10 @@ def _e7_equipment(sources: _Sources) -> list[dict]:
         for relic in relics
         if relic["relic_category"] == "EQUIPMENT"
         and relic["relic_type"] in SLOTS
-        and "_test_" not in relic["id"]  # developer benchmark items, never obtainable
+        # Developer benchmark items and tutorial copies of real items, which players never
+        # obtain.
+        and "_test_" not in relic["id"]
+        and "_tut_" not in relic["id"]
     ]
     unique = {}
     for row in rows:

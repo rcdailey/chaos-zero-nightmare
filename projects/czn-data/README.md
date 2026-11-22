@@ -269,6 +269,22 @@ in the connector's advanced settings. Its access tokens must be JWTs whose `aud`
 
 `/healthz` answers without a token, for probes.
 
+## MCP tools and REST routes
+
+MCP tools are for Claude, and REST routes are for programs. Tools reply in plain text: one
+`key: value` line per field, one `-` line per list item with its name first, and fields that every
+item shares stated once on an `every item:` line. Replies leave out fields that only programs use,
+such as ids, slugs, and image URLs. Programs MUST NOT call MCP tools; add a REST route that
+replies in JSON instead.
+
+REST routes take the same Bearer token the MCP endpoint takes and answer 401 without a valid one.
+`GET /characters` lists every character's name and card art URL, for the companion app's
+character picker:
+
+```json
+{"characters": [{"name": "Mei Lin", "image_url": "https://cdn.prydwen.gg/images/chaos/characters/mei-lin_card.webp"}]}
+```
+
 ## Naming characters on a screenshot
 
 `POST /identify` names the characters on a game screenshot, for the companion app. Send the

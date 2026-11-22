@@ -48,5 +48,16 @@ passes Claude each tool's name, description, and parameter schema, and documents
   while advising in the app, such as reading screenshots, run flow, reply format, and rules that
   span all czn tool results.
 - MUST NOT set MCP server `instructions`; put the guidance in one of the places above.
+- Every rule, field meaning, and tool-choice hint has exactly one home among the places above.
+  Before adding one, search both files for the concept; move or reference an existing statement
+  instead of restating it.
+- A tool description states its own scope and when to pick it; it may name another tool to use
+  instead, but MUST NOT describe what that tool contains. A precedence between sources lives on
+  the tool whose source wins.
+- Leave out what Claude already sees when it matters: schema types and defaults, self-explaining
+  result notes and errors (paging, unknown-name lists), fuzzy matching already implied by
+  "best-matching", and ranking or other implementation details that do not change how to call
+  the tool.
+- Keep a rule's reason only when it changes how Claude applies the rule.
 - MCP tools serve Claude only and reply in plain text; programs MUST call REST routes, which reply
   in JSON (`projects/czn-data/README.md`).

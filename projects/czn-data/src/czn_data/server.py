@@ -557,16 +557,13 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
         for any name read from the screen, then the specific tools for details.
 
         kind narrows the search: character, card, equipment, fragment_set, partner, effect
-        (keyword, status and tag are other names for it), encounter (Chaos event),
-        divine_epiphany, or chaos (the Chaos maps, for names list_encounters accepts).
-        Effects are keywords, statuses and card tags (for example Exhaust, Retain, Vulnerable);
-        a term without its own entry, such as Polarization, finds the effects whose description
-        uses it. Card summaries start with the card's color (its rarity in game: White, Blue,
-        Purple, Gold, Orange). limit is at most 50.
-        Season content is not in the game data this searches: season events and Interaction
-        Events (such as Elaborate Illusion), Chaos difficulty modifiers (such as Gangrene),
-        and Environment Variables nodes. When lookup finds nothing for such a name, use
-        search_posts, newest post first, since values change between seasons.
+        (keywords, statuses and card tags such as Exhaust; keyword, status and tag are other
+        names for it), encounter (Chaos event), divine_epiphany, or chaos (the Chaos maps).
+        A term without its own entry, such as Polarization, finds the effects whose
+        description uses it. Card summaries start with the card's color. limit is at most 50.
+        Season content is not in this data: season events and Interaction Events (such as
+        Elaborate Illusion), Chaos difficulty modifiers (such as Gangrene), and Environment
+        Variables nodes; search_posts has those.
         """
         kind = LOOKUP_KIND_ALIASES.get(kind, kind) if kind else None
         return await _query(LOOKUP_SQL, {"name": name, "kind": kind, "limit": min(limit, 50)})
@@ -586,9 +583,9 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
     async def get_card(name: str) -> list[dict]:
         """Every version of the best-matching card: the base card and its Epiphany variants
         (I-V), each with full text, cost, tags, Prydwen's star rating (1 to 5) and its own
-        review; alias is the name the game shows for a version, when it has one (Unbound in
-        "Flicker Blade (Unbound)"). The base card also carries the overall review, the recommended Neutral Epiphany
-        (target_neutral) and Prydwen's Neutral and Divine advice."""
+        review; alias is the version's name in the game, when it has one (Unbound in
+        "Flicker Blade (Unbound)"). The base card also carries the overall review, the
+        recommended Neutral Epiphany (target_neutral) and Prydwen's Neutral and Divine advice."""
         return await _query(
             f"""
             WITH best AS (
@@ -609,16 +606,13 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
         """Profile of the best-matching character. Without section: rarity, element, class,
         gender (from the game data; for characters only Prydwen has, judged from the art by an
         image tagger), and the list of available sections. With section, that part of
-        Prydwen's guide: cards (without reviews, use get_card; alias is the name the game
-        shows for a version, when it has one), potentials, manifest_egos,
-        teams, decks (with the deck code players paste into the game's deck import, when
-        Prydwen gives one, and the Chaos it farms), equipment (per season tab),
-        seasonal_powers, fragments, partners, synergies, or a prose section by title (Pros,
-        Cons, Introduction, Key Mechanics, Stats, Potential Priority, ...). The teams and
-        synergies sections hold only this character's own guide page; synergies also gathers
-        other guide pages, and find_teams other guide pages and the leaderboard. A section
-        reply names the character but repeats no profile.
-        note explains missing data, such as a character neither source covers yet."""
+        Prydwen's guide: cards (without reviews, use get_card; alias as in get_card),
+        potentials, manifest_egos, teams, decks (with the deck code players paste into the
+        game's deck import, when Prydwen gives one, and the Chaos it farms), equipment (per
+        season tab), seasonal_powers, fragments, partners, synergies, or a prose section by
+        title (Pros, Cons, Introduction, Key Mechanics, Stats, Potential Priority, ...). The
+        teams and synergies sections come from this character's own guide page only; for
+        more, use find_teams or synergies. note explains missing data."""
         character = await _find_character(name)
         if character is None:
             return None
@@ -656,10 +650,9 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
         the screen (the game shows Epiphany choices as text, without variant numbers); send
         every card's text on a screen in one call. Numbers in the text decide between versions
         that differ only in them; a screen value raised by an upgrade (360% for a stored 300%)
-        lowers match. character narrows the search to one character's cards (name or slug,
-        typos tolerated). Returns one item per text, in order: the text and its matches, best
-        first, at most limit (up to 10) each. match is 0 to 1; alias is the name the game shows
-        for that version, when it has one (Unbound in "Flicker Blade (Unbound)")."""
+        lowers match. character narrows the search to one character's cards. Returns one item
+        per text, in order: the text and its matches, best first, at most limit (up to 10)
+        each. match is 0 to 1; alias is the version's name in the game, when it has one."""
         slug = None
         if character:
             found = await _find_character(character)
@@ -701,9 +694,7 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
         prydwen_teams, the teams in Prydwen's guides (name, tier, members, listed_for: the
         characters whose pages list it), and leaderboard, the lineups of the newest
         leaderboard season (season, members, teams: how many ranked teams used the lineup,
-        best_rank), most used first. Use it for "which
-        team should X be in"; synergies ranks single characters to pair with X, with reasons;
-        get_character section teams lists only the teams on X's own guide page."""
+        best_rank), most used first. Use it for "which team should X be in"."""
         found = await _query(
             f"""
             WITH member AS (
@@ -759,8 +750,7 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
         """Every character, one short line each (name, rarity, element, class, gender),
         optionally filtered: gender female or male, element (Passion, Justice,
         Order, Void, Instinct), character_class (Striker, Vanguard, Ranger, Hunter, Controller,
-        Psionic), rarity 4 or 5. It cannot tell who a portrait on a game screen shows; the
-        companion app names those from the screenshot."""
+        Psionic), rarity 4 or 5."""
         return await _query(
             LIST_CHARACTERS_SQL,
             {"gender": gender, "element": element, "class": character_class, "rarity": rarity},
@@ -772,7 +762,7 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
         supported first. sources says where each is named: the character's own synergy list
         (reasons gives Prydwen's explanation), the other character's synergy list
         (their_reasons), or recommended teams (teams, with tier). Use it for "who should I
-        use with X"; find_teams gives whole lineups, including leaderboard ones."""
+        use with X"; find_teams gives whole lineups."""
         return await _query(SYNERGIES_SQL, {"name": character})
 
     @tool
@@ -867,15 +857,13 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
         color: str | None = None,
         base_only: bool = True,
     ) -> dict:
-        """List cards with optional filters; total counts every match, and note says when
-        results shows only part of them. character is a name or slug (typos tolerated);
-        category is starting (in the starting deck), unique (gained in a run), ego (the Ego
-        skill, cast with EP, not in the deck), collapse (replaces a card when the character's
-        Collapse triggers), generated (created by other cards), neutral, monster or
-        forbidden; type is Attack, Skill, Upgrade and so on; tag is a card tag such as
-        Exhaust; color is the card's rarity color (White, Blue, Purple, Gold, Orange), which
-        players use to name cards ("her purple card"). base_only skips Epiphany and other
-        versions; alias is the name the game shows for a version, when it has one."""
+        """List cards with optional filters. category is starting (in the starting deck),
+        unique (gained in a run), ego (the Ego skill, cast with EP, not in the deck), collapse
+        (replaces a card when the character's Collapse triggers), generated (created by other
+        cards), neutral, monster or forbidden; type is Attack, Skill, Upgrade and so on; tag
+        is a card tag such as Exhaust; color is the card's rarity color (White, Blue, Purple,
+        Gold, Orange), which players use to name cards ("her purple card"). base_only skips
+        Epiphany and other versions; alias as in get_card."""
         slug = None
         if character:
             found = await _find_character(character)
@@ -919,12 +907,10 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
         chaos: str | None = None,
         offset: int = 0,
     ) -> dict:
-        """List equipment, optionally by slot (Weapon, Armor, Trinket; plurals work), rarity
-        (Rare, Legendary, ...), name (typos tolerated) or chaos (a Chaos zone such as
-        Celestial Bulwark, typos tolerated: only equipment that drops there), with effect text
-        and where it drops (obtained_from); total counts every match; results holds 30 from
-        offset, and note says how to read on. Stats per level are included when name is
-        given. An unknown Chaos name is an error that lists the known ones."""
+        """List equipment, optionally by slot (Weapon, Armor, Trinket), rarity (Rare,
+        Legendary, ...), name, or chaos (only equipment that drops in that Chaos), with effect
+        text and where it drops (obtained_from). Stats per level are included when name is
+        given."""
         offset = max(offset, 0)
         return await _listing(
             f"""
@@ -959,14 +945,11 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
     async def search_guides(query: str, limit: int = 5, offset: int = 0) -> dict:
         """Search every scraped Prydwen page (guides, tier list, team database, character
         reviews and builds), split into sections. Use it for strategy and opinions the other
-        tools do not cover; official news, events and patch notes are in search_posts, and how
-        game systems and modes work in search_game_systems. query: a question or words;
-        results come best answer first, ranked by a model that reads the query with each
-        candidate section (typos in a page title tolerated). results groups the sections by
-        page (page_title, url); each section has its heading ("A > B"), text, and offset and
-        length (where text sits in get_page's body; read around it when a section refers to
-        another one). total counts the candidates found (at most about 90), not how many are
-        relevant; offset pages through them (at most 20 sections per call)."""
+        tools do not cover. query: a question or words; results come best answer first,
+        grouped by page (page_title, url); each section has its heading ("A > B"), text, and
+        offset and length (where text sits in get_page's body; read around it when a section
+        refers to another one). total counts the candidates found (at most about 90), not how
+        many are relevant; limit is at most 20."""
         ranked = await _ranked("search_guides", query)
         details = await _details(
             """
@@ -1008,19 +991,19 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
     async def search_posts(
         query: str | None = None, active_on: str | None = None, limit: int = 5, offset: int = 0
     ) -> dict:
-        """Search the game's official Stove posts (update notices, news and event overviews,
-        current community events), split into sections. Use it for events, season content
-        (Season Restrictions, Supply Store, Environment Variables), rate-up periods and
-        rewards; list_banners gives the banner schedule itself. query: a question or words;
-        results come best answer first, ranked by a model that reads the query with each
-        candidate section (typos in a title tolerated), newer posts winning close calls.
+        """Search the game's official Stove posts (update notices, news, patch notes and event
+        overviews), split into sections. Use it for events, season content (Season
+        Restrictions, Supply Store, Environment Variables), shops, rate-up periods and
+        rewards; it is the newest source, so it wins over search_game_systems and
+        search_guides on these. Values change between seasons, so when posts disagree, the
+        newest posted_at wins. list_banners gives the banner schedule itself. query: a
+        question or words; results come best answer first, newer posts winning close calls.
         active_on: a date (YYYY-MM-DD, or today) to get only sections whose period covers it,
         which answers "what events are on now". Give either or both. results groups the
-        sections by post (post title, board, posted_at, url); each section has its heading
-        ("■ Section > ◆ Subsection"), its full text, and its period (starts_on, ends_on) when
-        the post gives one. Images in posts (some calendars) are not included. total counts
-        the matching sections (with a query, the candidates found, at most about 90, not how
-        many are relevant); offset pages through them (at most 20 sections per call)."""
+        sections by post (post_title, board, posted_at, url); each section has its heading,
+        its full text, and its period (starts_on, ends_on) when the post gives one. Images in
+        posts (some calendars) are not included. With a query, total counts the candidates
+        found (at most about 90), not how many are relevant; limit is at most 20."""
         if query is None and active_on is None:
             raise ToolError("Give query, active_on, or both.")
         day = None
@@ -1070,31 +1053,22 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
 
     @tool
     async def search_game_systems(query: str, limit: int = 5, offset: int = 0) -> dict:
-        """Search how the game works, from three sources: the game's own Help (about 130
-        short topics its Help menus and tutorials show), other game text that explains rules
-        (tutorial dialogue, event descriptions, and popup messages grouped by feature), both
-        from the game's data files, and Game8's guides, split into sections. Covers game
-        systems (Save Data and how it is scored, Build Presets, Distortion Adaptation,
-        Epiphany, stress, Link Crash, potentials, gacha), Chaos modes, areas and Waypoints,
-        Simulation and boss modes (Full-Scale Offensive, Spiral Tower), Ark City, events,
-        seasons, missions, and a glossary. Use it for "how does X work" and "what is X";
-        characters, cards and equipment are in the other tools. query: a question or words;
-        results come best answer first, ranked by a model that reads the query with each
-        candidate (typos in a title tolerated). results groups the sections by page:
-        page_title, origin ("Game Help" with the menu showing it: Help in the lobby, Chaos
-        Help during a run, or Tutorial; "Game text" with its kind; or "Game8"), and for Game8
-        page_summary (the page's opening), updated_at (when Game8 last updated it) and url.
-        Each section has its text. A Help topic comes whole: every page in order as a
-        section, headed by its page title; when it has several pages, best_match marks the page
-        that answers the query best. Game8 sections also have heading (its parent headings, "A > B") and offset and
-        length (where text sits in get_page's body; read around it when
-        a section refers to another one). The game's own text is exact but short and from one
-        game build (data_status shows which); Game8 has more detail but can be out of date, so
-        the game's text wins when they disagree. The official posts (search_posts) are newer
-        than both and win on season content, events, shops, and restrictions. limit (at most
-        20), offset, and total count results, not sections: a Help topic is one result
-        however many pages it brings. total counts the candidates found (at most about 90),
-        not how many are relevant."""
+        """Search how the game works: the game's own Help topics and other rule text from its
+        data files (tutorial dialogue, event descriptions, popup messages), and Game8's
+        guides, split into sections. Covers game systems (Save Data and its scoring, Build
+        Presets, Distortion Adaptation, Epiphany, stress, Link Crash, potentials, gacha),
+        Chaos modes, areas and Waypoints, Simulation and boss modes (Full-Scale Offensive,
+        Spiral Tower), Ark City, events, seasons, missions, and a glossary. Use
+        it for "how does X work" and "what is X". query: a question or words; results come
+        best answer first, grouped by page: page_title, origin (Game Help with its menu, Game
+        text with its kind, or Game8), and for Game8 page_summary, updated_at and url. A Help
+        topic comes whole, each page a section; best_match marks the page that answers best.
+        Game8 sections also have heading ("A > B"), and offset and length (where text sits in
+        get_page's body; read around it when a section refers to another one). The game's
+        text is exact but short; Game8 has more detail but can be out of date, so the game's
+        text wins when they disagree. limit (at most 20) and total count results, a Help topic
+        being one; total counts the candidates found (at most about 90), not how many are
+        relevant."""
         ranked = await _ranked("search_game_systems", query)
         # A Help topic ranks by its best page (czn_data.search) and is shown with all its pages.
         best_page = {r["key"]: r["position"] for r in ranked if r["source"] == "help"}
@@ -1163,11 +1137,9 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
     async def get_page(url: str, offset: int = 0, length: int = PAGE_CHARS) -> dict | None:
         """Text of one scraped page, by URL: a prydwen.gg URL from search_guides or another
         tool (url or prydwen_url), or a game8.co URL from search_game_systems. Other URLs
-        return nothing. Pages can run to 40,000 characters, so body holds at most length
-        characters (up to 15,000) from offset (a character position); the reply's length is
-        the whole page's, and note says how to read on. To read around a search_game_systems
-        section, start a little before its offset (say 1,500) with a length of a few
-        thousand."""
+        return nothing. body holds at most length characters (up to 15,000) from offset (a
+        character position); the reply's length is the whole page's. To read around a search
+        section, start about 1,500 before its offset with a length of a few thousand."""
         rows = await _query(
             """
             SELECT url, title, body, page.data_fetched_at
@@ -1192,13 +1164,9 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
 
     @tool
     async def data_status() -> dict:
-        """Freshness of each source. prydwen: page counts, oldest and newest fetch times, and
-        pages whose latest version failed to parse. e7bot: when the served game data was
-        fetched, and the last attempt with its error. stove: official posts stored, the newest
-        fetch, and the last attempt with its error. game8: Game8 guide pages stored, the newest
-        fetch, and the last attempt with its error. gamefiles: the game build the Help text
-        comes from, files stored, the newest download, and the last attempt with its error.
-        Failed fetches never replace served data."""
+        """Freshness of each source (prydwen, e7bot game data, stove posts, game8, gamefiles):
+        items stored, newest fetch, and the last attempt with its error; for gamefiles, the
+        game build its text comes from. Failed fetches never replace served data."""
         summary = await _query(
             """
             SELECT count(*) AS pages, min(data_fetched_at) AS oldest_data,
@@ -1269,8 +1237,8 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
 
     @tool
     async def plan_deck(character: str) -> dict | None:
-        """Plan the one character's deck to build this Chaos run (players build one per run;
-        copy events are too rare for two). Uses the newest leaderboard season's Save Data decks
+        """Plan the character's deck for a Chaos run. Uses the newest leaderboard season's Save
+        Data decks
         and Prydwen's guide decks and ratings. cards: each card the decks use, best first, with
         category, cost and color, and per version (base or Epiphany I-V) Prydwen's rating, the
         share of leaderboard decks taking it, how many Prydwen decks list it, and common Divine
@@ -1323,8 +1291,8 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
         outcome success or failure for dice answers, class copy, removal, epiphany,
         divine_epiphany, equipment, card or other, and text), and leads_to, the stage that
         answer opens. The event starts at stage 1; some events start at a random one of
-        several stages that no answer leads to. chaos (typos tolerated) narrows to events that
-        can appear in that Chaos."""
+        several stages that no answer leads to. chaos narrows to events that can appear in
+        that Chaos."""
         params = {"name": name, "chaos": await _resolve_chaos(chaos)}
         found = await _query(ENCOUNTER_MATCH_SQL, params)
         if not found:
@@ -1353,13 +1321,10 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
         | None = None,
         offset: int = 0,
     ) -> dict:
-        """Chaos events, optionally only those that can appear in one Chaos (by name, typos
-        tolerated; lookup kind chaos lists the names) and those with an answer giving one
-        reward class. Events offering card copies come first, then removals, since those
-        decide a one-character deck. Each row names the answers (with their stage) that give
-        the requested class (or copies and removals). total counts every match; results holds
-        30 from offset, and note says how to read on. An unknown Chaos name is an error that
-        lists the known ones."""
+        """Chaos events, optionally only those that can appear in one Chaos and those with an
+        answer giving one reward class. Events offering card copies come first, then
+        removals. Each row names the answers (with their stage) that give the requested class
+        (or copies and removals)."""
         offset = max(offset, 0)
         params = {"chaos": await _resolve_chaos(chaos), "reward": reward, "offset": offset}
         return await _listing(LIST_ENCOUNTERS_SQL, params, offset=offset)
@@ -1374,8 +1339,7 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
         """Divine Epiphanies that can be added to a card: optionally only those that apply to a
         card type (Attack, Skill, Upgrade) and a card cost, or that a god offers (Vitor,
         Caligo, Circen, Diallos, Nihilum, Secred). Each has its effect text, the card types and
-        cost range it applies to (applies_to), and the gods that offer it. total counts every
-        match; results holds 30 from offset, and note says how to read on."""
+        cost range it applies to (applies_to), and the gods that offer it."""
         offset = max(offset, 0)
         return await _listing(
             f"""

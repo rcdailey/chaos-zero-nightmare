@@ -17,14 +17,15 @@ ENV CZN_IDENTITY_DIR=/app/identity
 RUN .venv/bin/python -c "from czn_data import identity; identity.download('/app/identity')"
 
 FROM python:3.14-slim-trixie
-RUN useradd --system --uid 10001 app
+RUN useradd --system --uid 1000 app
 COPY --from=build /app/.venv /app/.venv
-# Owned by the app user: the Hugging Face cache keeps some files private to their owner.
-COPY --from=build --chown=10001 /app/models /app/models
+# Owned by the app user: the Hugging Face cache keeps some files private to their owner. The
+# cluster runs the pods as UID 1000, so the image uses that UID too.
+COPY --from=build --chown=1000 /app/models /app/models
 COPY --from=build /app/identity /app/identity
 ENV PATH=/app/.venv/bin:$PATH PYTHONUNBUFFERED=1 FASTEMBED_CACHE_PATH=/app/models \
     HF_HUB_OFFLINE=1 CZN_IDENTITY_DIR=/app/identity
-USER 10001
+USER 1000
 EXPOSE 8000
 ENTRYPOINT ["czn-data"]
 CMD ["serve"]

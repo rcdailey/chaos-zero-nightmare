@@ -394,13 +394,47 @@ LIMIT 20
 # Events that can appear in a Chaos (%(chaos)s, an exact name from the chaos view): those
 # listed for it, plus common events of every Chaos.
 _IN_CHAOS = "(%(chaos)s::text IS NULL OR e.any_chaos OR %(chaos)s = ANY (e.chaos))"
-ENCOUNTER_MATCH_SQL = f"""
-SELECT e.id, e.name, e.rarity, e.pack, e.chaos, e.any_chaos, e.reward_classes, e.url,
-       e.data_fetched_at
-FROM encounter e
-WHERE {NAME_MATCH} AND {_IN_CHAOS}
-ORDER BY {NAME_ORDER}, e.id
-LIMIT 1
+# Every version of the best-matching event: all listed entries with that exact name.
+ENCOUNTER_VERSIONS_SQL = f"""
+WITH best AS (
+    SELECT e.name FROM encounter e
+    WHERE {NAME_MATCH} AND {_IN_CHAOS}
+    ORDER BY {NAME_ORDER}, e.id
+    LIMIT 1
+)
+SELECT e.name, e.steps, e.url, e.data_fetched_at
+FROM encounter e JOIN best USING (name)
+WHERE {_IN_CHAOS}
+ORDER BY e.id
+"""
+# Steps offering every choice text in %(choices)s (patterns: lowercased, straight quotes, LIKE
+# wildcards escaped, ending in % so text cut off on screen still matches), with the events that
+# reach them; events whose name matches best come first.
+_CHOICE_TEXT = "replace(lower(c.text), '’', '''')"
+ENCOUNTER_SCREEN_SQL = f"""
+WITH screen AS (
+    SELECT s.id FROM encounter_step s
+    WHERE NOT EXISTS (
+        SELECT 1 FROM unnest(%(choices)s::text[]) AS g (pattern)
+        WHERE NOT EXISTS (
+            SELECT 1 FROM encounter_choice c
+            WHERE c.step_id = s.id AND {_CHOICE_TEXT} LIKE g.pattern
+        )
+    )
+)
+SELECT screen.id AS step_id, e.name, e.url, e.data_fetched_at,
+       array_position(e.steps, screen.id) AS step
+FROM screen JOIN encounter e ON screen.id = ANY (e.steps)
+WHERE {_IN_CHAOS}
+ORDER BY {NAME_MATCH} DESC, {NAME_ORDER}, e.id
+LIMIT 6
+"""
+ENCOUNTER_STEPS_SQL = """
+SELECT s.id, s.name, s.shown_choices, s.auto_choice, s.appears_when, s.extra,
+       (SELECT json_agg(c ORDER BY c.position) FROM encounter_choice c WHERE c.step_id = s.id)
+           AS choices
+FROM encounter_step s
+WHERE s.id = ANY (%(steps)s)
 """
 # Rows past LIST_LIMIT are cut; total says how many matched.
 LIST_LIMIT = 60
@@ -432,12 +466,12 @@ def _with_synonyms(query: str) -> str:
 
 LIST_ENCOUNTERS_SQL = f"""
 SELECT e.name, e.pack, e.chaos, e.any_chaos, e.reward_classes,
-       (SELECT json_agg(json_build_object('answer', o.text, 'stage', o.stage,
-                                          'gives', o.reward_classes)
-                         ORDER BY o.stage, o.position)
-        FROM encounter_option o
-        WHERE o.encounter_id = e.id
-          AND o.reward_classes && CASE WHEN %(reward)s::text IS NULL
+       (SELECT json_agg(json_build_object('answer', c.text, 'step', s.n,
+                                          'gives', c.reward_classes)
+                         ORDER BY s.n, c.position)
+        FROM unnest(e.steps) WITH ORDINALITY AS s (id, n)
+        JOIN encounter_choice c ON c.step_id = s.id
+        WHERE c.reward_classes && CASE WHEN %(reward)s::text IS NULL
               THEN ARRAY['copy', 'removal'] ELSE ARRAY[%(reward)s::text] END
        ) AS answers,
        e.url, e.data_fetched_at, count(*) OVER () AS total
@@ -465,6 +499,154 @@ async def _query(sql: str, params: dict | None = None) -> list[dict]:
 def _present(row: dict) -> dict:
     """Drop null and empty fields to save model tokens; keep 0 and False, which carry meaning."""
     return {k: v for k, v in row.items() if v is not None and v != "" and v != [] and v != {}}
+
+
+def _choice_key(text: str) -> str:
+    """A choice text as get_encounter compares it: lowercase, straight quotes, without the
+    [Tag] the screen puts before dice choices or the ellipsis of text cut off on screen."""
+    key = text.lower().replace("’", "'").strip()
+    key = re.sub(r"^\[[^\]]*\]\s*", "", key)
+    return re.sub(r"\s*(…|\.\.\.)$", "", key)
+
+
+async def _encounter_step_rows(step_ids: list[str]) -> dict[str, dict]:
+    rows = await _query(ENCOUNTER_STEPS_SQL, {"steps": sorted(set(step_ids))})
+    return {row["id"]: row for row in rows}
+
+
+def _collapse_copies(choices: list[dict]) -> list[dict]:
+    """choices with each run of identical ones shown once, counted in copies."""
+    kept: list[dict] = []
+    for choice in choices:
+        if kept and kept[-1] | {"copies": 0} == choice | {"copies": 0}:
+            kept[-1]["copies"] = kept[-1].get("copies", 1) + 1
+        else:
+            kept.append(choice)
+    return kept
+
+
+def _dice(choice: dict) -> str | None:
+    return choice["dice_skill"] and f"{choice['dice_skill']} {choice['dice_target']}"
+
+
+def _requires(choice: dict) -> list[str]:
+    return [r["tooltip"] or r["condition"] for r in choice["requirements"]]
+
+
+def _full_choices(shown: list[dict], step_id: str, following: dict[str, dict]) -> list[dict]:
+    """get_encounter's on-screen choices with every result, each next screen in short form.
+    Uninterpreted game fields (extra) sit beside the named ones, so the renderer states a value
+    every choice shares only once."""
+    return _collapse_copies(
+        [
+            _present(
+                {
+                    "answer": choice["text"],
+                    "kind": choice["kind"],
+                    "random_group": choice["random_group"],
+                    "dice": _dice(choice),
+                    "battle": choice["battle"],
+                    "requires": _requires(choice),
+                    "appears_when": choice["appears_when"],
+                }
+                | choice["extra"]
+                | {
+                    "results": [
+                        _present(
+                            {
+                                "outcome": result["outcome"],
+                                "text": result["text"],
+                                "battle": result["battle"],
+                                # type is the game's code for what class and text state.
+                                "rewards": [
+                                    {"text": r["text"], "class": r["class"]}
+                                    for r in result["rewards"]
+                                ],
+                            }
+                            | result["extra"]
+                            | {"next": _next_screen(result["next_step"], step_id, following)}
+                        )
+                        for result in choice["results"]
+                    ]
+                }
+            )
+            for choice in shown
+        ]
+    )
+
+
+def _next_screen(next_step: str | None, step_id: str, following: dict[str, dict]):
+    if not next_step:
+        return None
+    if next_step == step_id:
+        return "this screen"
+    return _screen_preview(following[next_step])
+
+
+def _counted(step: dict) -> bool:
+    """Whether the screen's counts can be stated. A choice with a condition depends on game
+    state the data does not hold (trigger flags), so the count is unknown."""
+    choices = step.get("choices") or []
+    return step.get("shown_choices") is not None and not any(c["appears_when"] for c in choices)
+
+
+def _shows(step: dict) -> int | None:
+    """How many choices the screen displays. The game's count (shown_choices) leaves out
+    battle choices, which the screen always adds."""
+    if not _counted(step):
+        return None
+    return step["shown_choices"] + sum(c["kind"] == "battle" for c in step["choices"])
+
+
+def _random_draw(step: dict) -> str | None:
+    """The random marker for a screen's random choices: the slots left after its fixed
+    choices (not random, no battle), out of all random choices."""
+    choices = [c for c in step.get("choices") or [] if c["kind"] != "battle"]
+    drawn_from = sum(bool(c["random_group"]) for c in choices)
+    if not drawn_from:
+        return None
+    if not _counted(step):
+        return "may not appear"
+    fixed = sum(not c["random_group"] for c in choices)
+    slots = min(max(step["shown_choices"] - fixed, 0), drawn_from)
+    return f"screen shows {slots} of {drawn_from}"
+
+
+def _screen_preview(step: dict) -> dict:
+    """A screen in short form: every choice it can offer, one line each."""
+    draw = _random_draw(step)
+    return _present(
+        {
+            "name": step.get("name"),
+            "shows": _shows(step),
+            "choices": _collapse_copies(
+                [_short_choice(c, draw) for c in step.get("choices") or []]
+            ),
+        }
+    )
+
+
+def _short_choice(choice: dict, draw: str | None) -> dict:
+    by_outcome = {r["outcome"]: r for r in choice["results"]}
+
+    def outcome(name: str) -> str | None:
+        result = by_outcome.get(name)
+        if not result:
+            return None
+        parts = [r["text"] for r in result["rewards"]] or [result["text"]]
+        return " + ".join(p for p in parts if p) or None
+
+    return _present(
+        {
+            "answer": choice["text"],
+            "random": choice["random_group"] and choice["kind"] != "battle" and draw,
+            "dice": _dice(choice),
+            "requires": _requires(choice),
+            "gives": outcome("success"),
+            "fails": outcome("failure"),
+            "leads_on": any(r["next_step"] for r in choice["results"]) or None,
+        }
+    )
 
 
 def _for_model(value: object) -> object:
@@ -1339,34 +1521,82 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
         return plan
 
     @tool
-    async def get_encounter(name: str, chaos: str | None = None) -> dict | None:
-        """The best-matching Chaos event (question-mark node) by name, with every stage it can
-        reach. stages: each stage's answers with requirements, what each gives (rewards:
-        outcome success or failure for dice answers, class copy, removal, epiphany,
-        divine_epiphany, equipment, card or other, and text), and leads_to, the stage that
-        answer opens. The event starts at stage 1; some events start at a random one of
-        several stages that no answer leads to. chaos narrows to events that can appear in
+    async def get_encounter(
+        name: str, choices: list[str] | None = None, chaos: str | None = None
+    ) -> dict | None:
+        """One screen of a Chaos event (question-mark node). name: the event title on screen.
+        choices: the choice texts on screen, as shown (cut-off text and a leading [Tag] are
+        fine); they find the screen, including follow-up screens whose title is not an event
+        name, and the result covers only those choices. Look up each new screen the same way.
+        Without choices: each version of the event (the game picks one per run) with its
+        first screen in short form.
+        A screen: step (its number within the event), shows (how many choices the screen
+        offers; left out when conditions decide it), auto_choice (a choice the game takes without asking), appears_when (game
+        condition codes), then choices: kind (battle, info, end; none is a plain choice),
+        random_group (the game draws random choices per group; undrawn ones are not on
+        screen), copies (identical choices listed more than once), dice (skill tag and
+        target), requires (what picking it needs; a game condition code when the game gives
+        no text), appears_when, and results: outcome success or failure (a dice choice has
+        both), text, battle, rewards (text and class: copy, removal, epiphany,
+        divine_epiphany, equipment, card, or other), and next: the screen it opens, in short
+        form, listing every choice that screen can offer, so pick now with the next screen in
+        mind. A short choice: random (it appears only if drawn: the screen shows N of the
+        M random choices, or may not appear when conditions decide the count),
+        dice, requires, gives (rewards on success), fails (on failure), leads_on (it opens
+        a further screen). Fields named in the game's own snake_case are passed on unchanged
+        from the game data; their meaning is unconfirmed. other_matches names other events
+        with a screen offering the same choices. chaos narrows to events that can appear in
         that Chaos."""
-        params = {"name": name, "chaos": await _resolve_chaos(chaos)}
-        found = await _query(ENCOUNTER_MATCH_SQL, params)
+        chaos_name = await _resolve_chaos(chaos)
+        params = {"name": name, "chaos": chaos_name}
+        if not choices:
+            versions = await _query(ENCOUNTER_VERSIONS_SQL, params)
+            if not versions:
+                return None
+            steps = await _encounter_step_rows([v["steps"][0] for v in versions])
+            return {
+                "name": versions[0]["name"],
+                "versions": [
+                    {"url": v["url"], "data_fetched_at": v.get("data_fetched_at")}
+                    | _screen_preview(steps[v["steps"][0]])
+                    for v in versions
+                ],
+            }
+        keys = [_choice_key(text) for text in choices]
+        patterns = [re.sub(r"([\\%_])", r"\\\1", key) + "%" for key in keys]
+        found = await _query(ENCOUNTER_SCREEN_SQL, params | {"choices": patterns})
         if not found:
             return None
-        options = await _query(
-            "SELECT stage, text, requirements, rewards, reward_classes, leads_to"
-            " FROM encounter_option WHERE encounter_id = %(id)s ORDER BY stage, position",
-            {"id": found[0]["id"]},
+        match = found[0]
+        steps = await _encounter_step_rows([match["step_id"]])
+        screen = steps[match["step_id"]]
+        shown = [
+            choice
+            for choice in screen.get("choices") or []
+            if any(_choice_key(choice["text"]).startswith(key) for key in keys)
+        ]
+        following = await _encounter_step_rows(
+            [r["next_step"] for c in shown for r in c["results"] if r["next_step"]]
         )
-        stages: dict[int, list[dict]] = {}
-        for option in options:
-            # type is the game's reward code, which class and text already state.
-            for reward in option.get("rewards", []):
-                reward.pop("type", None)
-            stages.setdefault(option.pop("stage"), []).append(option)
-        event = found[0]
-        del event["id"]
-        return event | {
-            "stages": [{"stage": n, "answers": answers} for n, answers in stages.items()]
-        }
+        others = list(
+            dict.fromkeys(row["name"] for row in found[1:] if row["name"] != match["name"])
+        )
+        return _present(
+            {
+                "name": match["name"],
+                "step": match["step"],
+                "url": match["url"],
+                "data_fetched_at": match.get("data_fetched_at"),
+                "shows": _shows(screen),
+                "auto_choice": screen.get("auto_choice"),
+                "appears_when": screen.get("appears_when"),
+            }
+            | screen.get("extra", {})
+            | {
+                "choices": _full_choices(shown, match["step_id"], following),
+                "other_matches": others,
+            }
+        )
 
     @tool
     async def list_encounters(
@@ -1377,8 +1607,9 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
     ) -> dict:
         """Chaos events, optionally only those that can appear in one Chaos and those with an
         answer giving one reward class. Events offering card copies come first, then
-        removals. Each row names the answers (with their stage) that give the requested class
-        (or copies and removals)."""
+        removals. Each row is one version of an event and names the answers that give the
+        requested class (or copies and removals), with step: the screen they are on, 1 being
+        the first."""
         offset = max(offset, 0)
         params = {"chaos": await _resolve_chaos(chaos), "reward": reward, "offset": offset}
         return await _listing(LIST_ENCOUNTERS_SQL, params, offset=offset)

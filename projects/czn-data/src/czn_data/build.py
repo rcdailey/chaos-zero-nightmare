@@ -18,7 +18,6 @@ rows.
 """
 
 import difflib
-import json
 import logging
 import re
 import time
@@ -129,9 +128,13 @@ COLUMNS = {
         "game_id name bonuses image_url prydwen_name prydwen_url source url data_fetched_at"
     ),
     "effect": "name type description source url data_fetched_at",
-    "encounter": "id name rarity pack chaos any_chaos reward_classes url data_fetched_at",
-    "encounter_option": (
-        "encounter_id stage position text requirements rewards reward_classes leads_to"
+    "encounter": (
+        "id version_group name rarity pack chaos any_chaos steps reward_classes url data_fetched_at"
+    ),
+    "encounter_step": "id name shown_choices auto_choice appears_when extra",
+    "encounter_choice": (
+        "step_id position id text kind random_group dice_skill dice_target battle requirements"
+        " appears_when results reward_classes extra"
     ),
     "divine_epiphany": "id gods rarities text card_types cost_min cost_max url data_fetched_at",
     "leaderboard_entry": "season rank score",
@@ -146,7 +149,7 @@ COLUMNS = {
     "game_help": "id menu title text data_fetched_at",
     "passage": "source key position title heading text published_at embedding",
 }
-JSON_COLUMNS = {"sections", "stats", "bonuses", "rewards", "cards"}
+JSON_COLUMNS = {"sections", "stats", "bonuses", "cards", "requirements", "results", "extra"}
 
 # Event reward type prefix -> reward class, first match wins. Classes are what a player
 # planning one deck per run looks for: card copies and removals above all.
@@ -281,7 +284,7 @@ def _merge(sources: _Sources, result: BuildResult) -> dict[str, list[dict]]:
     characters, slugs = _characters(sources)
     known = {c["slug"] for c in characters if c["source"] == "e7bot"}
     cards = _cards(sources, slugs, characters, known, result)
-    encounters, options = _encounters(sources)
+    encounters, steps, choices = _encounters(sources)
     entries, decks = _leaderboard(sources, slugs)
     posts = _post_sections(sources)
     game8 = _game8(sources)
@@ -289,7 +292,8 @@ def _merge(sources: _Sources, result: BuildResult) -> dict[str, list[dict]]:
     help_rows = _game_help(sources)
     return {
         "encounter": encounters,
-        "encounter_option": options,
+        "encounter_step": steps,
+        "encounter_choice": choices,
         "divine_epiphany": _divine_epiphanies(sources),
         "leaderboard_entry": entries,
         "leaderboard_deck": decks,
@@ -927,96 +931,302 @@ def reward_class(reward_type: str) -> str:
     return next((c for prefix, c in REWARD_CLASSES if reward_type.startswith(prefix)), "other")
 
 
-def _encounters(sources: _Sources) -> tuple[list[dict], list[dict]]:
-    """One encounter per event: e7bot lists each stage of an event (``uk_904_s01_01a``,
-    ``_01b``) as its own entry, sharing ``link_encounter_set_id``; stages are numbered in id
-    order and answers point at the stage number they open."""
+def _encounters(sources: _Sources) -> tuple[list[dict], list[dict], list[dict]]:
+    """Chaos events as graphs: (encounter, encounter_step, encounter_choice) rows.
+
+    e7bot lists each version of an event (``uk_404_s01_01a``, ``_01b``) as its own entry; the
+    versions share ``link_encounter_set_id`` and the game picks one. Each entry's detail is a
+    step: an object with ``options`` (its choices). A choice's success and failure results
+    name the step they open (``next_encounter_id``) and nest that step's body
+    (``next_encounter``), so follow-up steps appear nowhere but inside the step that opens
+    them. A link back to an earlier step (``is_circular_reference``) may nest it without its
+    choices. Steps are therefore collected by id from every nesting, and links resolved by id.
+
+    Fields with a confirmed meaning get columns (``_STEP_FIELDS``, ``_CHOICE_FIELDS``,
+    ``_RESULT_FIELDS``); every other non-empty field is kept verbatim in the row's ``extra``.
+    A broken structure raises BuildError; an unknown value of a named field is stored as the
+    game wrote it and logged."""
     listed, _ = sources.items("czn/encounters/list")
     packs = {pack["id"]: pack for pack in sources.items("czn/encounters/packs/list")[0]}
-    events: dict[str, list[dict]] = defaultdict(list)
+    unknown: set[tuple[str, str]] = set()
+    bodies: dict[str, dict] = {}
+    fetched: dict[str, datetime | None] = {}
+    for entry in listed:
+        detail, fetched[entry["id"]] = sources.detail(f"czn/encounters/{entry['id']}")
+        _collect_steps(detail or {"id": entry["id"], "options": []}, entry["id"], bodies)
+    steps = {step_id: _step_row(body) for step_id, body in sorted(bodies.items())}
+    choices = [
+        _choice_row(step_id, position, option, bodies, unknown)
+        for step_id, body in sorted(bodies.items())
+        for position, option in enumerate(_sorted_options(body), 1)
+    ]
+    for field_name, value in sorted(unknown):
+        log.warning("unknown encounter value", extra={"field": field_name, "value": value})
+    by_step: dict[str, list[dict]] = defaultdict(list)
+    for choice in choices:
+        by_step[choice["step_id"]].append(choice)
+
+    encounters = []
     for entry in sorted(listed, key=lambda e: e["id"]):
-        events[entry.get("link_encounter_set_id") or entry["id"]].append(entry)
-    encounters, options = [], []
-    for event_id, stages in events.items():
-        numbers = {entry["id"]: number for number, entry in enumerate(stages, 1)}
-        first = stages[0]
-        pack = packs.get(first["link_encounter_pack_id"]) or {}
+        pack = packs.get(entry["link_encounter_pack_id"]) or {}
         chaos = {pack["name"]} if pack.get("pack_type") == "PACK_PLANET" else set()
-        classes: set[str] = set()
-        fetched = []
-        for entry in stages:
-            collection = entry.get("chaos_collection_info") or []
-            if isinstance(collection, dict):  # one Chaos comes as an object, several as a list
-                collection = [collection]
-            chaos |= {
-                info["chaos"]["title"]
-                for info in collection
-                if isinstance(info, dict) and (info.get("chaos") or {}).get("title")
-            }
-            detail, detail_fetched_at = sources.detail(f"czn/encounters/{entry['id']}")
-            fetched.append(detail_fetched_at)
-            stage_options = _encounter_options(event_id, numbers, entry, detail)
-            for option in stage_options:
-                classes |= set(option["reward_classes"])
-            options += stage_options
+        collection = entry.get("chaos_collection_info") or []
+        if isinstance(collection, dict):  # one Chaos comes as an object, several as a list
+            collection = [collection]
+        chaos |= {
+            info["chaos"]["title"]
+            for info in collection
+            if isinstance(info, dict) and (info.get("chaos") or {}).get("title")
+        }
+        reachable = _reachable(entry["id"], by_step)
         encounters.append(
             {
-                "id": event_id,
-                "name": plain(first["name"]),
-                "rarity": (first.get("rarity") or "").title() or None,
+                "id": entry["id"],
+                "version_group": entry.get("link_encounter_set_id") or entry["id"],
+                "name": plain(entry["name"]),
+                "rarity": (entry.get("rarity") or "").title() or None,
                 "pack": pack.get("name"),
                 "chaos": sorted(chaos),
                 "any_chaos": pack.get("pack_type") == "PACK_FACTION"
                 and pack.get("link_faction_id") == "common",
-                "reward_classes": sorted(classes),
-                "url": f"{URLS['encounter']}/{first['id']}",
-                "data_fetched_at": min((f for f in fetched if f), default=None),
+                "steps": reachable,
+                "reward_classes": sorted(
+                    {
+                        c
+                        for s in reachable
+                        for choice in by_step[s]
+                        for c in choice["reward_classes"]
+                    }
+                ),
+                "url": f"{URLS['encounter']}/{entry['id']}",
+                "data_fetched_at": fetched[entry["id"]],
             }
         )
-    return encounters, options
+    return encounters, list(steps.values()), choices
 
 
-def _encounter_options(event_id: str, numbers: dict, entry: dict, detail) -> list[dict]:
-    options, seen = [], set()
-    for option in (detail or {}).get("options") or []:
-        rewards = [
+# Fields read into named columns, per object kind. Fields in _UNUSED_FIELDS are the site's
+# translations and images, or summaries the build derives itself; extra leaves them out.
+_STEP_FIELDS = {
+    "id",
+    "name",
+    "options",
+    "option_count",
+    "auto_link_encounter_option_id",
+    "cond_link_encounter_trigger_id",
+    # Read from the list entry for the encounter row.
+    "rarity",
+    "link_encounter_pack_id",
+    "link_encounter_set_id",
+    "chaos_collection_info",
+}
+_CHOICE_FIELDS = {
+    "id",
+    "order",
+    "link_encounter_id",
+    "simple_flavor_text",
+    "option_type",
+    "select_type",
+    "dice_value",
+    "link_dice_technique_id",
+    "link_battle_id",
+    "select_link_nb_conditions",
+    "select_link_nb_condition_id",
+    "appear_link_encounter_trigger_id",
+    "success_link_encounter_option_eff",
+    "success_link_encounter_option_eff_id",
+    "fail_link_encounter_option_eff",
+    "fail_link_encounter_option_eff_id",
+}
+_RESULT_FIELDS = {
+    "id",
+    "overview_eff_desc",
+    "battle_id",
+    "next_encounter",
+    "next_encounter_id",
+    "is_circular_reference",
+    # rewardN_multiple_link repeats rewardN_reward's id (true of every reward in the data).
+    *(f"reward{slot}_{part}" for slot in range(10) for part in ("reward", "type", "multiple_link")),
+}
+_UNUSED_FIELDS = {"names", "camera_resource", "reward_types"}
+# option_type -> kind; NORMAL is the plain choice and gets none.
+CHOICE_KINDS = {"NORMAL": None, "ATTACK": "battle", "INFORM": "info", "END": "end"}
+# select_type: RANDOM and RANDOM_1 mark choices the game draws at random, as two separate
+# groups. ATTACK repeats option_type.
+SELECT_TYPES = {"DEFAULT": None, "ATTACK": None, "RANDOM": "RANDOM", "RANDOM_1": "RANDOM_1"}
+# Dice skill ids -> the tag the game shows on the choice (Game8 lists the same five tags).
+DICE_SKILLS = {
+    "analysis": "Analysis",
+    "dexterity": "Dexterous",
+    "foresight": "Insight",
+    "speech": "Eloquence",
+    "trickery": "Trickery",
+}
+
+
+def _collect_steps(body: dict, step_id: str, bodies: dict[str, dict]) -> None:
+    """Add body and every step nested in its results to bodies, by id."""
+    if not isinstance(body.get("options"), list):
+        return  # a link back to a step whose body appears elsewhere
+    own = _without_nested_steps(body)
+    if step_id in bodies:
+        if _without_nested_steps(bodies[step_id]) != own:
+            raise BuildError(f"encounter step {step_id}: two copies differ")
+        return
+    bodies[step_id] = body
+    for option in body["options"]:
+        for result in _results(option):
+            nested = result.get("next_encounter")
+            if isinstance(nested, dict) and nested.get("id"):
+                _collect_steps(nested, nested["id"], bodies)
+
+
+def _without_nested_steps(body: dict) -> dict:
+    return body | {
+        "options": [
+            option
+            | {
+                key: {k: v for k, v in result.items() if k != "next_encounter"}
+                for key in ("success_link_encounter_option_eff", "fail_link_encounter_option_eff")
+                if isinstance(result := option.get(key), dict)
+            }
+            for option in body.get("options") or []
+        ]
+    }
+
+
+def _results(option: dict) -> list[dict]:
+    return [
+        effect
+        for key in ("success_link_encounter_option_eff", "fail_link_encounter_option_eff")
+        if isinstance(effect := option.get(key), dict)
+    ]
+
+
+def _sorted_options(body: dict) -> list[dict]:
+    return sorted(body["options"], key=lambda o: (o.get("order") or 0, o.get("id") or ""))
+
+
+def _extra(item: dict, named: set[str]) -> dict:
+    """item's fields the build does not interpret, verbatim, without empty values."""
+    return {
+        k: v
+        for k, v in sorted(item.items())
+        if k not in named and k not in _UNUSED_FIELDS and v not in (None, "", [], {})
+    }
+
+
+def _step_row(body: dict) -> dict:
+    extra = _extra(body, _STEP_FIELDS | {"option_count_max"})
+    if body.get("option_count_max") not in (None, body.get("option_count")):
+        extra["option_count_max"] = body["option_count_max"]
+    return {
+        "id": body["id"],
+        "name": plain(body.get("name")),
+        "shown_choices": body.get("option_count"),
+        "auto_choice": body.get("auto_link_encounter_option_id") or None,
+        "appears_when": list(body.get("cond_link_encounter_trigger_id") or []),
+        "extra": extra,
+    }
+
+
+def _known(table: dict, field_name: str, value: Any, unknown: set) -> Any:
+    """table's name for value; an unknown value is kept as written and recorded."""
+    if value in table:
+        return table[value]
+    unknown.add((field_name, str(value)))
+    return value
+
+
+def _choice_row(
+    step_id: str, position: int, option: dict, bodies: dict[str, dict], unknown: set
+) -> dict:
+    kind = _known(CHOICE_KINDS, "option_type", option.get("option_type") or "NORMAL", unknown)
+    skill = option.get("link_dice_technique_id")
+    text = plain(option.get("simple_flavor_text"))
+    if not text:  # choices that start a battle carry no text; the wiki labels them Attack
+        text = "Attack" if kind == "battle" else "(no text)"
+    results = []
+    for outcome, key in (
+        ("success", "success_link_encounter_option_eff"),
+        ("failure", "fail_link_encounter_option_eff"),
+    ):
+        effect = option.get(key)
+        if not isinstance(effect, dict):
+            continue
+        next_step = effect.get("next_encounter_id") or None
+        if next_step and next_step not in bodies:
+            raise BuildError(f"encounter choice {option.get('id')}: no step {next_step}")
+        results.append(
             {
                 "outcome": outcome,
-                "class": reward_class(reward["reward_type"]),
-                "type": reward["reward_type"],
-                "text": plain(reward.get("desc_option")),
+                "id": effect.get("id"),
+                "text": plain(effect.get("overview_eff_desc")) or None,
+                "battle": effect.get("battle_id") or None,
+                "rewards": [
+                    {
+                        "id": reward.get("id"),
+                        "class": reward_class(reward["reward_type"]),
+                        "type": reward["reward_type"],
+                        "text": _reward_text(reward),
+                    }
+                    for slot in range(10)
+                    if (reward := effect.get(f"reward{slot}_reward"))
+                ],
+                "next_step": next_step,
+                "extra": _extra(effect, _RESULT_FIELDS),
             }
-            for outcome, effect in (
-                ("success", option.get("success_link_encounter_option_eff")),
-                ("failure", option.get("fail_link_encounter_option_eff")),
-            )
-            for slot in range(10)
-            if (reward := (effect or {}).get(f"reward{slot}_reward"))
-        ]
-        success = option.get("success_link_encounter_option_eff") or {}
-        text = plain(option.get("simple_flavor_text"))
-        if not text:  # answers that start a battle carry no text in the game data
-            text = "Fight" if option.get("option_type") == "ATTACK" else "(no text)"
-        row = {
-            "encounter_id": event_id,
-            "stage": numbers[entry["id"]],
-            "position": len(options) + 1,
-            "text": text,
-            "requirements": [
-                plain(c.get("encounter_option_tooltip"))
-                for c in option.get("select_link_nb_conditions") or []
-                if c.get("encounter_option_tooltip")
-            ],
-            "rewards": rewards,
-            "reward_classes": sorted({r["class"] for r in rewards} - {"other"}),
-            "leads_to": numbers.get(success.get("next_encounter_id")),
-        }
-        # The game lists some answers twice with identical effects.
-        identity = json.dumps({k: v for k, v in row.items() if k != "position"}, sort_keys=True)
-        if identity not in seen:
-            seen.add(identity)
-            options.append(row)
-    return options
+        )
+    return {
+        "step_id": step_id,
+        "position": position,
+        "id": option.get("id") or f"{step_id}#{position}",
+        "text": text,
+        "kind": kind,
+        "random_group": _known(
+            SELECT_TYPES, "select_type", option.get("select_type") or "DEFAULT", unknown
+        ),
+        "dice_skill": _known(DICE_SKILLS, "link_dice_technique_id", skill, unknown)
+        if skill
+        else None,
+        "dice_target": option.get("dice_value") or None,
+        "battle": option.get("link_battle_id") or None,
+        "requirements": [
+            {"condition": c.get("id"), "tooltip": plain(c.get("encounter_option_tooltip")) or None}
+            for c in option.get("select_link_nb_conditions") or []
+        ],
+        "appears_when": list(option.get("appear_link_encounter_trigger_id") or []),
+        "results": results,
+        "reward_classes": sorted(
+            {r["class"] for result in results for r in result["rewards"]} - {"other"}
+        ),
+        "extra": _extra(option, _CHOICE_FIELDS),
+    }
+
+
+def _reward_text(reward: dict) -> str:
+    """A reward's text with the game's placeholders filled where the data allows: plural
+    markers ({amount_ge_2}, {card_unit_ge_2}) only apply to amounts of 2 or more, and {id}
+    stands for the code in reward_multiple_link, which no source names."""
+    text = plain(reward.get("desc_option"))
+    if (reward.get("amount_max") or 0) < 2:
+        text = re.sub(r"\s*\{\w+_ge_2\}", "", text)
+    if link := reward.get("reward_multiple_link"):
+        text = text.replace("{id}", link)
+    return text
+
+
+def _reachable(start: str, by_step: dict[str, list[dict]]) -> list[str]:
+    """Step ids reachable from start, start first, in breadth-first order."""
+    order, queue = [start], [start]
+    while queue:
+        step_id = queue.pop(0)
+        for choice in by_step[step_id]:
+            for result in choice["results"]:
+                if result["next_step"] and result["next_step"] not in order:
+                    order.append(result["next_step"])
+                    queue.append(result["next_step"])
+    return order
 
 
 def _divine_epiphanies(sources: _Sources) -> list[dict]:

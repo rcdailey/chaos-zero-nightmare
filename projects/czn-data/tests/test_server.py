@@ -8,6 +8,7 @@ lines and ``key: value`` fields that hold each fact.
 """
 
 import json
+import re
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -18,7 +19,7 @@ from starlette.testclient import TestClient
 from test_parse import banner_html
 
 from czn_data import store
-from czn_data.build import build
+from czn_data.build import BuildError, build
 from czn_data.parse import ParsedPage, page_kind, parse_page
 from czn_data.server import build_server
 
@@ -26,6 +27,60 @@ CHARACTER_URL = "https://www.prydwen.gg/chaos-zero-nightmare/characters/mei-lin"
 FRAGMENTS_URL = "https://www.prydwen.gg/chaos-zero-nightmare/memory-fragments"
 CHARACTER_HTML = (Path(__file__).parent / "fixtures" / "character.html").read_text()
 BANNERS_URL = "https://www.prydwen.gg/chaos-zero-nightmare/banners"
+COPY_REWARD = {"id": "r1", "reward_type": "CARD_COPY_HAVE_SELECT", "desc_option": "Copy 1 card"}
+# One version of an event as e7bot sends it: its first choice opens a follow-up step nested in
+# the result, whose choices end the event or loop back to the first step.
+MIRROR_HALL = {
+    "id": "e1a",
+    "option_count": 1,
+    "options": [
+        {
+            "id": "o0",
+            "simple_flavor_text": "Step inside",
+            "mystery_flag": "Z",
+            "success_link_encounter_option_eff": {
+                "next_encounter_id": "e1a-1",
+                "next_encounter": {
+                    "id": "e1a-1",
+                    "name": "The Mirror",
+                    "options": [
+                        {
+                            "id": "o1",
+                            "simple_flavor_text": "Look into the mirror",
+                            "dice_value": 6,
+                            "link_dice_technique_id": "foresight",
+                            "success_link_encounter_option_eff": {"reward0_reward": COPY_REWARD},
+                            "fail_link_encounter_option_eff": {
+                                "overview_eff_desc": "End the event"
+                            },
+                        },
+                        {
+                            "id": "o2",
+                            "simple_flavor_text": "Turn back",
+                            "success_link_encounter_option_eff": {
+                                "next_encounter_id": "e1a",
+                                "is_circular_reference": True,
+                                "next_encounter": {"id": "e1a", "options": None},
+                            },
+                        },
+                    ],
+                },
+            },
+        }
+    ],
+}
+# The other version: its screen shows one fixed choice and one of two random ones, and the
+# game's option_count leaves out the battle choice, which the screen always adds.
+MIRROR_HALL_B = {
+    "id": "e1b",
+    "option_count": 2,
+    "options": [
+        {"id": "o3", "simple_flavor_text": "Leave quietly"},
+        {"id": "o4", "simple_flavor_text": "Pray", "select_type": "RANDOM"},
+        {"id": "o5", "simple_flavor_text": "Sing", "select_type": "RANDOM"},
+        {"id": "o6", "option_type": "ATTACK", "link_battle_id": "b1"},
+    ],
+}
 
 
 @pytest.fixture
@@ -803,35 +858,8 @@ def game_data(conn):
             for stage in ("e1a", "e1b")
         ],
     )
-    add_e7bot(
-        conn,
-        "czn/encounters/e1a",
-        {
-            "options": [
-                {
-                    "id": "o0",
-                    "simple_flavor_text": "Step inside",
-                    "success_link_encounter_option_eff": {"next_encounter_id": "e1b"},
-                }
-            ]
-        },
-    )
-    copy = {"reward_type": "CARD_COPY_HAVE_SELECT", "desc_option": "Copy <cc>1</> card"}
-    add_e7bot(
-        conn,
-        "czn/encounters/e1b",
-        {
-            "options": [
-                {
-                    "id": "o1",
-                    "simple_flavor_text": "Look into the mirror",
-                    "select_link_nb_conditions": [],
-                    "success_link_encounter_option_eff": {"reward0_reward": copy},
-                },
-                {"id": "o2", "simple_flavor_text": "Walk away"},
-            ]
-        },
-    )
+    add_e7bot(conn, "czn/encounters/e1a", MIRROR_HALL)
+    add_e7bot(conn, "czn/encounters/e1b", MIRROR_HALL_B)
     add_e7bot(
         conn,
         "czn/rankings/list",
@@ -917,7 +945,8 @@ def test_game_data_urls_open_the_item_where_e7bot_has_a_page_for_it(call, conn, 
         return top_field(call(tool, name=name), "url")
 
     assert url("get_character", "mei lin") == f"{site}/combatant/1027"
-    assert url("get_encounter", "mirror hall") == f"{site}/encounters/e1a"
+    versions = lines_with(call("get_encounter", name="mirror hall"), "/encounters/")
+    assert versions[0].startswith(f"- {site}/encounters/e1a;")
     assert url("get_partner", "Listed") == f"{site}/partner/1027"
     assert url("get_partner", "Unlisted") == f"{site}/partner"
 
@@ -996,14 +1025,81 @@ def test_list_encounters_filters_by_chaos_and_names_copy_answers(call, game_data
     assert top_field(listing, "total") == "1"
     assert lines_with(listing, "- ")[0].startswith("- Mirror Hall;")
     assert lines_with(listing, "Look into the mirror") == [
-        "- Look into the mirror; stage: 2; gives: copy"
+        "- Look into the mirror; step: 2; gives: copy"
     ]
 
+
+def test_get_encounter_without_choices_gives_each_versions_first_screen(call, game_data):
     found = call("get_encounter", name="mirror hall")
-    stages = top_field(found, "stages")
-    first, second = stages.split("- stage: ")[1:]
-    assert first.startswith("1\n") and lines_with(first, "- ") == ["- Step inside; leads_to: 2"]
-    assert second.startswith("2\n") and "Copy 1 card" in second
+
+    first, second = re.split(r"^- https", top_field(found, "versions"), flags=re.MULTILINE)[1:]
+    assert lines_with(first, "Step inside") == ["- Step inside; leads_on: yes"]
+    # The other version stays apart, and the first one's follow-up screen is not listed.
+    assert "Leave quietly" in second and "Leave quietly" not in first
+    assert "Look into the mirror" not in found
+
+
+def test_get_encounter_counts_what_the_screen_shows(call, conn, game_data):
+    second = re.split(
+        r"^- https",
+        top_field(call("get_encounter", name="mirror hall"), "versions"),
+        flags=re.MULTILINE,
+    )[2]
+    assert "shows: 3" in second.splitlines()[0]
+    assert lines_with(second, "- Pray") == ["- Pray; random: screen shows 1 of 2"]
+
+    # A condition on a choice depends on game state, so no count is stated.
+    conditional = json.loads(json.dumps(MIRROR_HALL_B))
+    conditional["options"][0]["appear_link_encounter_trigger_id"] = ["trg_x"]
+    conn.execute(
+        "UPDATE e7bot.document SET body = %s WHERE path = 'czn/encounters/e1b'",
+        (Jsonb(conditional),),
+    )
+    second = re.split(
+        r"^- https",
+        top_field(call("get_encounter", name="mirror hall"), "versions"),
+        flags=re.MULTILINE,
+    )[2]
+    assert "shows:" not in second
+    assert lines_with(second, "- Pray") == ["- Pray; random: may not appear"]
+
+
+def test_get_encounter_gives_the_screen_with_those_choices_and_previews_the_next(call, game_data):
+    found = call("get_encounter", name="mirror hall", choices=["Step inside"])
+
+    assert top_field(found, "step") == "1"
+    assert lines_with(found, "Step inside") == ["- Step inside; mystery_flag: Z"]
+    assert lines_with(found, "Look into the mirror") == [
+        "- Look into the mirror; dice: Insight 6; gives: Copy 1 card; fails: End the event"
+    ]
+    assert lines_with(found, "Turn back") == ["- Turn back; leads_on: yes"]
+
+
+def test_get_encounter_finds_a_follow_up_screen_by_its_choices(call, game_data):
+    # The screen's title is not an event name; the choices, cut off as on screen, find it.
+    found = call("get_encounter", name="The Mirror", choices=["[Insight] Look into the mi…"])
+
+    assert top_field(found, "name") == "Mirror Hall"
+    assert top_field(found, "step") == "2"
+    assert "Turn back" not in found
+    assert lines_with(found, "failure") == ["- failure; text: End the event"]
+    assert "Copy 1 card; class: copy" in found
+
+
+def test_build_rejects_a_link_to_a_missing_step_and_keeps_the_previous_events(
+    call, conn, game_data
+):
+    call("get_encounter", name="mirror hall")
+    broken = json.loads(json.dumps(MIRROR_HALL))
+    broken["options"][0]["success_link_encounter_option_eff"] = {"next_encounter_id": "nowhere"}
+    conn.execute(
+        "UPDATE e7bot.document SET body = %s WHERE path = 'czn/encounters/e1a'", (Jsonb(broken),)
+    )
+
+    with pytest.raises(BuildError, match="no step nowhere"):
+        build(conn)
+
+    assert conn.execute("SELECT count(*) FROM encounter").fetchone()[0] == 2
 
 
 def test_list_equipment_by_chaos_matches_listed_and_shortened_zone_names(call, conn, game_data):

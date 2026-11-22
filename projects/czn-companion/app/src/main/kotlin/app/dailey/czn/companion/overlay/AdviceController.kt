@@ -51,7 +51,6 @@ data class PanelState(
     val error: String? = null,
     /** Which text box has the keyboard; null while none does. */
     val typing: Typing? = null,
-    val confirmingNewRun: Boolean = false,
 )
 
 /** A text box in the panel: the question for Claude, or a typed answer to Claude's question. */
@@ -354,16 +353,12 @@ class AdviceController(
 
     fun stopTyping() = local.update { it.copy(typing = null) }
 
-    fun requestNewRun() = local.update { it.copy(confirmingNewRun = true) }
-
-    fun cancelNewRun() = local.update { it.copy(confirmingNewRun = false) }
-
-    fun confirmNewRun() {
+    fun newRun() {
         Log.d(TAG, "new run")
         // A reply still running would save its exchange, or its open turn, to the new run.
         reply?.cancel()
         reply = null
-        local.update { it.copy(confirmingNewRun = false, error = null).finished() }
+        local.update { it.copy(error = null).finished() }
         scope.launch { conversation.newRun() }
     }
 

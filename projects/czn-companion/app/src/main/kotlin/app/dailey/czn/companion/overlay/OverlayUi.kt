@@ -34,7 +34,6 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
@@ -270,8 +269,6 @@ class PanelActions(
     val onClose: () -> Unit = {},
     val onHideButton: () -> Unit = {},
     val onNewRun: () -> Unit = {},
-    val onConfirmNewRun: () -> Unit = {},
-    val onCancelNewRun: () -> Unit = {},
     val onCompose: () -> Unit = {},
     val onSend: (String) -> Unit = {},
     val onStop: () -> Unit = {},
@@ -375,13 +372,6 @@ private fun PanelBody(
     // While the player types an answer, the question card has its own buttons; the rest of the
     // panel steps aside to leave the card the room above the keyboard.
     val typingAnswer = state.typing == Typing.Answer
-    if (state.confirmingNewRun && !typingAnswer) {
-        Text("Start a new run? This clears the conversation.")
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button(onClick = actions.onConfirmNewRun) { Text("New run") }
-            OutlinedButton(onClick = actions.onCancelNewRun) { Text("Keep this run") }
-        }
-    }
     Conversation(state, askActions, short, Modifier.weight(1f))
     state.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
     if (!typingAnswer) AskRow(state, draft, actions)

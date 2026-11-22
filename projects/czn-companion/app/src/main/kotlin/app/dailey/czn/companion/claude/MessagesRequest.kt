@@ -13,6 +13,7 @@ import com.anthropic.models.beta.messages.BetaMessageParam
 import com.anthropic.models.beta.messages.BetaOutputConfig
 import com.anthropic.models.beta.messages.BetaRequestMcpServerUrlDefinition
 import com.anthropic.models.beta.messages.BetaTextBlockParam
+import com.anthropic.models.beta.messages.BetaThinkingConfigAdaptive
 import com.anthropic.models.beta.messages.BetaTool
 import com.anthropic.models.beta.messages.MessageCreateParams
 import kotlin.io.encoding.Base64
@@ -61,8 +62,14 @@ object MessagesRequest {
             .builder()
             .model(MODEL)
             .maxTokens(8192)
-            .outputConfig(BetaOutputConfig.builder().effort(BetaOutputConfig.Effort.MEDIUM).build())
-            .apply { BETAS.forEach(::addBeta) }
+            .outputConfig(BetaOutputConfig.builder().effort(BetaOutputConfig.Effort.HIGH).build())
+            // Thinking is on by default but returned empty; a summary lands in the saved exchange.
+            .thinking(
+                BetaThinkingConfigAdaptive
+                    .builder()
+                    .display(BetaThinkingConfigAdaptive.Display.SUMMARIZED)
+                    .build(),
+            ).apply { BETAS.forEach(::addBeta) }
             .systemOfBetaTextBlockParams(
                 listOf(
                     textBlock(IDENTITY),
@@ -331,16 +338,15 @@ object MessagesRequest {
           check search_game_systems; for season content, events, shops, and restrictions,
           check search_posts, which wins when the two disagree; for strategy, check
           search_guides.
-        - When no result of a search answers the question, search once more with the game's
-          own words for the feature, taken from the screen or the results you got (a menu,
-          button, or topic name such as "Build Preset"), not the player's words. If that
-          search does not answer it either, stop searching and say you don't know.
         - Before stating a game fact, find the sentence in the screen or a tool result that
-          says it. When none does, you MUST say you don't know and point to the in-game help
-          ("i" button) or a player community; a related result is not an answer (a result
-          about editing Save Data does not say a run starts from one). This holds for what a
-          button or icon does too: MUST NOT suggest trying a control whose purpose no result
-          states.
+          says it; a related result is not an answer (a result about editing Save Data does
+          not say a run starts from one). When no sentence says it, you MUST search again
+          before replying, in the same turn: a different query in the game's own words for
+          the feature, menu, or action involved (such as "Build Preset" or "load preset"),
+          taken from the screen or the results, not the player's words. Only when that
+          search does not answer it either, say you don't know and point to the in-game help
+          ("i" button) or a player community. This holds for what a button or icon does too:
+          MUST NOT suggest trying a control whose purpose no result states.
         - The player asks for help with anything in the game: a Chaos run's deck, an event or
           minigame, a character's build (partner, equipment, potentials), where to spend
           points, a team. Advise on the player's goal only, once you know it. When neither the
@@ -378,7 +384,8 @@ object MessagesRequest {
         - When the best action depends on something else only the player knows (what they
           own, a preference) and neither the screen nor the history settles it, you MAY call
           ask_player, batching every open question into one call. You SHOULD advise instead
-          when a reasonable guess exists, and MUST NOT ask what a screenshot could show; name
+          when a reasonable guess about the player's situation exists (never about game
+          facts), and MUST NOT ask what a screenshot could show; name
           what to tap instead.
         - The app shows earlier questions you asked, with the player's answers, as <asked>
           blocks in your past replies. You MUST NOT write <asked> blocks yourself.

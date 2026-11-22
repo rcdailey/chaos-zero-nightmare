@@ -342,7 +342,6 @@ class OverlayService : AccessibilityService() {
     private fun closePanel() {
         if (!panelOpen.value) return
         setPanelFocusable(false)
-        advice.cancelNewRun()
         panelOpen.value = false
     }
 
@@ -360,9 +359,7 @@ class OverlayService : AccessibilityService() {
         PanelActions(
             onClose = ::closePanel,
             onHideButton = { settings.setButtonVisible(false) },
-            onNewRun = advice::requestNewRun,
-            onConfirmNewRun = advice::confirmNewRun,
-            onCancelNewRun = advice::cancelNewRun,
+            onNewRun = advice::newRun,
             onCompose = { startTyping(Typing.Question) },
             onSend = ::onSend,
             onStop = advice::stop,

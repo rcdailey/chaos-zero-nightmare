@@ -965,6 +965,8 @@ def _encounters(sources: _Sources) -> tuple[list[dict], list[dict], list[dict]]:
     by_step: dict[str, list[dict]] = defaultdict(list)
     for choice in choices:
         by_step[choice["step_id"]].append(choice)
+    for step_id, title in _screen_titles(choices).items():
+        steps[step_id]["name"] = title
 
     encounters = []
     for entry in sorted(listed, key=lambda e: e["id"]):
@@ -1204,13 +1206,34 @@ def _choice_row(
     }
 
 
+# A result's text names the follow-up screen it opens: "Event Encounter: [Into the Base]", or
+# without brackets at the end of the text.
+_SCREEN_TITLE = re.compile(r"Event Encounter: (?:\[([^\]\n]+)\]|([^\n\[]+?)\s*$)", re.MULTILINE)
+
+
+def _screen_titles(choices: list[dict]) -> dict[str, str]:
+    """Follow-up step id -> the screen title the results opening it name. e7bot names every
+    step after its event, but the game titles a follow-up screen itself. A step whose openers
+    name different titles (one per route) keeps its event name."""
+    titles: dict[str, set[str]] = defaultdict(set)
+    for choice in choices:
+        for result in choice["results"]:
+            if result["next_step"] and (found := _SCREEN_TITLE.search(result["text"] or "")):
+                titles[result["next_step"]].add(found[1] or found[2])
+    return {step_id: title for step_id, (title, *rest) in titles.items() if not rest}
+
+
 def _reward_text(reward: dict) -> str:
     """A reward's text with the game's placeholders filled where the data allows: plural
-    markers ({amount_ge_2}, {card_unit_ge_2}) only apply to amounts of 2 or more, and {id}
-    stands for the code in reward_multiple_link, which no source names."""
-    text = plain(reward.get("desc_option"))
+    markers ({amount_ge_2}, {card_unit_ge_2}, "(s)", "Cards") only apply to amounts of 2 or more, and
+    {id} stands for the code in reward_multiple_link, which no source names. The game's markup
+    also drops the space after a highlighted number ("<cc>1</>Cards")."""
+    markup = re.sub(r"(\d)</>(?=[^\W\d_])", r"\1</> ", reward.get("desc_option") or "")
+    text = plain(markup)
     if (reward.get("amount_max") or 0) < 2:
         text = re.sub(r"\s*\{\w+_ge_2\}", "", text)
+        text = re.sub(r"\b1 ((?:\w+ ){0,2})(\w+)\(s\)", r"1 \1\2", text)
+        text = re.sub(r"\b1 ((?:\w+ ){0,2})Cards\b(?!\[)", r"1 \1Card", text)
     if link := reward.get("reward_multiple_link"):
         text = text.replace("{id}", link)
     return text

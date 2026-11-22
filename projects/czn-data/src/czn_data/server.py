@@ -394,16 +394,23 @@ LIMIT 20
 # Events that can appear in a Chaos (%(chaos)s, an exact name from the chaos view): those
 # listed for it, plus common events of every Chaos.
 _IN_CHAOS = "(%(chaos)s::text IS NULL OR e.any_chaos OR %(chaos)s = ANY (e.chaos))"
-# Every version of the best-matching event: all listed entries with that exact name.
+# Every version of the best-matching event: all listed entries with that exact name. Follow-up
+# screen titles match too ("Into the Base" finds Differing Creeds); title is the one matched.
 ENCOUNTER_VERSIONS_SQL = f"""
-WITH best AS (
-    SELECT e.name FROM encounter e
-    WHERE {NAME_MATCH} AND {_IN_CHAOS}
-    ORDER BY {NAME_ORDER}, e.id
+WITH titles AS (
+    SELECT e.id, e.name AS event, e.name FROM encounter e WHERE {_IN_CHAOS}
+    UNION ALL
+    SELECT e.id, e.name, s.name
+    FROM encounter e JOIN encounter_step s ON s.id = ANY (e.steps[2:])
+    WHERE {_IN_CHAOS}
+), best AS (
+    SELECT event, name AS title FROM titles
+    WHERE {NAME_MATCH}
+    ORDER BY {NAME_ORDER}, id
     LIMIT 1
 )
-SELECT e.name, e.steps, e.url, e.data_fetched_at
-FROM encounter e JOIN best USING (name)
+SELECT e.name, e.steps, e.url, e.data_fetched_at, best.title
+FROM encounter e JOIN best ON e.name = best.event
 WHERE {_IN_CHAOS}
 ORDER BY e.id
 """
@@ -592,10 +599,11 @@ def _counted(step: dict) -> bool:
 
 def _shows(step: dict) -> int | None:
     """How many choices the screen displays. The game's count (shown_choices) leaves out
-    battle choices, which the screen always adds."""
+    battle choices, which the screen always adds, and can exceed the choices there are."""
     if not _counted(step):
         return None
-    return step["shown_choices"] + sum(c["kind"] == "battle" for c in step["choices"])
+    battles = sum(c["kind"] == "battle" for c in step["choices"])
+    return min(step["shown_choices"], len(step["choices"]) - battles) + battles
 
 
 def _random_draw(step: dict) -> str | None:
@@ -640,6 +648,7 @@ def _short_choice(choice: dict, draw: str | None) -> dict:
         {
             "answer": choice["text"],
             "random": choice["random_group"] and choice["kind"] != "battle" and draw,
+            "appears_when": choice["appears_when"],
             "dice": _dice(choice),
             "requires": _requires(choice),
             "gives": outcome("success"),
@@ -1529,10 +1538,14 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
         fine); they find the screen, including follow-up screens whose title is not an event
         name, and the result covers only those choices. Look up each new screen the same way.
         Without choices: each version of the event (the game picks one per run) with its
-        first screen in short form.
+        first screen in short form, versions with the same first screen sharing one entry.
+        opened_from names versions whose choices lead to this one; replace_link_from names
+        versions with a screen whose replace_link_encounter_id names it. follow_up: the name
+        matched a later screen's title, not the event's.
+        With choices, screen is the screen's own title when it differs from the event's.
         A screen: step (its number within the event), shows (how many choices the screen
-        offers; left out when conditions decide it), auto_choice (a choice the game takes without asking), appears_when (game
-        condition codes), then choices: kind (battle, info, end; none is a plain choice),
+        offers; left out when conditions decide it), auto_choice (a choice the game takes
+        without asking), appears_when (game condition codes), then choices: kind (battle, info, end; none is a plain choice),
         random_group (the game draws random choices per group; undrawn ones are not on
         screen), copies (identical choices listed more than once), dice (skill tag and
         target), requires (what picking it needs; a game condition code when the game gives
@@ -1542,7 +1555,7 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
         form, listing every choice that screen can offer, so pick now with the next screen in
         mind. A short choice: random (it appears only if drawn: the screen shows N of the
         M random choices, or may not appear when conditions decide the count),
-        dice, requires, gives (rewards on success), fails (on failure), leads_on (it opens
+        appears_when, dice, requires, gives (rewards on success), fails (on failure), leads_on (it opens
         a further screen). Fields named in the game's own snake_case are passed on unchanged
         from the game data; their meaning is unconfirmed. other_matches names other events
         with a screen offering the same choices. chaos narrows to events that can appear in
@@ -1553,15 +1566,40 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
             versions = await _query(ENCOUNTER_VERSIONS_SQL, params)
             if not versions:
                 return None
-            steps = await _encounter_step_rows([v["steps"][0] for v in versions])
-            return {
-                "name": versions[0]["name"],
-                "versions": [
-                    {"url": v["url"], "data_fetched_at": v.get("data_fetched_at")}
-                    | _screen_preview(steps[v["steps"][0]])
-                    for v in versions
-                ],
-            }
+            steps = await _encounter_step_rows([s for v in versions for s in v["steps"]])
+            # Versions with the same first screen are listed once, with every URL.
+            overview: dict[str, dict] = {}
+            for v in versions:
+                start = v["steps"][0]
+                preview = _screen_preview(steps[start])
+                links = {
+                    "opened_from": [o["url"] for o in versions if start in o["steps"][1:]],
+                    "replace_link_from": [
+                        o["url"]
+                        for o in versions
+                        if o is not v
+                        and any(
+                            steps[s].get("extra", {}).get("replace_link_encounter_id") == start
+                            for s in o["steps"]
+                        )
+                    ],
+                }
+                shown = overview.setdefault(
+                    json.dumps(preview, sort_keys=True, default=str),
+                    {"url": None, "data_fetched_at": v.get("data_fetched_at")} | preview,
+                )
+                shown["url"] = f"{shown['url']}, {v['url']}" if shown["url"] else v["url"]
+                shown |= {key: urls for key, urls in links.items() if urls}
+            title = versions[0]["title"]
+            return _present(
+                {
+                    "name": versions[0]["name"],
+                    "follow_up": f"{title} is a later screen of this event; pass its choices"
+                    if title != versions[0]["name"]
+                    else None,
+                    "versions": list(overview.values()),
+                }
+            )
         keys = [_choice_key(text) for text in choices]
         patterns = [re.sub(r"([\\%_])", r"\\\1", key) + "%" for key in keys]
         found = await _query(ENCOUNTER_SCREEN_SQL, params | {"choices": patterns})
@@ -1584,6 +1622,7 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
         return _present(
             {
                 "name": match["name"],
+                "screen": screen.get("name") if screen.get("name") != match["name"] else None,
                 "step": match["step"],
                 "url": match["url"],
                 "data_fetched_at": match.get("data_fetched_at"),

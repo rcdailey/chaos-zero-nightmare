@@ -9,7 +9,8 @@ and repeated keys cost tokens without helping it. Rules, applied recursively:
   when it is text (the item's name), then ``key: value`` fields joined by ``; ``. Long or
   multi-line text and nested mappings and lists of mappings go on indented lines below it.
 - Fields with the same value in every item of a list (source URL, fetch time) are stated once
-  above the items, on an ``every item:`` line.
+  above the items, on an ``every item:`` line. A shared leading field moves there too, unless an item would
+  then have no text left to lead it or the field is in ``KEPT_ON_ITEM``.
 - A list of scalars joins with ``, `` (a short list) or is one ``- `` line per value.
 - Datetimes are UTC to the minute; empty values are left out by the tools, so absent means
   unknown or none.
@@ -21,6 +22,9 @@ from datetime import UTC, date, datetime
 INLINE_CHARS = 160
 SHORT_LINES = 3
 INDENT = "  "
+# Leading fields that stay on each item even when all items share them: the next field would
+# lead unlabeled, and a choice's reward text would read as the choice.
+KEPT_ON_ITEM = {"answer"}
 
 
 def render(value: object) -> str:
@@ -113,17 +117,28 @@ def _name_key(item: dict) -> str | None:
 
 
 def _shared_fields(items: list[dict]) -> dict:
-    """Short scalar fields equal in every item, including a name they all share."""
+    """Short scalar fields equal in every item. A shared leading field moves too, and the next
+    text field leads each item, unless an item would have no text field left to lead it or
+    the field is in KEPT_ON_ITEM."""
     if len(items) < 2:
         return {}
     first = items[0]
-    return {
+    shared = {
         key: value
         for key, value in first.items()
         if not _is_record(value)
         and _short_text(value) is not None
         and all(key in item and item[key] == value for item in items[1:])
     }
+    label = _name_key(first)
+    if label in shared and (
+        label in KEPT_ON_ITEM
+        or any(
+            _name_key({k: v for k, v in item.items() if k not in shared}) is None for item in items
+        )
+    ):
+        del shared[label]
+    return shared
 
 
 def _item(item: dict, indent: str) -> list[str]:

@@ -39,10 +39,11 @@ MIRROR_HALL = {
             "simple_flavor_text": "Step inside",
             "mystery_flag": "Z",
             "success_link_encounter_option_eff": {
+                "overview_eff_desc": "Event Encounter: [The Mirror]",
                 "next_encounter_id": "e1a-1",
                 "next_encounter": {
                     "id": "e1a-1",
-                    "name": "The Mirror",
+                    "name": "Mirror Hall",
                     "options": [
                         {
                             "id": "o1",
@@ -57,6 +58,7 @@ MIRROR_HALL = {
                         {
                             "id": "o2",
                             "simple_flavor_text": "Turn back",
+                            "appear_link_encounter_trigger_id": ["trg_tried"],
                             "success_link_encounter_option_eff": {
                                 "next_encounter_id": "e1a",
                                 "is_circular_reference": True,
@@ -77,7 +79,20 @@ MIRROR_HALL_B = {
     "options": [
         {"id": "o3", "simple_flavor_text": "Leave quietly"},
         {"id": "o4", "simple_flavor_text": "Pray", "select_type": "RANDOM"},
-        {"id": "o5", "simple_flavor_text": "Sing", "select_type": "RANDOM"},
+        {
+            "id": "o5",
+            "simple_flavor_text": "Sing",
+            "select_type": "RANDOM",
+            "success_link_encounter_option_eff": {
+                "reward0_reward": {
+                    "id": "r2",
+                    "reward_type": "CARD_ID",
+                    "amount_max": 1,
+                    "desc_option": "Obtain Cards[Hymn] <cc>1</>Cards and <cc>1</> time(s)"
+                    " to 1 random card(s)",
+                }
+            },
+        },
         {"id": "o6", "option_type": "ATTACK", "link_battle_id": "b1"},
     ],
 }
@@ -855,11 +870,13 @@ def game_data(conn):
                 "link_encounter_set_id": "e1",
                 "link_encounter_pack_id": "p",
             }
-            for stage in ("e1a", "e1b")
+            for stage in ("e1a", "e1b", "e1c")
         ],
     )
     add_e7bot(conn, "czn/encounters/e1a", MIRROR_HALL)
     add_e7bot(conn, "czn/encounters/e1b", MIRROR_HALL_B)
+    # A third version whose first screen matches the second's.
+    add_e7bot(conn, "czn/encounters/e1c", {**MIRROR_HALL_B, "id": "e1c"})
     add_e7bot(
         conn,
         "czn/rankings/list",
@@ -1029,24 +1046,36 @@ def test_list_encounters_filters_by_chaos_and_names_copy_answers(call, game_data
     ]
 
 
+def overview_versions(found: str) -> list[str]:
+    """Each version block of a get_encounter overview."""
+    # A version leads with its URL, or with its screen name when the names differ.
+    return re.split(r"^- (?=https|Mirror Hall)", top_field(found, "versions"), flags=re.MULTILINE)[
+        1:
+    ]
+
+
 def test_get_encounter_without_choices_gives_each_versions_first_screen(call, game_data):
     found = call("get_encounter", name="mirror hall")
 
-    first, second = re.split(r"^- https", top_field(found, "versions"), flags=re.MULTILINE)[1:]
-    assert lines_with(first, "Step inside") == ["- Step inside; leads_on: yes"]
+    first, second = overview_versions(found)
+    assert lines_with(first, "Step inside") == [
+        "- Step inside; gives: Event Encounter: [The Mirror]; leads_on: yes"
+    ]
     # The other version stays apart, and the first one's follow-up screen is not listed.
     assert "Leave quietly" in second and "Leave quietly" not in first
     assert "Look into the mirror" not in found
+    # Versions with the same first screen are listed once, with both URLs.
+    assert "encounters/e1b" in second and "encounters/e1c" in second
 
 
 def test_get_encounter_counts_what_the_screen_shows(call, conn, game_data):
-    second = re.split(
-        r"^- https",
-        top_field(call("get_encounter", name="mirror hall"), "versions"),
-        flags=re.MULTILINE,
-    )[2]
-    assert "shows: 3" in second.splitlines()[0]
+    second = overview_versions(call("get_encounter", name="mirror hall"))[1]
+    assert "shows: 3" in second
     assert lines_with(second, "- Pray") == ["- Pray; random: screen shows 1 of 2"]
+    # Plural markers of a single reward are dropped, and the space after a number restored.
+    assert lines_with(second, "- Sing")[0].endswith(
+        "gives: Obtain Cards[Hymn] 1 Card and 1 time to 1 random card"
+    )
 
     # A condition on a choice depends on game state, so no count is stated.
     conditional = json.loads(json.dumps(MIRROR_HALL_B))
@@ -1055,11 +1084,7 @@ def test_get_encounter_counts_what_the_screen_shows(call, conn, game_data):
         "UPDATE e7bot.document SET body = %s WHERE path = 'czn/encounters/e1b'",
         (Jsonb(conditional),),
     )
-    second = re.split(
-        r"^- https",
-        top_field(call("get_encounter", name="mirror hall"), "versions"),
-        flags=re.MULTILINE,
-    )[2]
+    second = overview_versions(call("get_encounter", name="mirror hall"))[1]
     assert "shows:" not in second
     assert lines_with(second, "- Pray") == ["- Pray; random: may not appear"]
 
@@ -1072,7 +1097,30 @@ def test_get_encounter_gives_the_screen_with_those_choices_and_previews_the_next
     assert lines_with(found, "Look into the mirror") == [
         "- Look into the mirror; dice: Insight 6; gives: Copy 1 card; fails: End the event"
     ]
-    assert lines_with(found, "Turn back") == ["- Turn back; leads_on: yes"]
+    assert lines_with(found, "Turn back") == ["- Turn back; appears_when: trg_tried; leads_on: yes"]
+    # The follow-up screen carries the title the game gives it, not the event's name.
+    assert lines_with(found, "name: The Mirror") == ["name: The Mirror"]
+
+
+def test_get_encounter_names_each_choice_when_all_share_a_text(call, conn, game_data):
+    # The screen lists only the two Pray choices, each with its own reward, so each would
+    # still have text to lead its line without the answer.
+    same_text = json.loads(json.dumps(MIRROR_HALL_B))
+    same_text["options"] = same_text["options"][1:3]
+    same_text["options"][0]["success_link_encounter_option_eff"] = {"reward0_reward": COPY_REWARD}
+    same_text["options"][1]["simple_flavor_text"] = "Pray"
+    conn.execute(
+        "UPDATE e7bot.document SET body = %s WHERE path = 'czn/encounters/e1b'",
+        (Jsonb(same_text),),
+    )
+
+    found = call("get_encounter", name="mirror hall", choices=["Pray"])
+    overview = overview_versions(call("get_encounter", name="mirror hall"))[1]
+
+    assert len(lines_with(found, "- Pray")) == 2
+    pray = [line for line in overview.splitlines() if "gives:" in line]
+    assert [line.strip().split(";")[0] for line in pray] == ["- Pray", "- Pray"]
+    assert "gives: Copy 1 card" in pray[0]
 
 
 def test_get_encounter_finds_a_follow_up_screen_by_its_choices(call, game_data):
@@ -1080,10 +1128,52 @@ def test_get_encounter_finds_a_follow_up_screen_by_its_choices(call, game_data):
     found = call("get_encounter", name="The Mirror", choices=["[Insight] Look into the mi…"])
 
     assert top_field(found, "name") == "Mirror Hall"
+    assert top_field(found, "screen") == "The Mirror"
     assert top_field(found, "step") == "2"
     assert "Turn back" not in found
     assert lines_with(found, "failure") == ["- failure; text: End the event"]
     assert "Copy 1 card; class: copy" in found
+
+
+def test_get_encounter_finds_the_event_by_a_follow_up_screens_title(call, game_data):
+    found = call("get_encounter", name="The Mirror")
+
+    assert top_field(found, "name") == "Mirror Hall"
+    assert top_field(found, "follow_up") == (
+        "The Mirror is a later screen of this event; pass its choices"
+    )
+
+
+def test_get_encounter_names_versions_that_lead_to_a_version(call, conn, game_data):
+    # e1b's choices open e1c: one by a link, both naming the screen differently.
+    hall = {
+        "id": "e1c",
+        "name": "Mirror Hall",
+        "replace_link_encounter_id": "e1b",
+        "options": [{"id": "o7", "simple_flavor_text": "Wait"}],
+    }
+    linked = json.loads(json.dumps(MIRROR_HALL_B))
+    for option, title in ((linked["options"][1], "Altar"), (linked["options"][2], "Shrine")):
+        option["success_link_encounter_option_eff"] = {
+            "overview_eff_desc": f"Event Encounter: [{title}]",
+            "next_encounter_id": "e1c",
+            "next_encounter": hall,
+        }
+    for path, body in (("e1b", linked), ("e1c", hall)):
+        conn.execute(
+            "UPDATE e7bot.document SET body = %s WHERE path = %s",
+            (Jsonb(body), f"czn/encounters/{path}"),
+        )
+
+    found = call("get_encounter", name="mirror hall")
+
+    second, third = overview_versions(found)[1:]
+    assert "opened_from: https://wiki.e7bot.top/#/czn/encounters/e1b" in third
+    # e1c's screen names e1b in replace_link_encounter_id.
+    assert "replace_link_from: https://wiki.e7bot.top/#/czn/encounters/e1c" in second
+    # Openers name two titles for the screen, so it keeps the event's name.
+    pray = call("get_encounter", name="mirror hall", choices=["Pray"])
+    assert "Altar" not in pray.replace("[Altar]", "")
 
 
 def test_build_rejects_a_link_to_a_missing_step_and_keeps_the_previous_events(
@@ -1099,7 +1189,7 @@ def test_build_rejects_a_link_to_a_missing_step_and_keeps_the_previous_events(
     with pytest.raises(BuildError, match="no step nowhere"):
         build(conn)
 
-    assert conn.execute("SELECT count(*) FROM encounter").fetchone()[0] == 2
+    assert conn.execute("SELECT count(*) FROM encounter").fetchone()[0] == 3
 
 
 def test_list_equipment_by_chaos_matches_listed_and_shortened_zone_names(call, conn, game_data):

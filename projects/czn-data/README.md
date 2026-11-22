@@ -391,10 +391,11 @@ The answer lists each character figure found, top row first and left to right wi
   monster icon; `names` is empty.
 
 An anime person detector (`deepghs/anime_person_detection`) finds the figures; CCIP
-(`deepghs/ccip_onnx`), a model trained to tell anime characters apart, compares each figure with
-the prints `enrich` stored. Characters added since the last `enrich` cannot be named. The server
-handles one screenshot at a time: about 0.5 seconds per figure on 8 free cores, and about 1 GB
-of memory with the models loaded. Art unlike the card art (battle screens) is untested.
+(`deepghs/ccip_onnx`), a model trained to tell anime characters apart, compares each figure with the
+prints `enrich` stored. Characters added since the last `enrich` cannot be named. The server handles
+one screenshot at a time: about 0.5 seconds per figure on 8 free cores, and about 400 MB of memory
+with the models loaded (about 700 MB while it reads a 6-figure screenshot). Art unlike the card art
+(battle screens) is untested.
 
 ## Development
 

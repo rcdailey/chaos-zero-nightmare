@@ -15,8 +15,8 @@ from functools import cache
 
 MODEL = "BAAI/bge-small-en-v1.5"
 PASSAGE_CHARS = 300
-# fastembed's default of 256 texts per batch peaks near 1.2 GiB, over the pod's 1 GiB limit;
-# 32 peaks near 370 MiB (about 270 MiB of that is the model).
+# fastembed's default of 256 texts per batch peaks near 1.2 GiB; 32 peaks near 370 MiB (about
+# 270 MiB of that is the model).
 PASSAGE_BATCH_SIZE = 32
 
 
@@ -28,7 +28,8 @@ def passage_text(post_title: str, heading: str | None, text: str) -> str:
 def _model():
     from fastembed import TextEmbedding
 
-    return TextEmbedding(MODEL)
+    # See czn_data.identity for why the memory arena is off.
+    return TextEmbedding(MODEL, enable_cpu_mem_arena=False)
 
 
 def passages(texts: Iterable[str]) -> list[list[float]]:

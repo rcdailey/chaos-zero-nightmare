@@ -154,7 +154,15 @@ class Identifier:
             hub.download(repo, revision, files, model_dir)
         except OSError as error:  # urllib errors are OSErrors
             raise hub.ModelUnavailable(f"model download failed: {error!r}") from error
-        session = onnxruntime.InferenceSession(model_dir / name, providers=["CPUExecutionProvider"])
+        # onnxruntime's CPU memory arena keeps the most memory any run needed and grows again
+        # for each new input size (figures per screenshot), so the server held about 1.7 GB
+        # instead of about 650 MB with the search models loaded. Turning it off cost no
+        # measurable time here and about 5% on a search.
+        options = onnxruntime.SessionOptions()
+        options.enable_cpu_mem_arena = False
+        session = onnxruntime.InferenceSession(
+            model_dir / name, options, providers=["CPUExecutionProvider"]
+        )
         self._sessions[name] = session
         return session
 

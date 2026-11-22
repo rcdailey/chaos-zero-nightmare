@@ -20,7 +20,8 @@ BATCH_SIZE = 4
 def _model():
     from fastembed.rerank.cross_encoder import TextCrossEncoder
 
-    return TextCrossEncoder(MODEL)
+    # See czn_data.identity for why the memory arena is off.
+    return TextCrossEncoder(MODEL, enable_cpu_mem_arena=False)
 
 
 def scores(query: str, passages: list[str]) -> list[float]:

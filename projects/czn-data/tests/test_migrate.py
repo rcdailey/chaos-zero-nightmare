@@ -16,7 +16,10 @@ FIXTURE = Path(__file__).parent / "fixtures" / "character.html"
 CHARACTER_URL = "https://www.prydwen.gg/chaos-zero-nightmare/characters/mei-lin"
 
 
-def test_database_from_before_migrations_keeps_its_pages_and_gets_rebuilt_rows(database_url):
+def test_database_from_before_migrations_keeps_its_pages_and_gets_rebuilt_rows(
+    empty_database_url,
+):
+    database_url = empty_database_url
     # The cluster database was created by the old schema.sql, which the baseline reproduces:
     # its tables exist, but there is no migration history and no rows from the new parsers.
     config = Config()
@@ -43,7 +46,8 @@ def test_database_from_before_migrations_keeps_its_pages_and_gets_rebuilt_rows(d
         assert title == "Mei Lin"
 
 
-def test_concurrent_migrations_both_succeed(database_url):
+def test_concurrent_migrations_both_succeed(empty_database_url):
+    database_url = empty_database_url
     errors = []
 
     def run():

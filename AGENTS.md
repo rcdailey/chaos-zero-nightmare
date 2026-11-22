@@ -28,10 +28,11 @@ directory. Before working in a project, read its `AGENTS.md`; shell commands do 
   `adb exec-out run-as app.dailey.czn.companion cat databases/<file> > <file>`, then query with
   `sqlite3 runs.db`. The current session is `run.active = 1`; its messages are `run_entry` by
   `position` (`screen`: characters the app named; `exchange`: every tool call's full input and
-  result), and an unfinished reply is in `open_turn`. The newest 20 screenshots, at full size, are
-  in `files/screenshots` (`run_entry.screenshot` names one; when Claude asked for character
-  names, `<millis>.identify.json` beside it holds each figure's candidates and match scores);
-  copy them with `run-as` too.
+  result, replayed in later requests), an unfinished reply is in `open_turn`, and each Messages API
+  request's tokens, cache reads and writes, and cleared tool results are in `request_usage`. The
+  newest 20 screenshots, at full size, are in `files/screenshots` (`run_entry.screenshot` names one;
+  when Claude asked for character names, `<millis>.identify.json` beside it holds each figure's
+  candidates and match scores); copy them with `run-as` too.
 - `docs/game-data-investigation.md`: formats of CZN's own game files and the open build-folder
   lookup; only the Help text is implemented.
 - Markdown anywhere: check with `mise run lint` from the repository root.

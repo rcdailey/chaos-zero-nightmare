@@ -21,6 +21,8 @@ data class RunEntry(
     val asks: List<AnsweredAsk> = emptyList(),
     /** What the app found on a user message's screenshot (see [RunEntryRow.screen]). */
     val screen: String = "",
+    /** An assistant reply's whole exchange as JSON (see [RunEntryRow.exchange]). */
+    val exchange: String = "",
 )
 
 /** The exchange in progress in the active run; see [OpenTurnRow]. */
@@ -64,6 +66,23 @@ class RunRepository(
     suspend fun setCharacter(name: String) =
         db.useWriterConnection { connection ->
             connection.immediateTransaction { dao.setCharacter(activeRunId(), name) }
+        }
+
+    /** The active run's saved target deck; null until Claude saves one, and after [newRun]. */
+    suspend fun planNow(): String? = dao.activeRun()?.plan
+
+    suspend fun setPlan(plan: String) =
+        db.useWriterConnection { connection ->
+            connection.immediateTransaction { dao.setPlan(activeRunId(), plan) }
+        }
+
+    /** The newest response id of the active run's requests, for cache diagnostics. */
+    suspend fun lastMessageId(): String? = dao.activeRun()?.let { dao.lastMessageId(it.id) }
+
+    /** Saves one request's usage in the active run; the row's runId is replaced. */
+    suspend fun saveUsage(usage: RequestUsageRow) =
+        db.useWriterConnection { connection ->
+            connection.immediateTransaction { dao.insertUsage(usage.copy(runId = activeRunId())) }
         }
 
     suspend fun entriesNow(): List<RunEntry> =
@@ -177,6 +196,7 @@ class RunRepository(
             splitTools(row.tools),
             PlayerAsks.decode(row.asks),
             row.screen,
+            row.exchange,
         )
 
     private fun joinTools(tools: List<String>) = tools.joinToString("\n") { it.replace('\n', ' ') }

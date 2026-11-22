@@ -1,5 +1,7 @@
 package app.dailey.czn.companion.claude
 
+import android.database.sqlite.SQLiteException
+import android.util.Log
 import app.dailey.czn.companion.ask.Answer
 import app.dailey.czn.companion.ask.AnsweredAsk
 import app.dailey.czn.companion.ask.Option
@@ -10,6 +12,7 @@ import app.dailey.czn.companion.auth.CznDataAuth
 import app.dailey.czn.companion.auth.SignInRequired
 import app.dailey.czn.companion.characters.ScreenCharacters
 import app.dailey.czn.companion.run.OpenTurn
+import app.dailey.czn.companion.run.RequestUsageRow
 import app.dailey.czn.companion.run.RunRepository
 import app.dailey.czn.companion.run.ScreenshotArchive
 import com.anthropic.client.AnthropicClient
@@ -168,8 +171,10 @@ class ClaudeConversation(
         player: PlayerInput,
     ) {
         val history = run.entriesNow()
-        // Read once, so the request prefix stays identical, and cached, across this turn.
-        val character = run.characterNow()
+        // Read once, so the newest message stays identical, and cached, across this turn.
+        val state = RunState(run.characterNow(), run.planNow())
+        var previousMessageId = run.lastMessageId()
+        var round = 0
         val reply = StringBuilder(open.reply)
         val tools = open.tools.toMutableList()
         val asks = open.asks.toMutableList()
@@ -217,10 +222,15 @@ class ClaudeConversation(
                         open.jpeg,
                         CznDataAuth.MCP_URL,
                         cznToken,
-                        character,
+                        state,
                         turn,
+                        previousMessageId,
                     )
+                val started = System.currentTimeMillis()
                 val message = stream(client, params, reply, tools)
+                round += 1
+                recordUsage(message, started, round, params.messages().size)
+                previousMessageId = message.id()
                 when (message.stopReason().orElse(null)) {
                     // App tools run at the start of the next round, from the saved message.
                     // A paused reply (a long server-side tool call) resumes when resent.
@@ -323,6 +333,66 @@ class ClaudeConversation(
         return accumulator.message()
     }
 
+    /**
+     * Saves one request's token use and cache behavior to the run ([RequestUsageRow]) and logs
+     * it under [USAGE_TAG]. A failure to save never fails the reply.
+     */
+    private suspend fun recordUsage(
+        message: BetaMessage,
+        started: Long,
+        round: Int,
+        messages: Int,
+    ) {
+        val usage = message.usage()
+        val creation = usage.cacheCreation().orElse(null)
+        val cleared =
+            message
+                .contextManagement()
+                .orElse(null)
+                ?.appliedEdits()
+                .orEmpty()
+                .mapNotNull { it.clearToolUses20250919().orElse(null) }
+        val miss =
+            message
+                .diagnostics()
+                .orElse(null)
+                ?.cacheMissReason()
+                ?.orElse(null)
+        val missJson = miss?.let { JSON.readTree(JSON.writeValueAsString(it)) }
+        val row =
+            RequestUsageRow(
+                runId = 0,
+                startedAt = started,
+                durationMs = System.currentTimeMillis() - started,
+                messageId = message.id(),
+                round = round,
+                stopReason = message.stopReason().map { it.asString() }.orElse(""),
+                messages = messages,
+                inputTokens = usage.inputTokens(),
+                cacheWrite5mTokens =
+                    creation?.ephemeral5mInputTokens()
+                        ?: usage.cacheCreationInputTokens().orElse(0),
+                cacheWrite1hTokens = creation?.ephemeral1hInputTokens() ?: 0,
+                cacheReadTokens = usage.cacheReadInputTokens().orElse(0),
+                outputTokens = usage.outputTokens(),
+                clearedToolUses = cleared.sumOf { it.clearedToolUses() },
+                clearedInputTokens = cleared.sumOf { it.clearedInputTokens() },
+                cacheMissReason = missJson?.get("type")?.asText().orEmpty(),
+                cacheMissedTokens = missJson?.get("cache_missed_input_tokens")?.asLong() ?: 0,
+            )
+        // The response's block types in order, such as thinking,mcp_tool_use,text.
+        val blocks =
+            message.content().joinToString(",") {
+                JSON.readTree(JSON.writeValueAsString(it))["type"]?.asText().orEmpty()
+            }
+        Log.i(USAGE_TAG, "$row blocks=$blocks")
+        try {
+            run.saveUsage(row)
+        } catch (e: SQLiteException) {
+            Log.w(USAGE_TAG, "usage not saved", e)
+        }
+    }
+
     /** Runs the app tools in [uses] and returns their results as one message. */
     private suspend fun toolResults(
         uses: List<BetaToolUseBlockParam>,
@@ -394,6 +464,16 @@ class ClaudeConversation(
                     },
                     onFailure = { it.message.orEmpty() to true },
                 )
+            }
+
+            MessagesRequest.SET_RUN_PLAN -> {
+                val plan = input["plan"]?.asString()?.orElse(null)?.trim()
+                if (plan.isNullOrEmpty()) {
+                    "plan is required." to true
+                } else {
+                    run.setPlan(plan)
+                    "Saved. Later requests of this run carry the plan." to false
+                }
             }
 
             MessagesRequest.SET_RUN_CHARACTER -> {
@@ -515,5 +595,8 @@ class ClaudeConversation(
 
         /** Requests per reply; a reply that needs more is assumed stuck in a tool loop. */
         const val MAX_ROUNDS = 8
+
+        /** Logcat tag of each request's usage line (`adb logcat -s CznUsage`). */
+        const val USAGE_TAG = "CznUsage"
     }
 }

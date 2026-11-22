@@ -35,9 +35,10 @@ class MessagesRequestTest {
     private fun build(
         jpeg: ByteArray? = byteArrayOf(1, 2, 3),
         text: String = "Why B?",
-        character: String? = null,
+        run: RunState = RunState(),
         turn: List<BetaMessageParam> = emptyList(),
         history: List<RunEntry> = this.history,
+        previousMessageId: String? = null,
     ) = wire(
         MessagesRequest.build(
             history,
@@ -45,23 +46,76 @@ class MessagesRequestTest {
             jpeg,
             "https://czn.example/mcp",
             "czn-token",
-            character,
+            run,
             turn,
+            previousMessageId,
         ),
     )
 
+    private fun JsonObject.messages() = this["messages"]!!.jsonArray.map { it.jsonObject }
+
+    /** The player's text in the newest message: the block before the run state. */
+    private fun JsonObject.question() = content().dropLast(1).last().text()
+
     @Test
-    fun `a saved message's named characters reach Claude in later turns`() {
+    fun `a reply saved before exchanges were kept reaches Claude as text with its names line`() {
         val line = "Characters on screen, top to bottom, left to right: Mika"
         val saved =
             listOf(
                 RunEntry(EntryKind.User, "Who?", screen = line),
                 RunEntry(EntryKind.Assistant, "Mika."),
             )
-        val messages = build(history = saved)["messages"]!!.jsonArray.map { it.jsonObject }
+        val messages = build(history = saved).messages()
         assertEquals(listOf("Who?", line), messages[0].content().map { it.text() })
-        assertNull(messages[0].content().last()["cache_control"])
-        assertNotNull(messages[1].content().last()["cache_control"])
+        assertEquals("Mika.", messages[1].content().single().text())
+    }
+
+    /** A saved reply's exchange: Claude thought, looked a card up, then answered. */
+    private fun exchange(): String {
+        fun block(json: String) = jsonMapper().readValue(json, BetaContentBlockParam::class.java)
+        val messages =
+            listOf(
+                BetaMessageParam.ofAssistantOfContentBlockParams(
+                    listOf(
+                        block("""{"type":"thinking","thinking":"hm","signature":"sig"}"""),
+                        block(
+                            """{"type":"mcp_tool_use","id":"m1","name":"get_card",""" +
+                                """"server_name":"czn","input":{"name":"Blade"}}""",
+                        ),
+                        block(
+                            """{"type":"mcp_tool_result","tool_use_id":"m1",""" +
+                                """"content":[{"type":"text","text":"Blade: 360% Damage"}]}""",
+                        ),
+                        block("""{"type":"text","text":"Take Blade."}"""),
+                    ),
+                ),
+            )
+        return jsonMapper().writeValueAsString(messages)
+    }
+
+    @Test
+    fun `later turns see earlier tool calls and results, without thinking`() {
+        val saved =
+            listOf(
+                RunEntry(EntryKind.User, "Which?", screen = "Characters on screen: Mika"),
+                RunEntry(EntryKind.Assistant, "Take Blade.", exchange = exchange()),
+            )
+        val messages = build(history = saved).messages()
+
+        // The names line came from a tool call the exchange already holds.
+        assertEquals(listOf("Which?"), messages[0].content().map { it.text() })
+        val reply = messages[1].content()
+        assertEquals(
+            listOf("mcp_tool_use", "mcp_tool_result", "text"),
+            reply.map { it.string("type") },
+        )
+        assertEquals(
+            "Blade: 360% Damage",
+            reply[1]["content"]!!
+                .jsonArray[0]
+                .jsonObject
+                .text(),
+        )
     }
 
     /** The request body as the SDK sends it. */
@@ -70,7 +124,7 @@ class MessagesRequestTest {
 
     @Test
     fun `a screen read without text sends the default question, never empty text`() {
-        val messages = build(text = "")["messages"]!!.jsonArray.map { it.jsonObject }
+        val messages = build(text = "").messages()
         assertEquals(
             MessagesRequest.SCREEN_ONLY,
             messages
@@ -79,14 +133,7 @@ class MessagesRequestTest {
                 .single()
                 .text(),
         )
-        assertEquals(
-            MessagesRequest.SCREEN_ONLY,
-            messages
-                .last()
-                .content()
-                .last()
-                .text(),
-        )
+        assertEquals(MessagesRequest.SCREEN_ONLY, messages.last().question())
     }
 
     @Test
@@ -96,13 +143,19 @@ class MessagesRequestTest {
     }
 
     @Test
-    fun `the run's character reaches Claude in the system prompt`() {
-        fun system(character: String?) =
-            build(jpeg = null, character = character)["system"]!!
-                .jsonArray
-                .joinToString { it.jsonObject.text().orEmpty() }
-        assertTrue("Mika" in system("Mika"))
-        assertTrue("not known" in system(null))
+    fun `the run's character and saved plan reach Claude with every request`() {
+        fun state(run: RunState) =
+            build(run = run)
+                .messages()
+                .last()
+                .content()
+                .last()
+                .text()
+                .orEmpty()
+        val known = state(RunState("Rossweisse", "Sword Resonance II x4 (3 Duplicates)"))
+        assertTrue("Rossweisse" in known && "Sword Resonance II x4 (3 Duplicates)" in known)
+        val unknown = state(RunState())
+        assertTrue("not known" in unknown && "none" in unknown)
     }
 
     private fun toolExchange(): Pair<BetaMessageParam, BetaMessageParam> {
@@ -157,26 +210,90 @@ class MessagesRequestTest {
 
     @Test
     fun `history keeps order and only the newest message has an image`() {
-        val messages = build()["messages"]!!.jsonArray.map { it.jsonObject }
+        val messages = build().messages()
         assertEquals(listOf("user", "assistant", "user"), messages.map { it.string("role") })
         val imageCounts = messages.map { m -> m.content().count { it.string("type") == "image" } }
         assertEquals(listOf(0, 0, 1), imageCounts)
-        assertEquals(
-            "Why B?",
-            messages
-                .last()
-                .content()
-                .last()
-                .text(),
-        )
+        assertEquals("Why B?", messages.last().question())
     }
 
     @Test
-    fun `cache breakpoint sits on the last history message`() {
-        val messages = build()["messages"]!!.jsonArray.map { it.jsonObject }
-        assertNull(messages[0].content()[0]["cache_control"])
-        assertNotNull(messages[1].content()[0]["cache_control"])
-        assertNull(messages[2].content().last()["cache_control"])
+    fun `cache breakpoints mark the app prompt, the last two turns, and the request's end`() {
+        val turns =
+            (1..3).flatMap {
+                listOf(
+                    RunEntry(EntryKind.User, "Q$it"),
+                    RunEntry(
+                        EntryKind.Assistant,
+                        "A$it",
+                        exchange =
+                            if (it ==
+                                3
+                            ) {
+                                exchange()
+                            } else {
+                                ""
+                            },
+                    ),
+                )
+            }
+        val (toolUse, result) = toolExchange()
+        val body = build(history = turns, turn = listOf(toolUse, result))
+
+        fun marked(blocks: List<JsonObject>) = blocks.map { it["cache_control"] != null }
+        val system = body["system"]!!.jsonArray.map { it.jsonObject }
+        assertEquals(listOf(false, true), marked(system))
+        val messages = body.messages()
+        val markedBlocks =
+            messages.flatMapIndexed { at, message ->
+                message.content().mapIndexedNotNull { block, it ->
+                    (at to block).takeIf { _ -> it["cache_control"] != null }
+                }
+            }
+        // Turn 2's reply, turn 3's last block (its exchange's text), and this turn's result.
+        assertEquals(listOf(3 to 0, 5 to 2, messages.lastIndex to 0), markedBlocks)
+    }
+
+    @Test
+    fun `a response that ended on thinking is sent back without that thinking`() {
+        fun block(json: String) = jsonMapper().readValue(json, BetaContentBlockParam::class.java)
+        val (_, result) = toolExchange()
+        val response =
+            BetaMessageParam.ofAssistantOfContentBlockParams(
+                listOf(
+                    block("""{"type":"thinking","thinking":"a","signature":"s1"}"""),
+                    toolExchange()
+                        .first
+                        .content()
+                        .get()
+                        .asContentBlockParams()
+                        .single(),
+                    block("""{"type":"thinking","thinking":"b","signature":"s2"}"""),
+                ),
+            )
+        val sent = build(turn = listOf(response, result)).messages()
+        val types = sent[sent.lastIndex - 1].content().map { it.string("type") }
+        assertEquals(listOf("thinking", "tool_use"), types)
+    }
+
+    @Test
+    fun `each request names the run's newest response for cache diagnostics`() {
+        val first = build(previousMessageId = null)["diagnostics"]!!.jsonObject
+        assertTrue(first.containsKey("previous_message_id"))
+        val later = build(previousMessageId = "msg_1")["diagnostics"]!!.jsonObject
+        assertEquals("msg_1", later.string("previous_message_id"))
+    }
+
+    @Test
+    fun `clearing old tool results never clears the run's plan`() {
+        val edit =
+            build()["context_management"]!!
+                .jsonObject["edits"]!!
+                .jsonArray
+                .single()
+                .jsonObject
+        val kept = edit["exclude_tools"]!!.jsonArray.map { it.jsonPrimitive.content }
+        assertTrue(MessagesRequest.SET_RUN_PLAN in kept && "plan_deck" in kept)
     }
 
     @Test
@@ -225,12 +342,12 @@ class MessagesRequestTest {
             server.string("name"),
             body["tools"]!!.jsonArray[0].jsonObject.string("mcp_server_name"),
         )
+        // Without a screenshot, the newest message is the question and the run state.
         assertEquals(
-            1,
-            body["messages"]!!
-                .jsonArray
+            2,
+            body
+                .messages()
                 .last()
-                .jsonObject
                 .content()
                 .size,
         )

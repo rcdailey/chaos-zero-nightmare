@@ -25,6 +25,48 @@ data class RunRow(
     val active: Boolean,
     /** The character whose deck this run builds, as the CZN data server names it. */
     val character: String? = null,
+    /** The target deck Claude saved for this run (set_run_plan), sent with every request. */
+    val plan: String? = null,
+)
+
+/**
+ * Token use and cache behavior of one Messages API request, kept for diagnosing cost and
+ * caching; never sent or shown. Token fields are the response's `usage`: [inputTokens] counts
+ * only the tokens after the last cache breakpoint, so a request's whole prompt is
+ * [inputTokens] + [cacheWrite5mTokens] + [cacheWrite1hTokens] + [cacheReadTokens].
+ */
+@Entity(
+    tableName = "request_usage",
+    foreignKeys = [ForeignKey(RunRow::class, ["id"], ["runId"], onDelete = ForeignKey.CASCADE)],
+    indices = [Index("runId")],
+)
+data class RequestUsageRow(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val runId: Long,
+    /** When the request started, in epoch milliseconds. */
+    val startedAt: Long,
+    val durationMs: Long,
+    /** The response's message id; the next request names it for cache diagnostics. */
+    val messageId: String,
+    /** 1 for a turn's first request, then one more per request after tool calls. */
+    val round: Int,
+    val stopReason: String,
+    /** Messages sent, counting the history and this turn's exchange. */
+    val messages: Int,
+    val inputTokens: Long,
+    val cacheWrite5mTokens: Long,
+    val cacheWrite1hTokens: Long,
+    val cacheReadTokens: Long,
+    val outputTokens: Long,
+    /** Old tool results the API cleared from this request (context editing), and their size. */
+    val clearedToolUses: Long,
+    val clearedInputTokens: Long,
+    /**
+     * The API's reason the prompt diverged from the previous request's (cache diagnostics),
+     * such as `messages_changed`; empty when nothing diverged or no comparison was made.
+     */
+    val cacheMissReason: String,
+    val cacheMissedTokens: Long,
 )
 
 /**
@@ -60,8 +102,8 @@ class OpenTurnRow(
 )
 
 /**
- * One message in a run's conversation, in order. Text only; a screenshot is kept only in
- * [OpenTurnRow] while its exchange is open.
+ * One message in a run's conversation, in order. A screenshot is sent only while its exchange
+ * is open ([OpenTurnRow]); later requests carry the message without it.
  */
 @Entity(
     tableName = "run_entry",
@@ -91,8 +133,9 @@ data class RunEntryRow(
     @ColumnInfo(defaultValue = "") val screenshot: String = "",
     /**
      * Everything Claude and the app exchanged for an assistant reply, as in [OpenTurnRow.turn]
-     * plus Claude's last message: every tool call with its full input and result. Kept for
-     * debugging only; never sent or shown.
+     * plus Claude's last message: every tool call with its full input and result. Later requests
+     * send it as the reply (see `MessagesRequest`), so Claude keeps its earlier lookups; empty
+     * for replies saved before it existed, which are sent as [text].
      */
     @ColumnInfo(defaultValue = "") val exchange: String = "",
 )
@@ -113,6 +156,18 @@ interface RunDao {
         runId: Long,
         character: String,
     )
+
+    @Query("UPDATE run SET plan = :plan WHERE id = :runId")
+    suspend fun setPlan(
+        runId: Long,
+        plan: String,
+    )
+
+    @Insert
+    suspend fun insertUsage(usage: RequestUsageRow)
+
+    @Query("SELECT messageId FROM request_usage WHERE runId = :runId ORDER BY id DESC LIMIT 1")
+    suspend fun lastMessageId(runId: Long): String?
 
     @Insert
     suspend fun insertRun(run: RunRow): Long
@@ -143,8 +198,8 @@ interface RunDao {
 }
 
 @Database(
-    entities = [RunRow::class, RunEntryRow::class, OpenTurnRow::class],
-    version = 8,
+    entities = [RunRow::class, RunEntryRow::class, OpenTurnRow::class, RequestUsageRow::class],
+    version = 9,
     autoMigrations = [
         AutoMigration(from = 1, to = 2),
         AutoMigration(from = 2, to = 3),
@@ -153,6 +208,7 @@ interface RunDao {
         AutoMigration(from = 5, to = 6),
         AutoMigration(from = 6, to = 7, spec = MoveNamesToScreen::class),
         AutoMigration(from = 7, to = 8),
+        AutoMigration(from = 8, to = 9),
     ],
 )
 abstract class RunDatabase : RoomDatabase() {

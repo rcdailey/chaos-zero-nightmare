@@ -8,3 +8,7 @@ run = "rumdl check ."
 [tasks.format]
 description = "Fix Markdown, including rewrapping long lines"
 run = "rumdl check --fix ."
+
+[tasks."companion:install"]
+description = "Build the companion app and install it on every attached device (or ANDROID_SERIAL)"
+run = "mise -C projects/czn-companion run install"

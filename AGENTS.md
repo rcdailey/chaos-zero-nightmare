@@ -1,7 +1,12 @@
 # Repository Rules
 
-- Use a popular, maintained library for any capability one provides (rendering, parsing, protocols,
-  UI components); hand-roll only when no such library exists.
+- Choose a solution in this order:
+  1. Decide the best tool, format, design, or implementation for the job, without regard to what
+     a library offers.
+  2. Use a popular, maintained library or framework that implements that choice; hand-write it
+     when none exists.
+  3. When a library only comes close, or suggests a different approach, present it with the
+     tradeoffs and wait for a decision; MUST NOT reshape the design to fit it.
 - Before reporting work complete, run the checks of every project you changed and fix every
   problem they report, including problems that predate your change or fall outside its scope.
 - Pushing `main` deploys: `projects/czn-tools` to GitHub Pages, and `projects/czn-data` as the

@@ -581,8 +581,9 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
 
     @tool
     async def get_card(name: str) -> list[dict]:
-        """Every version of the best-matching card: the base card and its Epiphany variants
-        (I-V), each with full text, cost, tags, Prydwen's star rating (1 to 5) and its own
+        """Every version of the best-matching card: the base card, its Epiphany variants (I-V),
+        and other versions such as mutations (some under their own name, like Shard:Light),
+        each with full text, cost, tags, Prydwen's star rating (1 to 5) and its own
         review; alias is the version's name in the game, when it has one (Unbound in
         "Flicker Blade (Unbound)"). The base card also carries the overall review, the
         recommended Neutral Epiphany (target_neutral) and Prydwen's Neutral and Divine advice."""

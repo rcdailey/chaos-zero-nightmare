@@ -161,3 +161,21 @@ def test_unknown_game_value_fails_the_build_and_keeps_merged_data(conn, prydwen)
 
     assert conn.execute("SELECT slug, element, source FROM character").fetchall() == before
     assert before == [("mei-lin", "Passion", "e7bot")]
+
+
+def test_a_version_the_game_names_itself_keeps_that_name(conn):
+    """A card can turn into versions with their own names (Flicker Blade splits into
+    Shard:Light); players read that name on screen, so it must be the version's name."""
+    put(conn, "czn/characters/list", roster("love"))
+    renamed = e7_card("c_1027_srt1_mut1", "80% Damage") | {"name": "Shard:Light"}
+    unnamed = e7_card("c_1027_srt1_mut2", "90% Damage")
+    put(conn, "czn/cards/list", [e7_card("c_1027_srt1", "50% Damage x 2"), renamed, unnamed])
+
+    build(conn)
+
+    merged = conn.execute("SELECT name, base_name, variant FROM card ORDER BY name").fetchall()
+    assert merged == [
+        ("Chain Fire", "Chain Fire", ""),
+        ("Chain Fire (mutation 2)", "Chain Fire", "mutation 2"),
+        ("Shard:Light", "Chain Fire", "mutation 1"),
+    ]

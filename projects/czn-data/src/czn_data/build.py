@@ -650,6 +650,10 @@ def _cards(sources, slugs, characters, known, result) -> list[dict]:
                 if not code
                 else f"{base['name']} {variant}"
                 if code in ROMAN
+                # Some versions have their own name in the game (Shard:Light for Flicker
+                # Blade's first mutation); players read it on screen.
+                else card["name"]
+                if card["name"] != base["name"]
                 else f"{base['name']} ({variant})",
                 "prydwen_name": prydwen_name,
                 "cost": str(cost) if cost >= 0 else (found or {}).get("cost") or "X",

@@ -1533,10 +1533,13 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
     async def get_encounter(
         name: str, choices: list[str] | None = None, chaos: str | None = None
     ) -> dict | None:
-        """One screen of a Chaos event (question-mark node). name: the event title on screen.
+        """One screen of a Chaos event (question-mark node). name: the event title on screen;
+        most event screens show none, so pass the screen's first line of text instead, never a
+        name from a choice's [brackets], which is a screen that choice opens.
         choices: the choice texts on screen, as shown (cut-off text and a leading [Tag] are
-        fine); they find the screen, including follow-up screens whose title is not an event
-        name, and the result covers only those choices. Look up each new screen the same way.
+        fine); pass them on every lookup of a screen in front of the player. They find the
+        screen, including follow-up screens whose title is not an event name, and the result
+        covers only those choices. Look up each new screen the same way.
         Without choices: each version of the event (the game picks one per run) with its
         first screen in short form, versions with the same first screen sharing one entry.
         opened_from names versions whose choices lead to this one; replace_link_from names
@@ -1552,8 +1555,7 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
         no text), appears_when, and results: outcome success or failure (a dice choice has
         both), text, battle, rewards (text and class: copy, removal, epiphany,
         divine_epiphany, equipment, card, or other), and next: the screen it opens, in short
-        form, listing every choice that screen can offer, so pick now with the next screen in
-        mind. A short choice: random (it appears only if drawn: the screen shows N of the
+        form, listing every choice that screen can offer. A short choice: random (it appears only if drawn: the screen shows N of the
         M random choices, or may not appear when conditions decide the count),
         appears_when, dice, requires, gives (rewards on success), fails (on failure), leads_on (it opens
         a further screen). Fields named in the game's own snake_case are passed on unchanged

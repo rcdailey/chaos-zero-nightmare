@@ -537,7 +537,8 @@ object MessagesRequest {
           one, and suggest only changes. Give it only when the goal is the team.
         - Every reply MUST start with a <seen>...</seen> block: a few short lines on what is on
           screen (names, numbers, choices), so later questions in this run can refer back to
-          it. The panel shows it collapsed; nothing may come before it.
+          it. MUST NOT restate the run state or saved plan there; they are not on screen. The
+          panel shows it collapsed; nothing may come before it.
         - After the block, the advice MUST be one sentence with the recommended action, then at
           most two short reasons, about 50 words in total: the player reads it mid-game on a
           narrow panel. Go longer only when the player asks for detail. MUST NOT narrate
@@ -560,6 +561,11 @@ object MessagesRequest {
           Divine Epiphany, removal, or card reward screen, you MUST check each option against
           the saved plan and name the part of the plan the pick serves, such as the card the
           plan sends Duplicates to.
+        - On a Chaos event screen, you MUST weigh each choice by everything it can lead to:
+          for a choice that opens another screen, the best rewards that screen can offer and
+          what they cost or risk. Recommend a choice only after comparing it with the others
+          on that basis, and name what an opened screen offers when it beats or matches a
+          direct reward.
         - When the best action depends on something only the player knows (what they own, a
           preference) and neither the screen nor the history settles it, you MAY call
           ask_player, batching every open question into one call. You SHOULD advise on a

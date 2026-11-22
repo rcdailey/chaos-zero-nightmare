@@ -32,7 +32,9 @@ run = """
 #!/usr/bin/env bash
 set -euo pipefail
 pg=czn-data-test-pg
-docker run -d --rm --name "$pg" -e POSTGRES_PASSWORD=test -p 55433:5432 postgres:18 >/dev/null
+# Postgres with pg_textsearch (postgres/Dockerfile); cached after the first build.
+docker build -q --target server -t czn-data-postgres:dev postgres >/dev/null
+docker run -d --rm --name "$pg" -e POSTGRES_PASSWORD=test -p 55433:5432 czn-data-postgres:dev >/dev/null
 trap 'docker stop "$pg" >/dev/null 2>&1' EXIT
 # TCP, not the socket: during initdb the server accepts only socket connections.
 until docker exec "$pg" pg_isready -q -h 127.0.0.1 -U postgres; do sleep 0.5; done

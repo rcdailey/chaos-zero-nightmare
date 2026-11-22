@@ -55,6 +55,8 @@ One container image (`ghcr.io/rcdailey/czn-data`) runs every workload:
   run and downloads a file only when its manifest entry or the build changed (about 16 MB, 10
   seconds, on an empty database or after a new build; seconds after).
 - `czn-data build`: merges the stored sources again without fetching anything.
+- `czn-data eval-search`: measures the search tools on their known questions (see "How search
+  ranks"); the daily run does this after its build.
 - `czn-data enrich`: derives data from what the Prydwen scrape stored (character gender and
   identity prints), without contacting Prydwen. A run that finds nothing new exits in seconds.
 - `czn-data serve`: the MCP server (a Deployment), listening on port 8000.
@@ -125,11 +127,8 @@ becomes start and end dates; a section without one takes the period of its "■"
 event's details carry the event's dates. A date without a year takes the post's year, and text
 that does not parse keeps no dates.
 
-Search merges two rankings: sections matching the query's words (plus a few player words the
-posts never use, such as "banned" for "restriction"), and sections close in meaning. Meaning
-comes from a local embedding model (BAAI/bge-small-en-v1.5 through fastembed, 67 MB, CPU) run
-on each section's title, heading, and first 300 characters. The build embeds only new or
-changed sections; the first build embeds all of them (about 15 seconds on a desktop CPU).
+Sections are searched as described in "How search ranks". `search_posts` adds the post words
+for a few player words the posts never use, such as "restriction" for "banned".
 
 ## What gets stored from Game8
 
@@ -146,9 +145,8 @@ The build splits each page at its headings (h2 to h4) into sections whose headin
 parents ("Best Teams > Aavarck Best Teams"). Tables become one line per row, the table of
 contents and the related-guide link lists are dropped, images are lost, and long sections become
 overlapping pieces as the posts do. Each section records where its text sits in the page text, so
-`get_page` can read around it. Sections are searched like posts (words, names, and meaning),
-with newer pages winning close calls. Some pages are out of date; each result carries Game8's
-update date.
+`get_page` can read around it. Some pages are out of date; each result carries Game8's update
+date, and newer pages win close calls.
 
 ## What gets stored from the game files
 
@@ -162,14 +160,55 @@ manifest entry decides whether it is downloaded again.
 
 The build joins each Help menu entry to its pages and their English text, and serves one topic
 per entry (about 130 topics). Pages that only the tutorial shows become one topic each. The
-game's markup becomes plain text. `search_game_systems` searches the topics together with the
-Game8 sections, one ranking over both, and ranks the Help as the newest source so it wins close
-calls; each result names its origin.
+game's markup becomes plain text. A topic with several pages lists them in order, each under
+its own title unless that title repeats the topic's.
+
+The build also turns other English text that explains the game into passages: each tutorial
+script's lines in order, each event's description, and the game's messages of at least eight
+words (popups and confirmations, not labels and buttons) grouped by the feature their key names
+(`ui_savedata_...`) into pieces of about 1,200 characters. Story scenes, item names, and combat
+tooltips are left out.
+
+`search_game_systems` ranks the Help topics, these passages, and the Game8 sections together;
+each result names its origin. The game's own text counts as the newest source, so it wins close
+calls with Game8.
 
 The game asks a version service, whose address is unknown, for its current build folder on the
 CDN. So `BUILD` in `czn_data.gamefiles` names one folder and is updated by hand after a patch
 (the folder is in `patch-meta.json` in the game's folder on a device). Until then the scrape
 keeps reading the old build, which stays correct as long as the CDN keeps serving it.
+
+## How search ranks
+
+The build writes every searchable piece of text (post sections, Game8 and Prydwen sections, Help
+pages, and the game text passages) to one `passage` table, with an embedding of its title,
+heading, and first 300 characters from a local model (BAAI/bge-small-en-v1.5 through fastembed,
+67 MB, CPU). The build embeds only new or changed passages; embedding all of them (about 5,000)
+takes under a minute on a desktop CPU.
+
+A search tool ranks the passages of its sources in two stages (`czn_data.search`):
+
+1. Three searches each nominate up to 30 candidates: BM25 over the passages' words (the
+   `pg_textsearch` extension, which weighs rare words above common ones), the passages closest
+   in meaning to the query's embedding, and passages whose title or heading the query spells
+   closely, which catches typos.
+2. A cross-encoder (Xenova/ms-marco-MiniLM-L-6-v2 through fastembed, 80 MB, CPU) reads the
+   query with each candidate and scores how well it answers it. That score orders the results,
+   plus up to 1 point for the candidate's source being newer than the others and up to 2 for a
+   close spelling of its title. A search takes about a second.
+
+Each Help page ranks on its own, but a Help topic appears once, at its best page's rank, with
+all its pages in order; when it has several, `best_match` marks the best one. Paging counts
+topics, not pages.
+
+`total` in a reply counts the candidates, so it says nothing about how many passages are
+relevant; the order does.
+
+`search_eval.toml` holds player questions with the passages that answer them. `czn-data
+eval-search` runs them against the database and reports how many find an answer in the top 5
+(recall) and how high the first answer ranks (mean reciprocal rank); the daily run does the same
+and exports both. Change the ranking only with these numbers before and after, and add a
+question whenever a player's question went unanswered.
 
 ## How failures are handled
 
@@ -279,16 +318,27 @@ Environment variables:
 - `CZN_IDENTITY_DIR` (daily, enrich, serve): where the screenshot identity models are kept
   (about 250 MB). The image ships them there, pinned to one revision; outside it, they
   download on first use.
-- `FASTEMBED_CACHE_PATH` (build, serve): where the search embedding model is kept. The image
-  ships the model there and sets `HF_HUB_OFFLINE=1`; outside it, the model downloads on first
-  use.
+- `FASTEMBED_CACHE_PATH` (build, serve, daily): where the search models (embedding and
+  cross-encoder) are kept. The image ships them there and sets `HF_HUB_OFFLINE=1`; outside it,
+  they download on first use.
 - `LOG_LEVEL` (all): defaults to `INFO`.
 
 The server refuses to start unless `OIDC_ISSUER` or `MCP_ALLOW_UNAUTHENTICATED=true` is set.
 
 Migrations create the schema, including the `pg_trgm` extension. `pg_trgm` is a trusted
 extension, so the database owner that CloudNativePG creates can install it without superuser
-rights. A Postgres advisory lock lets only one process migrate at a time, so the CronJob and the
+rights.
+
+Search needs the `pg_textsearch` extension (BM25), which no stock Postgres image has and which is
+not trusted, so a superuser must create it and Postgres must preload it
+(`shared_preload_libraries`). `postgres/Dockerfile` builds it from the PGDG package in two forms:
+`server`, a Postgres 18 image for `mise run db`, the tests, and CI; and `extension`, only its
+files, which CI publishes as `ghcr.io/rcdailey/czn-data-pg-textsearch`. The cluster's
+CloudNativePG `Cluster` mounts that image as an extension (`spec.postgresql.extensions`), preloads
+it, and runs a Debian 13 Postgres image to match the library; a CloudNativePG `Database` resource
+creates the extension. The migration's own `CREATE EXTENSION IF NOT EXISTS` then does nothing.
+
+A Postgres advisory lock lets only one process migrate at a time, so the CronJob and the
 server's init container can start together. When a migration changes the tables built from page
 HTML, `migrate` parses the stored HTML again in the same transaction; it fetches nothing.
 

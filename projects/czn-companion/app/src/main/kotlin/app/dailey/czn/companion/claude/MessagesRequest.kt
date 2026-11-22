@@ -331,6 +331,10 @@ object MessagesRequest {
           check search_game_systems; for season content, events, shops, and restrictions,
           check search_posts, which wins when the two disagree; for strategy, check
           search_guides.
+        - When no result of a search answers the question, search once more with the game's
+          own words for the feature, taken from the screen or the results you got (a menu,
+          button, or topic name such as "Build Preset"), not the player's words. If that
+          search does not answer it either, stop searching and say you don't know.
         - Before stating a game fact, find the sentence in the screen or a tool result that
           says it. When none does, you MUST say you don't know and point to the in-game help
           ("i" button) or a player community; a related result is not an answer (a result

@@ -2,7 +2,11 @@
 # scraped database stays available for migration tests and lookups. `down -v` deletes it.
 services:
   postgres:
-    image: postgres:18
+    # Postgres with pg_textsearch, as the cluster runs it (postgres/Dockerfile).
+    build:
+      context: postgres
+      target: server
+    image: czn-data-postgres:dev
     container_name: czn-data-dev-pg
     restart: unless-stopped
     environment:

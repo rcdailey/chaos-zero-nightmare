@@ -1,17 +1,25 @@
 import os
+import re
 
 import psycopg
 import pytest
 
-from czn_data import embed
+from czn_data import embed, rerank
 from czn_data.migrate import migrate
 
 
 @pytest.fixture(autouse=True)
 def same_meaning_for_every_text(monkeypatch):
-    """Replaces the embedding model: every text gets one vector, so search ranks by words."""
+    """Replaces the search models: every text gets one vector, and the reranker scores a
+    passage by how many of the query's words it holds, so search ranks by words."""
     monkeypatch.setattr(embed, "passages", lambda texts: [[1.0] for _ in texts])
     monkeypatch.setattr(embed, "query", lambda text: [1.0])
+
+    def shared_words(query: str, passages: list[str]) -> list[float]:
+        words = set(re.findall(r"\w+", query.lower()))
+        return [float(len(words & set(re.findall(r"\w+", p.lower())))) for p in passages]
+
+    monkeypatch.setattr(rerank, "scores", shared_words)
 
 
 @pytest.fixture

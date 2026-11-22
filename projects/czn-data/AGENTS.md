@@ -15,6 +15,9 @@
   verify a change against stored data instead (`mise run db` for the local database): `reparse`
   after a Prydwen parser change, `build` after a change to `czn_data.build` (merging and Stove post
   sections).
+- Search ranking (`czn_data.search`): run `czn-data eval-search` against the local database
+  before and after a change, and report both numbers. Tests replace the search models with a
+  word-overlap fake, so they cannot show ranking quality.
 - Migrations are hand-written SQL under `src/czn_data/migrations/versions`, forward only. A
   migration that changes tables built from page HTML MUST call `request_rebuild()`; one that
   changes the merged tables in `public` MUST call `request_build()`.

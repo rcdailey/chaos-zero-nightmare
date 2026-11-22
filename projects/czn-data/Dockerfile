@@ -7,9 +7,11 @@ RUN --mount=type=cache,target=/root/.cache/uv uv sync --locked --no-dev --no-ins
 COPY README.md ./
 COPY src ./src
 RUN --mount=type=cache,target=/root/.cache/uv uv sync --locked --no-dev --no-editable
-# The search embedding model ships in the image; HF_HUB_OFFLINE below keeps it from refetching.
+# The search models (embedding and reranker) ship in the image; HF_HUB_OFFLINE below keeps them
+# from refetching.
 ENV FASTEMBED_CACHE_PATH=/app/models
-RUN .venv/bin/python -c "from czn_data import embed; embed.passages(['warm up'])"
+RUN .venv/bin/python -c "from czn_data import embed, rerank; \
+    embed.passages(['warm up']); rerank.scores('warm', ['up'])"
 # So do the screenshot identity models, pinned to the revision the daily job computes prints with.
 ENV CZN_IDENTITY_DIR=/app/identity
 RUN .venv/bin/python -c "from czn_data import identity; identity.download('/app/identity')"

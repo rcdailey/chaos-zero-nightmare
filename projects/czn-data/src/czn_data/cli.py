@@ -1,6 +1,6 @@
 """Command line entry point:
 ``czn-data daily | scrape | scrape-e7bot | scrape-stove | scrape-game8 | scrape-gamefiles |
-reparse | build | enrich | migrate | serve``.
+reparse | build | eval-search | enrich | migrate | serve``.
 
 Configuration comes from environment variables, documented in the project README.
 """
@@ -60,6 +60,9 @@ def main() -> None:
         )
     commands.add_parser("build", help="merge the stored sources into the tables the MCP reads")
     commands.add_parser(
+        "eval-search", help="measure the search tools on their known questions (no fetching)"
+    )
+    commands.add_parser(
         "enrich", help="derive data (character gender) from the stored scrape, without fetching"
     )
     commands.add_parser("migrate", help="upgrade the database schema, then exit")
@@ -84,10 +87,12 @@ def main() -> None:
         return
     from .migrate import migrate
 
-    if args.command in ("migrate", "build"):
+    if args.command in ("migrate", "build", "eval-search"):
         migrate(os.environ["DATABASE_URL"])
         if args.command == "build":
             sys.exit(0 if _guarded(_build_step) else 1)
+        if args.command == "eval-search":
+            sys.exit(0 if _guarded(_eval_search) else 1)
         return
     # Scrapes and enrich insert rows without conflict handling, and two Prydwen crawls at once
     # double the load Cloudflare sees, so a run that starts during another one (a deploy's run
@@ -141,7 +146,8 @@ def _run_daily(allow_shrink: bool) -> int:
     with ThreadPoolExecutor(max_workers=len(scrapes)) as pool:
         ok = all(list(pool.map(_guarded, scrapes)))
     ok = _guarded(_enrich) and ok
-    return 0 if _build_step() and ok else 1
+    built = _build_step()
+    return 0 if _guarded(_eval_search) and built and ok else 1
 
 
 def _guarded(step: Callable[[], bool]) -> bool:
@@ -176,6 +182,26 @@ def _build_step() -> bool:
         result = _build(conn)
     exported = _export(lambda: export_metrics(result, started))
     return result is not None and exported
+
+
+def _eval_search() -> bool:
+    """Measure the search ranking on its known questions (``czn_data.search_eval``), log each
+    miss, and export recall and MRR. A low score is a finding for the dashboard, not a failed
+    run; only an error fails it."""
+    import anyio
+
+    from . import search_eval
+
+    log = logging.getLogger("czn_data")
+    result = anyio.run(search_eval.evaluate, os.environ["DATABASE_URL"])
+    for case in result.cases:
+        if case.rank is None or case.rank > search_eval.TOP:
+            log.info(
+                "search missed",
+                extra={"tool": case.tool, "query": case.query, "rank": case.rank, "top": case.top},
+            )
+    log.info("search evaluated", extra={"recall": result.recall, "mrr": result.mrr})
+    return _export(lambda: search_eval.export_metrics(result))
 
 
 def _scrape_e7bot(allow_shrink: bool) -> bool:

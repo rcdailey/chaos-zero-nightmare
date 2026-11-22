@@ -179,15 +179,6 @@ def add_guide(conn, url: str, title: str, sections: dict[str, str]) -> None:
     store.save_page(conn, url, "document", html, datetime.now(UTC), parse_page(url, html), None)
 
 
-def test_search_guides_ranks_pages_with_more_query_words_first(call, conn):
-    url = "https://www.prydwen.gg/chaos-zero-nightmare/guides/team-building"
-    add_guide(conn, url, "Team Building", {"Basics": "Team building. " * 50})
-
-    pages = call("search_guides", query="Spire Fire team")
-
-    assert guide_urls(pages) == [CHARACTER_URL, url]
-
-
 def test_get_page_pages_long_text_by_character_offset(call, conn):
     url = "https://www.prydwen.gg/chaos-zero-nightmare/guides/long"
     body = "a" * 15_000 + "b" * 5_000
@@ -200,20 +191,6 @@ def test_get_page_pages_long_text_by_character_offset(call, conn):
     assert "offset=15000" in top_field(first, "note")
     assert top_field(rest, "body") == "b" * 5_000
     assert top_field(rest, "note") is None
-
-
-def test_search_guides_ranks_pages_with_every_word_by_closeness_not_repetition(call, conn):
-    guides = "https://www.prydwen.gg/chaos-zero-nightmare/guides"
-    pages = {
-        f"{guides}/close": "Zorblax quuxite guide.",
-        f"{guides}/repeated": "Zorblax intro. " + "Filler text. " * 100 + "Quuxite. " * 30,
-    }
-    for url, text in pages.items():
-        add_guide(conn, url, "Guide", {"Notes": text})
-
-    top = call("search_guides", query="zorblax quuxite", limit=1)
-
-    assert guide_urls(top) == [f"{guides}/close"]
 
 
 def test_search_guides_returns_the_matching_section_without_the_site_menu(call, conn):
@@ -295,6 +272,18 @@ def test_search_posts_pages_through_every_match(call, conn):
     assert sorted(section_headings(first) + section_headings(rest)) == [
         f"◆ Event {n} Period: 11/01/2026 – 11/30/2026" for n in range(3)
     ]
+
+
+def test_search_posts_with_query_and_date_keeps_every_active_match(call, conn):
+    stale = "".join(
+        f"<p>◆ Zorblax Zorblax Contest {n} Period: 10/01/2026 – 10/05/2026</p>" for n in range(40)
+    )
+    add_post(conn, "1", "Old Events", stale)
+    add_post(conn, "2", "Market", "<p>◆ Zorblax Market Period: 11/01/2026 – 11/30/2026</p>")
+
+    reply = call("search_posts", query="zorblax", active_on="2026-11-20")
+
+    assert section_headings(reply) == ["◆ Zorblax Market Period: 11/01/2026 – 11/30/2026"]
 
 
 def test_search_posts_needs_query_or_valid_date(call):
@@ -520,6 +509,8 @@ def test_search_game_systems_serves_game_help_topics_first_as_plain_text(call, c
                 {"id": "d_p1", "text": "The <color_orange>minimum</> limit is 100 points."},
                 {"id": "t_p2", "text": "Nightmare Mode"},
                 {"id": "d_p2", "text": "Nightmare Mode adds 10 points.<br>Always."},
+                {"id": "t_p3", "text": "Quuxite"},
+                {"id": "d_p3", "text": "Zorblax wibble."},
                 {"id": "t_tut", "text": "Card Synergy"},
                 {"id": "d_tut", "text": "Card order matters."},
             ],
@@ -529,6 +520,7 @@ def test_search_game_systems_serves_game_help_topics_first_as_plain_text(call, c
             HELP_PAGES[1]: [
                 page("p2", "limit", "2", "t_p2", "d_p2"),
                 page("p1", "limit", "1", "t_p1", "d_p1"),
+                page("p3", "limit", "3", "t_p3", "d_p3"),
                 page("tut", "tuto_only", "1", "t_tut", "d_tut"),
             ],
         },
@@ -541,20 +533,58 @@ def test_search_game_systems_serves_game_help_topics_first_as_plain_text(call, c
     pages = lines_with(reply, "; origin: ")
     assert pages[0].startswith("- Save Data Storage Limit; origin: Game Help, Chaos Help menu;")
     assert "url:" not in pages[0]
+    # The whole topic, one section per page in order under its title, the best page marked.
     lines = reply.splitlines()
-    start = lines.index("        text:") + 1
-    text = [line.strip() for line in lines[start:] if line.startswith(" " * 10)][:5]
-    assert text == [
-        "Storage Limit",
-        "The minimum limit is 100 points.",
-        "Nightmare Mode",
-        "Nightmare Mode adds 10 points.",
-        "Always.",
+    start = lines.index("    sections:") + 1
+    assert lines[start : start + 3] == [
+        "      - Storage Limit; text: The minimum limit is 100 points.",
+        "      - Nightmare Mode; text: Nightmare Mode adds 10 points. / Always.; best_match: yes",
+        "      - Quuxite; text: Zorblax wibble.",
     ]
     assert any("origin: Game8" in page for page in pages)  # Game8 adds detail
     tutorial = call("search_game_systems", query="card synergy").splitlines()
     assert tutorial[2].startswith("  - Card Synergy; origin: Game Help, Tutorial menu;")
     assert tutorial[3:5] == ["    sections:", "      - Card order matters."]
+
+
+def test_search_game_systems_serves_tutorial_event_and_message_text(call, conn):
+    from czn_data.gamefiles import TEXT
+
+    add_game_files(
+        conn,
+        {
+            TEXT: [
+                {"id": "tutorial_script@tsp_1_0053_2", "text": "Only Seasonal Zorblax works."},
+                {"id": "tutorial_script@tsp_1_0053_1", "text": "Welcome to Nebula."},
+                {"id": "event@title@event_9", "text": "Quuxite Festival"},
+                {"id": "event@info_desc@event_9", "text": "Log in daily for <cc>Quuxite</>."},
+                {
+                    "id": "ui_preset_reset_desc",
+                    "text": "The Combatants in the Wibble preset will be reset now.",
+                },
+                {"id": "ui_preset_ok", "text": "Wibble OK"},
+            ]
+        },
+    )
+
+    tutorial = call("search_game_systems", query="seasonal zorblax")
+    festival = call("search_game_systems", query="quuxite festival")
+    preset = call("search_game_systems", query="wibble preset")
+
+    def first_page(reply: str) -> str:
+        return lines_with(reply, "; origin: ")[0]
+
+    assert first_page(tutorial).startswith("- Tutorial; origin: Game text, tutorial dialogue")
+    # Headed by its opening line, in script order
+    assert (
+        "- Welcome to Nebula.; text: Welcome to Nebula. / Only Seasonal Zorblax works." in tutorial
+    )
+    assert first_page(festival).startswith(
+        "- Quuxite Festival; origin: Game text, event description"
+    )
+    assert "Log in daily for Quuxite." in festival
+    assert first_page(preset).startswith("- Messages: preset; origin: Game text, game messages")
+    assert "Wibble OK" not in preset  # a label, not an explanation
 
 
 def test_game_help_wins_a_tie_with_game8(call, conn):
@@ -579,6 +609,8 @@ def test_game_help_wins_a_tie_with_game8(call, conn):
         '<div class="archive-style-wrapper"><div><h2 class="a-header--2">Link Crash</h2></div>'
         "<p>Link Crash breaks shields.</p></div></body></html>",
     )
+    # Game8 updated its page after the game files were downloaded.
+    conn.execute("UPDATE gamefiles.file SET fetched_at = '2026-01-01'")
 
     reply = call("search_game_systems", query="link crash")
 

@@ -40,7 +40,8 @@ from psycopg.rows import dict_row
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
-from . import embed
+from . import search
+from .gamefiles import TEXT_KINDS
 from .identity import MODEL as IDENTITY_MODEL
 from .identity import Identifier
 from .render import render
@@ -401,26 +402,10 @@ PAGE_CHARS = 15_000
 # characters); their descriptions state the number.
 LIST_PAGE = 30
 
-# Sections closest in meaning that the search tools merge with their word matches.
-MEANING_CANDIDATES = 20
-# The guide sections (Game8 or Prydwen, as base) closest in meaning to the query, ranked. Equal
-# similarities share a rank, so a tie does not order sections by accident.
-_MEANING = f"""
-    SELECT url, position, rank FROM (
-        SELECT url, position, rank() OVER (ORDER BY similarity DESC NULLS LAST) AS rank
-        FROM base, LATERAL (
-            SELECT sum(a * b) AS similarity
-            FROM unnest(embedding, %(vector)s::real[]) AS pair(a, b)
-        ) s
-    ) ranked
-    WHERE rank <= {MEANING_CANDIDATES}
-"""
-# Weight of the newest-first ranking next to the two relevance rankings (each weight 1).
-RECENCY_WEIGHT = 0.5
-# Words players use that the official posts never do, mapped to the heading words the posts use
-# instead; sections with such a heading form a third ranking. The meaning search catches most
-# rewording; these are words it ranked too low (audit, 2026-11-20). Add one when an audit finds
-# another miss.
+# Words players use that the official posts never do, mapped to the words the posts use
+# instead, which search_posts adds to the query. The meaning search catches most rewording;
+# these are words it ranked too low (audit, 2026-11-20). Add one when an audit finds another
+# miss.
 POST_SYNONYMS = {
     "ban": "season restrictions",
     "banned": "season restrictions",
@@ -430,11 +415,11 @@ POST_SYNONYMS = {
 }
 
 
-def _synonym_headings(query: str) -> str | None:
-    """A websearch query for headings naming what the query's player words mean."""
+def _with_synonyms(query: str) -> str:
+    """query with the post words for its player words (POST_SYNONYMS) added."""
     words = re.findall(r"\w+", query.lower())
     phrases = dict.fromkeys(POST_SYNONYMS[w] for w in words if w in POST_SYNONYMS)
-    return " or ".join(f'"{phrase}"' for phrase in phrases) or None
+    return " ".join([query, *phrases])
 
 
 LIST_ENCOUNTERS_SQL = f"""
@@ -819,6 +804,31 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
             group["sections"].append({k: v for k, v in row.items() if k not in source_fields})
         return listing | {"results": list(groups.values())}
 
+    async def _ranked(
+        tool_name: str, query: str, within: list[tuple[str, int]] | None = None
+    ) -> list[dict]:
+        """The passages tool_name searches that answer query, best first
+        (``czn_data.search``); within limits them to those (key, position)."""
+        async with await psycopg.AsyncConnection.connect(_database_url()) as conn:
+            return await search.search(conn, search.TOOL_SOURCES[tool_name], query, within)
+
+    async def _details(sql: str, ranked: list[dict]) -> dict[tuple, dict]:
+        """(key, position) -> the fields sql (given %(keys)s and %(positions)s, returning key
+        and position) reads for each ranked passage."""
+        rows = await _query(
+            sql,
+            {
+                "keys": [r["key"] for r in ranked],
+                "positions": [r["position"] for r in ranked],
+            },
+        )
+        return {(row.pop("key"), row.pop("position")): row for row in rows}
+
+    def _page(rows: list[dict], limit: int, offset: int) -> dict:
+        """The reply showing up to limit (at most 20) of rows from offset."""
+        offset = max(offset, 0)
+        return _reply(rows[offset : offset + max(1, min(limit, 20))], len(rows), offset)
+
     async def _listing(sql: str, params: dict, offset: int | None = None) -> dict:
         """A list tool's reply: total matches, and the rows shown. offset is given by tools
         that page (their SQL applies it), so the note says how to read on."""
@@ -833,6 +843,10 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
             total = 0
         for row in rows:
             del row["total"]
+        return _reply(rows, total, offset)
+
+    def _reply(rows: list[dict], total: int, offset: int | None) -> dict:
+        """A list tool's reply: total matches, the rows shown, and a note when more remain."""
         reply = {"total": total, "results": rows}
         start = offset or 0
         if total > start + len(rows):
@@ -947,64 +961,32 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
         reviews and builds), split into sections. Use it for strategy and opinions the other
         tools do not cover; official news, events and patch notes are in search_posts, and how
         game systems and modes work in search_game_systems. query: a question or words;
-        matches the sections' words and their page titles, and sections close in meaning.
-        results groups the matching sections by page (page_title, url); each section has its
-        heading ("A > B"), text, and offset and length (where text sits in get_page's body;
-        read around it when a section refers to another one). total counts every matching
-        section; offset pages through them (at most 20 sections per call)."""
-        vector = await anyio.to_thread.run_sync(embed.query, query)
-        # Words and meaning merged by reciprocal rank fusion, as in search_game_systems. Any
-        # query word matches (players name things the guides never do, such as the Policy
-        # Office). In the words ranking, sections with more of the query's words come first;
-        # ts_rank alone would put a section repeating one common word ("team") above one with
-        # every word. Ties rank by the all-words query, which favors the words appearing close
-        # together over one of them repeating. A section's page title counts as its words, so
-        # "Rossweisse partners" finds the Best Partners section of Rossweisse's page.
-        listing = await _listing(
-            f"""
-            WITH base AS (
-                SELECT s.*, d.title, p.data_fetched_at,
-                       s.search || to_tsvector('english', d.title) AS words_in
-                FROM guide_section s JOIN prydwen.document d USING (url)
-                     JOIN prydwen.page p USING (url)
-            ),
-            words AS (
-                SELECT url, position,
-                       row_number() OVER (ORDER BY matched DESC,
-                           ts_rank(words_in, every_word) DESC, ts_rank(words_in, q) DESC,
-                           url, position) AS rank
-                FROM base,
-                     CAST(replace(plainto_tsquery('english', %(words)s)::text, '&', '|')
-                          AS tsquery) q,
-                     websearch_to_tsquery('english', %(words)s) every_word,
-                     LATERAL (
-                         SELECT count(*) AS matched
-                         FROM unnest(tsvector_to_array(to_tsvector('english', %(words)s))) word
-                         WHERE words_in @@ quote_literal(word)::tsquery
-                     ) m
-                WHERE words_in @@ q
-            ),
-            meaning AS ({_MEANING}),
-            fused AS (
-                SELECT url, position, sum(1.0 / (60 + rank)) AS score
-                FROM (SELECT * FROM words UNION ALL SELECT * FROM meaning) ranked
-                GROUP BY url, position
-            )
-            SELECT title AS page_title, heading, text, url, "offset", length, data_fetched_at,
-                   count(*) OVER () AS total
-            FROM base JOIN fused USING (url, position)
-            ORDER BY fused.score DESC, url, position
-            LIMIT %(limit)s OFFSET %(offset)s
+        results come best answer first, ranked by a model that reads the query with each
+        candidate section (typos in a page title tolerated). results groups the sections by
+        page (page_title, url); each section has its heading ("A > B"), text, and offset and
+        length (where text sits in get_page's body; read around it when a section refers to
+        another one). total counts the candidates found (at most about 90), not how many are
+        relevant; offset pages through them (at most 20 sections per call)."""
+        ranked = await _ranked("search_guides", query)
+        details = await _details(
+            """
+            SELECT s.url AS key, s.position, s."offset", s.length, p.data_fetched_at
+            FROM guide_section s JOIN prydwen.page p USING (url)
+            WHERE (s.url, s.position) IN (SELECT * FROM unnest(%(keys)s::text[], %(positions)s::int[]))
             """,
-            {
-                "words": query,
-                "vector": vector,
-                "limit": max(1, min(limit, 20)),
-                "offset": max(offset, 0),
-            },
-            offset=max(offset, 0),
+            ranked,
         )
-        return _by_source(listing, ("page_title", "url", "data_fetched_at"))
+        rows = [
+            {
+                "page_title": r["title"],
+                "heading": r["heading"],
+                "text": r["text"],
+                "url": r["key"],
+                **details[r["key"], r["position"]],
+            }
+            for r in ranked
+        ]
+        return _by_source(_page(rows, limit, offset), ("page_title", "url", "data_fetched_at"))
 
     @tool
     async def list_banners() -> list[dict]:
@@ -1030,14 +1012,15 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
         current community events), split into sections. Use it for events, season content
         (Season Restrictions, Supply Store, Environment Variables), rate-up periods and
         rewards; list_banners gives the banner schedule itself. query: a question or words;
-        matches the posts' words, titles and headings (typos tolerated), and sections close in
-        meaning. active_on: a date (YYYY-MM-DD, or today) to get only sections whose period
-        covers it, which answers "what events are on now". Give either or both. results
-        groups the matching sections by post (post title, board, posted_at, url); each
-        section has its heading ("■ Section > ◆ Subsection"), its full text, and its period
-        (starts_on, ends_on) when the post gives one. Images in posts (some calendars) are not
-        included. total counts every matching section; offset pages through them (at most 20
-        sections per call)."""
+        results come best answer first, ranked by a model that reads the query with each
+        candidate section (typos in a title tolerated), newer posts winning close calls.
+        active_on: a date (YYYY-MM-DD, or today) to get only sections whose period covers it,
+        which answers "what events are on now". Give either or both. results groups the
+        sections by post (post title, board, posted_at, url); each section has its heading
+        ("■ Section > ◆ Subsection"), its full text, and its period (starts_on, ends_on) when
+        the post gives one. Images in posts (some calendars) are not included. total counts
+        the matching sections (with a query, the candidates found, at most about 90, not how
+        many are relevant); offset pages through them (at most 20 sections per call)."""
         if query is None and active_on is None:
             raise ToolError("Give query, active_on, or both.")
         day = None
@@ -1049,160 +1032,130 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
                 raise ToolError(
                     f"active_on must be YYYY-MM-DD or today, not {active_on!r}"
                 ) from error
-        vector = await anyio.to_thread.run_sync(embed.query, query) if query else None
-        # Two rankings merged by reciprocal rank fusion: sections matching the query's words
-        # (or, with typos, a title or heading), and the sections closest in meaning.
-        listing = await _listing(
-            f"""
-            WITH base AS (
-                SELECT * FROM post_section
-                WHERE %(day)s::date IS NULL OR %(day)s::date BETWEEN starts_on AND ends_on
-            ),
-            words AS (
-                SELECT article_id, position,
-                       row_number() OVER (ORDER BY ts_rank(search, q)
-                           + greatest(word_similarity(%(name)s, post_title),
-                                      word_similarity(%(name)s, coalesce(heading, '')))
-                           DESC) AS rank
-                -- Any query word matches (players' phrasing rarely uses every word a post
-                -- does); ranking puts sections with more of them first.
-                FROM base,
-                     CAST(replace(plainto_tsquery('english', %(words)s)::text, '&', '|')
-                          AS tsquery) q
-                WHERE %(words)s::text IS NOT NULL
-                  AND (search @@ q OR {_name_match("post_title")} OR {_name_match("heading")})
-            ),
-            meaning AS (
-                SELECT article_id, position, rank FROM (
-                    SELECT article_id, position,
-                           rank() OVER (ORDER BY similarity DESC NULLS LAST) AS rank
-                    FROM base, LATERAL (
-                        SELECT sum(a * b) AS similarity
-                        FROM unnest(embedding, %(vector)s::real[]) AS pair(a, b)
-                    ) s
-                    WHERE %(vector)s::real[] IS NOT NULL
-                ) ranked
-                WHERE rank <= {MEANING_CANDIDATES}
-            ),
-            synonyms AS (
-                SELECT article_id, position,
-                       row_number() OVER (ORDER BY posted_at DESC, position) AS rank
-                FROM base
-                WHERE to_tsvector('english', coalesce(heading, ''))
-                      @@ websearch_to_tsquery('english', %(synonyms)s)
-            ),
-            relevance AS (
-                SELECT article_id, position, sum(1.0 / (60 + rank)) AS score
-                FROM (SELECT * FROM words UNION ALL SELECT * FROM meaning
-                      UNION ALL SELECT * FROM synonyms) ranked
-                GROUP BY article_id, position
-            ),
-            -- Newer posts win close calls: players mostly ask about the current season.
-            fused AS (
-                SELECT article_id, position,
-                       score + {RECENCY_WEIGHT} / (60 + row_number() OVER (
-                           ORDER BY posted_at DESC, position)) AS score
-                FROM relevance JOIN base USING (article_id, position)
-            )
-            SELECT post_title, board, posted_at, heading, text, starts_on, ends_on, url,
-                   data_fetched_at, count(*) OVER () AS total
-            FROM base LEFT JOIN fused USING (article_id, position)
-            WHERE %(words)s::text IS NULL OR fused.score IS NOT NULL
-            ORDER BY fused.score DESC NULLS LAST, ends_on NULLS LAST, posted_at DESC, position
-            LIMIT %(limit)s OFFSET %(offset)s
-            """,
-            {
-                "words": query,
-                "synonyms": _synonym_headings(query) if query else None,
-                "name": query,
-                "vector": vector,
-                "day": day,
-                "limit": min(limit, 20),
-                "offset": max(offset, 0),
-            },
-            offset=max(offset, 0),
+        source_fields = ("post_title", "board", "posted_at", "url", "data_fetched_at")
+        shown = (
+            "post_title, board, posted_at, heading, text, starts_on, ends_on, url, data_fetched_at"
         )
-        return _by_source(listing, ("post_title", "board", "posted_at", "url", "data_fetched_at"))
+        if query is None:
+            listing = await _listing(
+                f"""
+                SELECT {shown}, count(*) OVER () AS total FROM post_section
+                WHERE %(day)s::date BETWEEN starts_on AND ends_on
+                ORDER BY ends_on, posted_at DESC, position
+                LIMIT %(limit)s OFFSET %(offset)s
+                """,
+                {"day": day, "limit": max(1, min(limit, 20)), "offset": max(offset, 0)},
+                offset=max(offset, 0),
+            )
+            return _by_source(listing, source_fields)
+        within = None
+        if day is not None:
+            active = await _query(
+                "SELECT article_id::text AS key, position FROM post_section"
+                " WHERE %(day)s::date BETWEEN starts_on AND ends_on",
+                {"day": day},
+            )
+            within = [(r["key"], r["position"]) for r in active]
+        ranked = await _ranked("search_posts", _with_synonyms(query), within)
+        details = await _details(
+            f"""
+            SELECT article_id::text AS key, position, {shown} FROM post_section
+            WHERE (article_id::text, position)
+                  IN (SELECT * FROM unnest(%(keys)s::text[], %(positions)s::int[]))
+            """,
+            ranked,
+        )
+        rows = [details[r["key"], r["position"]] for r in ranked]
+        return _by_source(_page(rows, limit, offset), source_fields)
 
     @tool
     async def search_game_systems(query: str, limit: int = 5, offset: int = 0) -> dict:
-        """Search how the game works, from two sources: the game's own Help (about 130 short
-        topics its Help menus and tutorials show, from its data files) and Game8's guides,
-        split into sections. Covers game systems (Save Data and how it is scored, Distortion
-        Adaptation, Epiphany, stress, Link Crash, potentials, gacha), Chaos modes, areas and
-        Waypoints, Simulation and boss modes (Full-Scale Offensive, Spiral Tower), Ark City,
-        events, seasons, missions, and a glossary. Use it for "how does X work" and "what is
-        X"; characters, cards and equipment are in the other tools. query: a question or
-        words; matches words, titles and headings (typos tolerated), and sections close in
-        meaning. results groups the matching sections by page: page_title, origin ("Game
-        Help" with the menu showing it: Help in the lobby, Chaos Help during a run, or
-        Tutorial; or "Game8"), and for Game8 page_summary (the page's opening), updated_at
-        (when Game8 last updated it) and url. Each section has its text; Game8 sections also
-        have heading (its parent headings, "A > B") and offset and length (where text sits
-        in get_page's body; read around it when a section refers to another one). The
-        game's Help is exact but short and from one game build (data_status shows which);
-        Game8 has more detail but can be out of date, so the Help wins when they disagree.
-        The official posts (search_posts) are newer than both and win on season content,
-        events, shops, and restrictions. total counts every matching section; offset pages
-        through them (at most 20 sections per call)."""
-        vector = await anyio.to_thread.run_sync(embed.query, query)
-        # Ranked like search_posts: words, titles and headings, and meaning, merged by
-        # reciprocal rank fusion. Newer Game8 pages win close calls; the game's Help ranks
-        # as the newest, since it is the exact source. Equal scores share a rank, so a tie
-        # is decided by that order, not by accident.
-        listing = await _listing(
-            f"""
-            WITH base AS (
-                SELECT url, position, 'Game8' AS origin, title, heading, text, summary,
-                       updated_at, "offset", length, embedding, search, data_fetched_at
-                FROM game8_section JOIN game8_page USING (url)
-                UNION ALL
-                -- A Help topic is one section; its url is only a key, never shown.
-                SELECT 'help:' || id, 0, 'Game Help, ' || menu || ' menu', title, NULL, text,
-                       NULL, NULL, NULL, NULL, embedding, search, data_fetched_at
-                FROM game_help
-            ),
-            words AS (
-                SELECT url, position,
-                       rank() OVER (ORDER BY ts_rank(search, q)
-                           + greatest(word_similarity(%(name)s, title),
-                                      word_similarity(%(name)s, heading))
-                           DESC) AS rank
-                FROM base,
-                     CAST(replace(plainto_tsquery('english', %(words)s)::text, '&', '|')
-                          AS tsquery) q
-                WHERE search @@ q OR {_name_match("title")} OR {_name_match("heading")}
-            ),
-            meaning AS ({_MEANING}),
-            relevance AS (
-                SELECT url, position, sum(1.0 / (60 + rank)) AS score
-                FROM (SELECT * FROM words UNION ALL SELECT * FROM meaning) ranked
-                GROUP BY url, position
-            ),
-            fused AS (
-                SELECT url, position,
-                       score + {RECENCY_WEIGHT} / (60 + rank() OVER (
-                           ORDER BY origin = 'Game8', updated_at DESC NULLS LAST)) AS score
-                FROM relevance JOIN base USING (url, position)
-            )
-            SELECT title AS page_title, origin, heading, text, summary AS page_summary,
-                   updated_at, CASE WHEN origin = 'Game8' THEN url END AS url, "offset",
-                   length, data_fetched_at, count(*) OVER () AS total
-            FROM base JOIN fused USING (url, position)
-            ORDER BY fused.score DESC, url, position
-            LIMIT %(limit)s OFFSET %(offset)s
+        """Search how the game works, from three sources: the game's own Help (about 130
+        short topics its Help menus and tutorials show), other game text that explains rules
+        (tutorial dialogue, event descriptions, and popup messages grouped by feature), both
+        from the game's data files, and Game8's guides, split into sections. Covers game
+        systems (Save Data and how it is scored, Build Presets, Distortion Adaptation,
+        Epiphany, stress, Link Crash, potentials, gacha), Chaos modes, areas and Waypoints,
+        Simulation and boss modes (Full-Scale Offensive, Spiral Tower), Ark City, events,
+        seasons, missions, and a glossary. Use it for "how does X work" and "what is X";
+        characters, cards and equipment are in the other tools. query: a question or words;
+        results come best answer first, ranked by a model that reads the query with each
+        candidate (typos in a title tolerated). results groups the sections by page:
+        page_title, origin ("Game Help" with the menu showing it: Help in the lobby, Chaos
+        Help during a run, or Tutorial; "Game text" with its kind; or "Game8"), and for Game8
+        page_summary (the page's opening), updated_at (when Game8 last updated it) and url.
+        Each section has its text. A Help topic comes whole: every page in order as a
+        section, headed by its page title; when it has several pages, best_match marks the page
+        that answers the query best. Game8 sections also have heading (its parent headings, "A > B") and offset and
+        length (where text sits in get_page's body; read around it when
+        a section refers to another one). The game's own text is exact but short and from one
+        game build (data_status shows which); Game8 has more detail but can be out of date, so
+        the game's text wins when they disagree. The official posts (search_posts) are newer
+        than both and win on season content, events, shops, and restrictions. limit (at most
+        20), offset, and total count results, not sections: a Help topic is one result
+        however many pages it brings. total counts the candidates found (at most about 90),
+        not how many are relevant."""
+        ranked = await _ranked("search_game_systems", query)
+        # A Help topic ranks by its best page (czn_data.search) and is shown with all its pages.
+        best_page = {r["key"]: r["position"] for r in ranked if r["source"] == "help"}
+        game8 = await _details(
+            """
+            SELECT url AS key, position, summary AS page_summary, updated_at, "offset", length,
+                   data_fetched_at
+            FROM game8_section JOIN game8_page USING (url)
+            WHERE (url, position) IN (SELECT * FROM unnest(%(keys)s::text[], %(positions)s::int[]))
             """,
-            {
-                "words": query,
-                "name": query,
-                "vector": vector,
-                "limit": max(1, min(limit, 20)),
-                "offset": max(offset, 0),
-            },
-            offset=max(offset, 0),
+            [r for r in ranked if r["source"] == "game8"],
         )
+        help_keys = list(best_page)
+        menus = {
+            row["id"]: row["menu"]
+            for row in await _query(
+                "SELECT id, menu FROM game_help WHERE id = ANY(%(keys)s)", {"keys": help_keys}
+            )
+        }
+        help_pages: dict[str, list[dict]] = {}
+        for page in await _query(
+            "SELECT key, position, heading, text FROM passage"
+            " WHERE source = 'help' AND key = ANY(%(keys)s) ORDER BY key, position",
+            {"keys": help_keys},
+        ):
+            help_pages.setdefault(page["key"], []).append(page)
+        rows = []
+        for r in ranked:
+            row = {"page_title": r["title"], "heading": r["heading"], "text": r["text"]}
+            if r["source"] == "game8":
+                row |= {"origin": "Game8", "url": r["key"], **game8[r["key"], r["position"]]}
+            elif r["source"] == "help":
+                row |= {"origin": f"Game Help, {menus[r['key']]} menu", "help_key": r["key"]}
+            else:
+                kind = TEXT_KINDS[r["key"].split(":", 1)[0]]
+                row |= {"origin": f"Game text, {kind}"}
+            if r["source"] != "game8":
+                row["data_fetched_at"] = r["published_at"]
+            rows.append(row)
+        reply = _page(rows, limit, offset)
+        # Each shown Help topic becomes its pages, in order; with several, the page that ranked
+        # the topic is marked.
+        shown = []
+        for row in reply["results"]:
+            key = row.pop("help_key", None)
+            if key is None:
+                shown.append(row)
+                continue
+            pages = help_pages[key]
+            shown.extend(
+                row
+                | {"heading": page.get("heading"), "text": page["text"]}
+                | (
+                    {"best_match": True}
+                    if len(pages) > 1 and page["position"] == best_page[key]
+                    else {}
+                )
+                for page in pages
+            )
         return _by_source(
-            listing,
+            reply | {"results": shown},
             ("page_title", "origin", "page_summary", "updated_at", "url", "data_fetched_at"),
         )
 

@@ -16,6 +16,7 @@ one manifest.
 """
 
 import logging
+import re
 import struct
 import time
 from collections import Counter
@@ -315,13 +316,18 @@ def _rows(entries: dict[str, bytes]) -> list[dict[str, str]]:
 @dataclass
 class HelpTopic:
     """One topic of the in-game Help: ``menu`` is where the game shows it ("Help", "Chaos
-    Help", or "Tutorial"); ``text`` is its pages in order, each under its own title when the
-    topic has several; text keeps the game's markup."""
+    Help", or "Tutorial"); ``pages`` are the (title, body) pages the game pages through, in
+    order, each title empty when it repeats the topic's; both keep the game's markup."""
 
     id: str
     menu: str
     title: str
-    text: str
+    pages: list[tuple[str, str]]
+
+    @property
+    def text(self) -> str:
+        """Every page in order, each under its own title when it has one."""
+        return "\n\n".join(f"{t}\n{b}" if t else b for t, b in self.pages)
 
 
 def help_topics(tables: dict[str, list[dict]]) -> list[HelpTopic]:
@@ -333,16 +339,17 @@ def help_topics(tables: dict[str, list[dict]]) -> list[HelpTopic]:
         for page in tables.get(name, []):
             groups.setdefault(page["group"], []).append(page)
 
-    def text_of(pages: list[dict]) -> str:
+    def pages_of(pages: list[dict], title: str) -> list[tuple[str, str]]:
         pages = sorted(pages, key=lambda p: int(p.get("sort") or 0))
-        bodies = [
-            strings.get(p.get("out_game_desc") or p.get("in_game_desc", ""), "") for p in pages
-        ]
-        if len(pages) == 1:
-            return bodies[0]
-        return "\n\n".join(
-            f"{strings.get(p['title'], '')}\n{b}" for p, b in zip(pages, bodies, strict=True)
-        )
+        found = []
+        for page in pages:
+            body = strings.get(page.get("out_game_desc") or page.get("in_game_desc", ""), "")
+            if not body:
+                continue
+            page_title = strings.get(page["title"], "")
+            # A lone page, or one titled like its topic, needs no title of its own.
+            found.append(("" if len(pages) == 1 or page_title == title else page_title, body))
+        return found
 
     topics, linked = [], set()
     for name in HELP_MENUS:
@@ -352,15 +359,83 @@ def help_topics(tables: dict[str, list[dict]]) -> list[HelpTopic]:
             if groups.get(group):
                 title = strings.get(entry["name"], "")
                 topics.append(
-                    HelpTopic(entry["id"], MENU_NAMES[name], title, text_of(groups[group]))
+                    HelpTopic(entry["id"], MENU_NAMES[name], title, pages_of(groups[group], title))
                 )
     for group, pages in groups.items():
         if group not in linked:
-            topics.extend(
-                HelpTopic(p["id"], "Tutorial", strings.get(p["title"], ""), text_of([p]))
-                for p in pages
-            )
-    return [t for t in topics if t.title and t.text]
+            for p in pages:
+                title = strings.get(p["title"], "")
+                topics.append(HelpTopic(p["id"], "Tutorial", title, pages_of([p], title)))
+    return [t for t in topics if t.title and t.pages]
+
+
+@dataclass
+class GameText:
+    """Other game text that explains how the game works, grouped so each group reads as one
+    passage. ``id`` starts with its kind (TEXT_KINDS); text keeps the game's markup."""
+
+    id: str
+    title: str
+    text: str
+
+
+# GameText id prefix -> what the text is, as the search tools name it.
+TEXT_KINDS = {
+    "tutorial": "tutorial dialogue",
+    "event": "event description",
+    "message": "game messages",
+}
+
+
+# Messages shorter than this many words are labels and buttons, not explanations.
+MESSAGE_WORDS = 8
+# Characters per passage of grouped messages, about the length of a Help topic.
+GROUP_CHARS = 1_200
+# Message features of other platforms' builds, such as ui_ch_ (WeChat account errors in the
+# Chinese build), which explain nothing about the global game.
+OTHER_PLATFORM_FEATURES = {"ch"}
+
+
+def game_texts(tables: dict[str, list[dict]]) -> list[GameText]:
+    """From the English strings (file name -> rows): each tutorial script's lines in order
+    (``tutorial_script@tsp_<chapter>_<script>_<line>``), each event's description
+    (``event@title@<event>`` and ``event@info_desc@<event>``), and the game's explanatory
+    messages (``ui_<feature>_...``, at least MESSAGE_WORDS words) grouped by feature and cut
+    into passages of about GROUP_CHARS. Story scenes, item names, and combat tooltips are left
+    out: they say little about how the game works, and cards, effects and equipment have their
+    own tools."""
+    strings = {row["id"]: row.get("text", "") for row in tables.get(TEXT, [])}
+    scripts: dict[str, list[tuple[int, str]]] = {}
+    features: dict[str, list[str]] = {}
+    texts = []
+    for key, text in strings.items():
+        if not text.strip():
+            continue
+        if found := re.fullmatch(r"tutorial_script@(tsp_\d+_\d+)_(\d+)", key):
+            scripts.setdefault(found[1], []).append((int(found[2]), text))
+        elif found := re.fullmatch(r"event@info_desc@(.+)", key):
+            title = strings.get(f"event@title@{found[1]}", "")
+            texts.append(GameText(f"event:{found[1]}", title or "Event", text))
+        elif (
+            (found := re.match(r"ui_([a-z]+)_", key))
+            and found[1] not in OTHER_PLATFORM_FEATURES
+            and len(text.split()) >= MESSAGE_WORDS
+        ):
+            features.setdefault(found[1], []).append(text)
+    for script, lines in sorted(scripts.items()):
+        text = "\n".join(line for _, line in sorted(lines))
+        texts.append(GameText(f"tutorial:{script}", "Tutorial", text))
+    for feature, messages in sorted(features.items()):
+        chunks: list[list[str]] = [[]]
+        for message in messages:
+            if chunks[-1] and sum(map(len, chunks[-1])) + len(message) > GROUP_CHARS:
+                chunks.append([])
+            chunks[-1].append(message)
+        texts.extend(
+            GameText(f"message:{feature}:{n}", f"Messages: {feature}", "\n".join(chunk))
+            for n, chunk in enumerate(chunks)
+        )
+    return texts
 
 
 def export_metrics(result: GameFilesResult, started: float) -> bool:

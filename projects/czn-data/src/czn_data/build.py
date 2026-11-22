@@ -35,7 +35,7 @@ from psycopg.types.json import Jsonb
 from . import embed, metrics
 from .e7bot import SITE
 from .game8 import split_page
-from .gamefiles import help_topics
+from .gamefiles import game_texts, help_topics
 from .posts import split_post
 from .stove import BOARDS, POST_URL
 
@@ -138,12 +138,13 @@ COLUMNS = {
     "leaderboard_deck": ("season rank team character_slug cards equipment url data_fetched_at"),
     "post_section": (
         "article_id board post_title posted_at position heading text starts_on ends_on url"
-        " data_fetched_at embedding"
+        " data_fetched_at"
     ),
     "game8_page": "url title summary body updated_at data_fetched_at",
-    "game8_section": "url position heading text offset length embedding",
-    "guide_section": "url position heading text offset length embedding",
-    "game_help": "id menu title text embedding data_fetched_at",
+    "game8_section": "url position heading text offset length",
+    "guide_section": "url position heading text offset length",
+    "game_help": "id menu title text data_fetched_at",
+    "passage": "source key position title heading text published_at embedding",
 }
 JSON_COLUMNS = {"sections", "stats", "bonuses", "rewards", "cards"}
 
@@ -251,14 +252,7 @@ class _Sources:
         self.embeddings = {
             embed.passage_text(title, heading, text): vector
             for title, heading, text, vector in conn.execute(
-                "SELECT post_title, heading, text, embedding FROM post_section"
-                " WHERE embedding IS NOT NULL"
-                " UNION ALL SELECT title, heading, text, embedding"
-                " FROM game8_section JOIN game8_page USING (url) WHERE embedding IS NOT NULL"
-                " UNION ALL SELECT title, heading, text, embedding"
-                " FROM guide_section JOIN prydwen.document USING (url) WHERE embedding IS NOT NULL"
-                " UNION ALL SELECT title, NULL, text, embedding"
-                " FROM game_help WHERE embedding IS NOT NULL"
+                "SELECT title, heading, text, embedding FROM passage"
             )
         }
         self.game8_pages = conn.execute(
@@ -289,16 +283,21 @@ def _merge(sources: _Sources, result: BuildResult) -> dict[str, list[dict]]:
     cards = _cards(sources, slugs, characters, known, result)
     encounters, options = _encounters(sources)
     entries, decks = _leaderboard(sources, slugs)
+    posts = _post_sections(sources)
+    game8 = _game8(sources)
+    guides = _guide_sections(sources)
+    help_rows = _game_help(sources)
     return {
         "encounter": encounters,
         "encounter_option": options,
         "divine_epiphany": _divine_epiphanies(sources),
         "leaderboard_entry": entries,
         "leaderboard_deck": decks,
-        "post_section": _post_sections(sources),
-        **_game8(sources),
-        "guide_section": _guide_sections(sources),
-        "game_help": _game_help(sources),
+        "post_section": posts,
+        **game8,
+        "guide_section": guides,
+        "game_help": help_rows,
+        "passage": _passages(sources, posts, game8, guides, help_rows),
         "character": characters,
         "card": cards,
         "potential": _potentials(sources, slugs),
@@ -349,13 +348,12 @@ def _post_sections(sources: _Sources) -> list[dict]:
             post | vars(section)
             for section in split_post(article["content"], article["created_at"])
         )
-    _embed(sources, rows, [(r["post_title"], r["heading"], r["text"]) for r in rows])
     return rows
 
 
 def _game8(sources: _Sources) -> dict[str, list[dict]]:
     """Game8 pages and their sections (see ``czn_data.game8.split_page``)."""
-    pages, sections, passages = [], [], []
+    pages, sections = [], []
     for url, html, lastmod, fetched_at in sources.game8_pages:
         page = split_page(html)
         pages.append(
@@ -368,18 +366,13 @@ def _game8(sources: _Sources) -> dict[str, list[dict]]:
                 "data_fetched_at": fetched_at,
             }
         )
-        for section in page.sections:
-            sections.append({"url": url} | vars(section))
-            passages.append((page.title, section.heading, section.text))
-    _embed(sources, sections, passages)
+        sections.extend({"url": url} | vars(section) for section in page.sections)
     return {"game8_page": pages, "game8_section": sections}
 
 
 def _guide_sections(sources: _Sources) -> list[dict]:
-    """Prydwen's page sections (see ``czn_data.parse``), with their embeddings."""
-    rows = [{k: v for k, v in s.items() if k != "title"} for s in sources.guide_sections]
-    _embed(sources, rows, [(s["title"], s["heading"], s["text"]) for s in sources.guide_sections])
-    return rows
+    """Prydwen's page sections (see ``czn_data.parse``), each with its page's title."""
+    return [dict(s) for s in sources.guide_sections]
 
 
 def _game_help(sources: _Sources) -> list[dict]:
@@ -395,20 +388,107 @@ def _game_help(sources: _Sources) -> list[dict]:
             "title": plain(topic.title),
             "text": plain(topic.text),
             "data_fetched_at": fetched_at,
+            # Not stored in game_help: each page becomes its own passage.
+            "pages": [(plain(title), plain(body)) for title, body in topic.pages],
         }
         for topic in help_topics(tables)
     ]
-    _embed(sources, rows, [(r["title"], None, r["text"]) for r in rows])
     return rows
 
 
-def _embed(sources: _Sources, rows: list[dict], passages: list[tuple]) -> None:
-    """Set each row's embedding, computing only those of new or changed passages."""
-    texts = [embed.passage_text(*passage) for passage in passages]
+# Game text kinds whose titles are shared ("Tutorial") or a key fragment ("Messages: team"); their
+# passages are told apart by a heading made of their opening words.
+_UNTITLED = ("tutorial:", "message:")
+_OPENING_CHARS = 60
+
+
+def _opening(text: str) -> str:
+    """text's first line, cut at a word to about _OPENING_CHARS."""
+    line = text.split("\n", 1)[0]
+    if len(line) <= _OPENING_CHARS:
+        return line
+    return line[:_OPENING_CHARS].rsplit(" ", 1)[0] + "..."
+
+
+def _passages(
+    sources: _Sources,
+    posts: list[dict],
+    game8: dict[str, list[dict]],
+    guides: list[dict],
+    help_rows: list[dict],
+) -> list[dict]:
+    """Every searchable piece of text, as the search tools rank it (see the ``passage``
+    table), with its embedding."""
+    pages = {page["url"]: page for page in game8["game8_page"]}
+    rows = [
+        {
+            "source": "post",
+            "key": str(s["article_id"]),
+            "position": s["position"],
+            "title": s["post_title"],
+            "heading": s["heading"],
+            "text": s["text"],
+            "published_at": s["posted_at"],
+        }
+        for s in posts
+    ]
+    rows += [
+        {
+            "source": "game8",
+            "key": s["url"],
+            "position": s["position"],
+            "title": pages[s["url"]]["title"],
+            "heading": s["heading"],
+            "text": s["text"],
+            "published_at": pages[s["url"]]["updated_at"],
+        }
+        for s in game8["game8_section"]
+    ]
+    rows += [
+        {
+            "source": "guide",
+            "key": s["url"],
+            "position": s["position"],
+            "title": s["title"],
+            "heading": s["heading"],
+            "text": s["text"],
+        }
+        for s in guides
+    ]
+    rows += [
+        {
+            "source": "help",
+            "key": h["id"],
+            "position": position,
+            "title": h["title"],
+            "heading": page_title or None,
+            "text": body,
+            "published_at": h["data_fetched_at"],
+        }
+        for h in help_rows
+        for position, (page_title, body) in enumerate(h["pages"])
+    ]
+    if sources.game_files:
+        fetched_at = max(fetched for _, fetched in sources.game_files.values())
+        tables = {name: rows for name, (rows, _) in sources.game_files.items()}
+        rows += [
+            {
+                "source": "game_text",
+                "key": text.id,
+                "position": 0,
+                "title": plain(text.title),
+                "heading": _opening(plain(text.text)) if text.id.startswith(_UNTITLED) else None,
+                "text": plain(text.text),
+                "published_at": fetched_at,
+            }
+            for text in game_texts(tables)
+        ]
+    texts = [embed.passage_text(r["title"], r.get("heading"), r["text"]) for r in rows]
     missing = [text for text in dict.fromkeys(texts) if text not in sources.embeddings]
     vectors = sources.embeddings | dict(zip(missing, embed.passages(missing), strict=True))
     for row, text in zip(rows, texts, strict=True):
         row["embedding"] = vectors[text]
+    return rows
 
 
 def _prydwen_rows(sources: _Sources, table: str) -> list[dict]:

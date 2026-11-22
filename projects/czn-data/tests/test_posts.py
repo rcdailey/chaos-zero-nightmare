@@ -33,6 +33,19 @@ def test_update_notice_markers_become_nested_headings_and_tables_become_rows():
     ]
 
 
+def test_table_cells_written_as_paragraphs_stay_on_their_row():
+    html = (
+        "<p>■ Changes</p><table>"
+        "<tr><td><p>Option</p></td><td><p>Before</p></td><td><p>After</p></td></tr>"
+        "<tr><td><p>Gangrene 2</p></td><td><p>Lose 2%</p><p>per turn</p></td>"
+        "<td><p>Lose 4%</p></td></tr></table>"
+    )
+
+    assert [t for _, t, _, _ in sections(html)] == [
+        "Option | Before | After\nGangrene 2 | Lose 2% per turn | Lose 4%"
+    ]
+
+
 def test_struck_out_end_date_is_dropped_and_missing_year_is_the_posts():
     html = (
         "<p>◆ Event Period</p><p>- November 11th (Wed) – <s>November 29th (Fri)</s>"

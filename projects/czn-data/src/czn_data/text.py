@@ -21,6 +21,11 @@ def text_of(el: Tag | None, separate_spans: bool = False) -> str:
             string.extract()
         else:
             string.replace_with(re.sub(r"\s+", " ", string))
+    # A table row is one line, so blocks inside a cell must not break it.
+    for cell in el.find_all(["td", "th"]):
+        flat = text_of(cell, separate_spans).replace("\n", " ")
+        cell.clear()
+        cell.append(flat)
     for br in el.find_all("br"):
         br.replace_with("\n")
     for block in el.find_all(["p", "div", "li", "tr", "h1", "h2", "h3", "h4", "h5", "h6"]):

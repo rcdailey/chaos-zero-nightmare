@@ -1,5 +1,6 @@
-"""Merge the ``e7bot`` and ``prydwen`` schemas into the tables the MCP server reads, and split
-the ``stove`` schema's posts into searchable sections (``czn_data.posts``).
+"""Merge the ``e7bot`` and ``prydwen`` schemas into the tables the MCP server reads, split the
+``stove`` posts and ``game8`` pages into searchable sections (``czn_data.posts``), and turn the
+``gamefiles`` tables into the in-game Help topics.
 
 Scrapes only collect: e7bot JSON as received, Prydwen HTML plus rows parsed from each page.
 This step turns both into one record per game entity. Game facts come from e7bot when it has
@@ -34,6 +35,7 @@ from psycopg.types.json import Jsonb
 from . import embed, metrics
 from .e7bot import SITE
 from .game8 import split_page
+from .gamefiles import help_topics
 from .posts import split_post
 from .stove import BOARDS, POST_URL
 
@@ -141,6 +143,7 @@ COLUMNS = {
     "game8_page": "url title summary body updated_at data_fetched_at",
     "game8_section": "url position heading text offset length embedding",
     "guide_section": "url position heading text offset length embedding",
+    "game_help": "id menu title text embedding data_fetched_at",
 }
 JSON_COLUMNS = {"sections", "stats", "bonuses", "rewards", "cards"}
 
@@ -254,6 +257,8 @@ class _Sources:
                 " FROM game8_section JOIN game8_page USING (url) WHERE embedding IS NOT NULL"
                 " UNION ALL SELECT title, heading, text, embedding"
                 " FROM guide_section JOIN prydwen.document USING (url) WHERE embedding IS NOT NULL"
+                " UNION ALL SELECT title, NULL, text, embedding"
+                " FROM game_help WHERE embedding IS NOT NULL"
             )
         }
         self.game8_pages = conn.execute(
@@ -263,6 +268,12 @@ class _Sources:
             "SELECT s.*, d.title FROM prydwen.guide_section s JOIN prydwen.document d USING (url)"
             " ORDER BY url, position"
         ).fetchall()
+        self.game_files = {
+            name: (rows, fetched_at)
+            for name, rows, fetched_at in conn.execute(
+                "SELECT name, rows, fetched_at FROM gamefiles.file"
+            )
+        }
 
     def items(self, path: str) -> tuple[list, datetime | None]:
         body, fetched_at = self.documents.get(path, ([], None))
@@ -287,6 +298,7 @@ def _merge(sources: _Sources, result: BuildResult) -> dict[str, list[dict]]:
         "post_section": _post_sections(sources),
         **_game8(sources),
         "guide_section": _guide_sections(sources),
+        "game_help": _game_help(sources),
         "character": characters,
         "card": cards,
         "potential": _potentials(sources, slugs),
@@ -367,6 +379,26 @@ def _guide_sections(sources: _Sources) -> list[dict]:
     """Prydwen's page sections (see ``czn_data.parse``), with their embeddings."""
     rows = [{k: v for k, v in s.items() if k != "title"} for s in sources.guide_sections]
     _embed(sources, rows, [(s["title"], s["heading"], s["text"]) for s in sources.guide_sections])
+    return rows
+
+
+def _game_help(sources: _Sources) -> list[dict]:
+    """The in-game Help topics as plain text (see ``czn_data.gamefiles.help_topics``)."""
+    if not sources.game_files:
+        return []
+    fetched_at = max(fetched for _, fetched in sources.game_files.values())
+    tables = {name: rows for name, (rows, _) in sources.game_files.items()}
+    rows = [
+        {
+            "id": topic.id,
+            "menu": topic.menu,
+            "title": plain(topic.title),
+            "text": plain(topic.text),
+            "data_fetched_at": fetched_at,
+        }
+        for topic in help_topics(tables)
+    ]
+    _embed(sources, rows, [(r["title"], None, r["text"]) for r in rows])
     return rows
 
 

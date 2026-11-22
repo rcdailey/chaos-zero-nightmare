@@ -1126,31 +1126,45 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
 
     @tool
     async def search_game_systems(query: str, limit: int = 5, offset: int = 0) -> dict:
-        """Search Game8's guides on how the game works, split into sections: game systems
-        (Save Data, Distortion Adaptation, Epiphany, stress, Link Crash, potentials, gacha),
-        Chaos modes and areas, Simulation and boss modes (Full-Scale Offensive), Ark City,
+        """Search how the game works, from two sources: the game's own Help (about 130 short
+        topics its Help menus and tutorials show, from its data files) and Game8's guides,
+        split into sections. Covers game systems (Save Data and how it is scored, Distortion
+        Adaptation, Epiphany, stress, Link Crash, potentials, gacha), Chaos modes, areas and
+        Waypoints, Simulation and boss modes (Full-Scale Offensive, Spiral Tower), Ark City,
         events, seasons, missions, and a glossary. Use it for "how does X work" and "what is
         X"; characters, cards and equipment are in the other tools. query: a question or
-        words; matches words, page titles and headings (typos tolerated), and sections close
-        in meaning. results groups the matching sections by page (page_title, page_summary:
-        the page's opening, updated_at: when Game8 last updated it, url); each section has its
-        heading (its parent headings, "A > B"), text, and offset and length (where text sits
-        in get_page's body; read around it when a section refers to another one). Game8 pages
-        can be out of date: the official posts (search_posts) win when they disagree. total
-        counts every matching section; offset pages through them (at most 20 sections per
-        call)."""
+        words; matches words, titles and headings (typos tolerated), and sections close in
+        meaning. results groups the matching sections by page: page_title, origin ("Game
+        Help" with the menu showing it: Help in the lobby, Chaos Help during a run, or
+        Tutorial; or "Game8"), and for Game8 page_summary (the page's opening), updated_at
+        (when Game8 last updated it) and url. Each section has its text; Game8 sections also
+        have heading (its parent headings, "A > B") and offset and length (where text sits
+        in get_page's body; read around it when a section refers to another one). The
+        game's Help is exact but short and from one game build (data_status shows which);
+        Game8 has more detail but can be out of date, so the Help wins when they disagree.
+        The official posts (search_posts) are newer than both and win on season content,
+        events, shops, and restrictions. total counts every matching section; offset pages
+        through them (at most 20 sections per call)."""
         vector = await anyio.to_thread.run_sync(embed.query, query)
         # Ranked like search_posts: words, titles and headings, and meaning, merged by
-        # reciprocal rank fusion; newer pages win close calls.
+        # reciprocal rank fusion. Newer Game8 pages win close calls; the game's Help ranks
+        # as the newest, since it is the exact source. Equal scores share a rank, so a tie
+        # is decided by that order, not by accident.
         listing = await _listing(
             f"""
             WITH base AS (
-                SELECT s.*, p.title, p.summary, p.updated_at, p.data_fetched_at
-                FROM game8_section s JOIN game8_page p USING (url)
+                SELECT url, position, 'Game8' AS origin, title, heading, text, summary,
+                       updated_at, "offset", length, embedding, search, data_fetched_at
+                FROM game8_section JOIN game8_page USING (url)
+                UNION ALL
+                -- A Help topic is one section; its url is only a key, never shown.
+                SELECT 'help:' || id, 0, 'Game Help, ' || menu || ' menu', title, NULL, text,
+                       NULL, NULL, NULL, NULL, embedding, search, data_fetched_at
+                FROM game_help
             ),
             words AS (
                 SELECT url, position,
-                       row_number() OVER (ORDER BY ts_rank(search, q)
+                       rank() OVER (ORDER BY ts_rank(search, q)
                            + greatest(word_similarity(%(name)s, title),
                                       word_similarity(%(name)s, heading))
                            DESC) AS rank
@@ -1167,12 +1181,13 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
             ),
             fused AS (
                 SELECT url, position,
-                       score + {RECENCY_WEIGHT} / (60 + row_number() OVER (
-                           ORDER BY updated_at DESC NULLS LAST, position)) AS score
+                       score + {RECENCY_WEIGHT} / (60 + rank() OVER (
+                           ORDER BY origin = 'Game8', updated_at DESC NULLS LAST)) AS score
                 FROM relevance JOIN base USING (url, position)
             )
-            SELECT title AS page_title, heading, text, summary AS page_summary, updated_at,
-                   url, "offset", length, data_fetched_at, count(*) OVER () AS total
+            SELECT title AS page_title, origin, heading, text, summary AS page_summary,
+                   updated_at, CASE WHEN origin = 'Game8' THEN url END AS url, "offset",
+                   length, data_fetched_at, count(*) OVER () AS total
             FROM base JOIN fused USING (url, position)
             ORDER BY fused.score DESC, url, position
             LIMIT %(limit)s OFFSET %(offset)s
@@ -1187,7 +1202,8 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
             offset=max(offset, 0),
         )
         return _by_source(
-            listing, ("page_title", "page_summary", "updated_at", "url", "data_fetched_at")
+            listing,
+            ("page_title", "origin", "page_summary", "updated_at", "url", "data_fetched_at"),
         )
 
     @tool
@@ -1227,7 +1243,9 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
         pages whose latest version failed to parse. e7bot: when the served game data was
         fetched, and the last attempt with its error. stove: official posts stored, the newest
         fetch, and the last attempt with its error. game8: Game8 guide pages stored, the newest
-        fetch, and the last attempt with its error. Failed fetches never replace served data."""
+        fetch, and the last attempt with its error. gamefiles: the game build the Help text
+        comes from, files stored, the newest download, and the last attempt with its error.
+        Failed fetches never replace served data."""
         summary = await _query(
             """
             SELECT count(*) AS pages, min(data_fetched_at) AS oldest_data,
@@ -1275,11 +1293,25 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
             ) latest ON true
             """
         )
+        gamefiles = await _query(
+            """
+            SELECT (SELECT min(build) FROM gamefiles.file) AS build,
+                   (SELECT count(*) FROM gamefiles.file) AS files,
+                   (SELECT max(fetched_at) FROM gamefiles.file) AS data_fetched_at,
+                   latest.finished_at AS last_attempt, latest.ok AS last_attempt_ok,
+                   latest.error
+            FROM (SELECT 1) one
+            LEFT JOIN LATERAL (
+                SELECT * FROM gamefiles.run ORDER BY started_at DESC LIMIT 1
+            ) latest ON true
+            """
+        )
         return {
             "prydwen": summary[0] | {"errors": errors},
             "e7bot": e7bot[0],
             "stove": stove[0],
             "game8": game8[0],
+            "gamefiles": gamefiles[0],
         }
 
     @tool

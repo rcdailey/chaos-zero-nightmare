@@ -1,16 +1,15 @@
 # Game data investigation
 
 Investigation from November 2026 into adding data from CZN's own game files to `czn-data`, next to
-the Prydwen scrape. Nothing from it is implemented. `czn-data` now takes game facts from
-wiki.e7bot.top instead, which serves the same game tables as JSON (see `projects/czn-data`);
-reading the game files directly would remove that dependency. The probe scripts and downloads
-lived in a temp directory and are not in the repository; the formats they relied on are recorded
-below.
+the Prydwen scrape. `czn-data` takes game facts from wiki.e7bot.top, which serves the same game
+tables as JSON (see `projects/czn-data`). Only the in-game Help text is read from the game files
+(`czn_data.gamefiles`), from a build folder set by hand; reading the other tables directly would
+remove the e7bot dependency. The formats it relies on are recorded below.
 
 ## Goal and requirements
 
-- The MCP server stays self-sufficient: it scrapes Prydwen, downloads only changed game data, keeps
-  game files in a mounted location, and extracts them into the database.
+- The MCP server stays self-sufficient: it downloads only changed game data and extracts it into
+  the database, whose rows are the only stored copy (no files are kept).
 - No game data comes from the user's tablet. Each new game version must be fetchable without
   plugging a device in.
 - Prefer existing tools over writing new ones.
@@ -22,14 +21,15 @@ tablet. One piece is missing: discovering the current build folder on the downlo
 patch. Every static source in the app has been checked and none contains the address of the
 service that hands out that folder.
 
-Options still open:
+Adopted: the build folder is set in code (`BUILD` in `czn_data.gamefiles`) and updated by hand
+after a patch, with an alert when the CDN refuses it. The folder name is in the device's
+`patch-meta.json` after the game updates. An app on the device cannot read that file without
+Shizuku or root (Android 16 blocks other apps' data folders), and nothing in shared storage
+names the folder.
 
-1. Capture the game's network traffic on the tablet. The app has no network security config, so it
-   trusts only system certificates. A proxy needs a rooted device or a repackaged app, and the
-   anti-cheat library may reject a repackaged app.
-2. Keep the build folder in the server's config and update it by hand after each patch, with an
-   alert when downloads start failing. The folder name is in the tablet's `patch-meta.json` after
-   the game updates.
+Still open, to automate the folder: capture the game's network traffic on the tablet. The app
+has no network security config, so it trusts only system certificates. A proxy needs a rooted
+device or a repackaged app, and the anti-cheat library may reject a repackaged app.
 
 ## What each source provides
 

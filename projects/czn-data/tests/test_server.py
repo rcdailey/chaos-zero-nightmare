@@ -496,6 +496,97 @@ def test_get_page_reads_the_text_around_a_game8_section(call, conn):
     assert top_field(before, "body") == "How to Get"
 
 
+def add_game_files(conn, tables: dict[str, list[dict]]):
+    for name, rows in tables.items():
+        conn.execute(
+            "INSERT INTO gamefiles.file (name, build, record, rows, fetched_at)"
+            " VALUES (%s, 'b', '', %s, now())",
+            (name, Jsonb(rows)),
+        )
+
+
+def test_search_game_systems_serves_game_help_topics_first_as_plain_text(call, conn):
+    from czn_data.gamefiles import HELP_MENUS, HELP_PAGES, TEXT
+
+    def page(id_, group, sort, title, desc):
+        return {"id": id_, "group": group, "sort": sort, "title": title, "out_game_desc": desc}
+
+    add_game_files(
+        conn,
+        {
+            TEXT: [
+                {"id": "t_menu", "text": "Save Data Storage Limit"},
+                {"id": "t_p1", "text": "Storage Limit"},
+                {"id": "d_p1", "text": "The <color_orange>minimum</> limit is 100 points."},
+                {"id": "t_p2", "text": "Nightmare Mode"},
+                {"id": "d_p2", "text": "Nightmare Mode adds 10 points.<br>Always."},
+                {"id": "t_tut", "text": "Card Synergy"},
+                {"id": "d_tut", "text": "Card order matters."},
+            ],
+            HELP_MENUS[1]: [
+                {"id": "m1", "name": "t_menu", "link_tutorial_popup_page_group": "limit"}
+            ],
+            HELP_PAGES[1]: [
+                page("p2", "limit", "2", "t_p2", "d_p2"),
+                page("p1", "limit", "1", "t_p1", "d_p1"),
+                page("tut", "tuto_only", "1", "t_tut", "d_tut"),
+            ],
+        },
+    )
+
+    add_game8(conn)
+
+    reply = call("search_game_systems", query="save data storage limit nightmare")
+
+    pages = lines_with(reply, "; origin: ")
+    assert pages[0].startswith("- Save Data Storage Limit; origin: Game Help, Chaos Help menu;")
+    assert "url:" not in pages[0]
+    lines = reply.splitlines()
+    start = lines.index("        text:") + 1
+    text = [line.strip() for line in lines[start:] if line.startswith(" " * 10)][:5]
+    assert text == [
+        "Storage Limit",
+        "The minimum limit is 100 points.",
+        "Nightmare Mode",
+        "Nightmare Mode adds 10 points.",
+        "Always.",
+    ]
+    assert any("origin: Game8" in page for page in pages)  # Game8 adds detail
+    tutorial = call("search_game_systems", query="card synergy").splitlines()
+    assert tutorial[2].startswith("  - Card Synergy; origin: Game Help, Tutorial menu;")
+    assert tutorial[3:5] == ["    sections:", "      - Card order matters."]
+
+
+def test_game_help_wins_a_tie_with_game8(call, conn):
+    from czn_data.gamefiles import HELP_MENUS, HELP_PAGES, TEXT
+
+    add_game_files(
+        conn,
+        {
+            TEXT: [
+                {"id": "title", "text": "Link Crash"},
+                {"id": "desc", "text": "Link Crash breaks shields."},
+            ],
+            HELP_MENUS[0]: [{"id": "m", "name": "title", "link_tutorial_popup_page_group": "g"}],
+            HELP_PAGES[0]: [
+                {"id": "p", "group": "g", "sort": "1", "title": "title", "out_game_desc": "desc"}
+            ],
+        },
+    )
+    add_game8(
+        conn,
+        '<html><body><h1 class="p-archiveHeader__title">Link Crash</h1>'
+        '<div class="archive-style-wrapper"><div><h2 class="a-header--2">Link Crash</h2></div>'
+        "<p>Link Crash breaks shields.</p></div></body></html>",
+    )
+
+    reply = call("search_game_systems", query="link crash")
+
+    # Both pages share the title, so it moves to the every item line and origin leads.
+    pages = [line for line in reply.splitlines() if line.startswith("  - ")]
+    assert [page.split(";")[0] for page in pages] == ["  - Game Help, Help menu", "  - Game8"]
+
+
 def test_find_teams_by_member(call):
     reply = call("find_teams", character="veronika")
     assert reply.splitlines()[0] == "prydwen_teams:"

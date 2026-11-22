@@ -1,6 +1,6 @@
 """Command line entry point:
-``czn-data daily | scrape | scrape-e7bot | scrape-stove | scrape-game8 | reparse | build | enrich |
-migrate | serve``.
+``czn-data daily | scrape | scrape-e7bot | scrape-stove | scrape-game8 | scrape-gamefiles |
+reparse | build | enrich | migrate | serve``.
 
 Configuration comes from environment variables, documented in the project README.
 """
@@ -49,6 +49,7 @@ def main() -> None:
         ("scrape-e7bot", "fetch e7bot's CZN game data, then build the merged tables"),
         ("scrape-stove", "fetch the official Stove posts, then build the merged tables"),
         ("scrape-game8", "fetch Game8's guides on game systems, then build the merged tables"),
+        ("scrape-gamefiles", "fetch tables from the game's data files, then build"),
         ("reparse", "parse the stored Prydwen HTML again without fetching, then build"),
     ):
         command = commands.add_parser(name, help=help_text)
@@ -110,6 +111,7 @@ def _run_locked(args: argparse.Namespace) -> None:
         "scrape-e7bot": lambda: _scrape_e7bot(args.allow_shrink),
         "scrape-stove": lambda: _scrape_stove(args.allow_shrink),
         "scrape-game8": lambda: _scrape_game8(args.allow_shrink),
+        "scrape-gamefiles": lambda: _scrape_gamefiles(args.allow_shrink),
         "scrape": lambda: _prydwen("scrape", args.allow_shrink),
         "reparse": lambda: _prydwen("reparse", args.allow_shrink),
     }
@@ -134,6 +136,7 @@ def _run_daily(allow_shrink: bool) -> int:
         lambda: _scrape_e7bot(allow_shrink),
         lambda: _scrape_stove(allow_shrink),
         lambda: _scrape_game8(allow_shrink),
+        lambda: _scrape_gamefiles(allow_shrink),
     )
     with ThreadPoolExecutor(max_workers=len(scrapes)) as pool:
         ok = all(list(pool.map(_guarded, scrapes)))
@@ -243,6 +246,30 @@ def _scrape_game8(allow_shrink: bool) -> bool:
         },
     )
     return _export(lambda: game8.export_metrics(result, started)) and result.ok
+
+
+def _scrape_gamefiles(allow_shrink: bool) -> bool:
+    from . import gamefiles
+    from .fetch import Fetcher
+
+    log = logging.getLogger("czn_data")
+    started = time.time()
+    log.info("run started", extra={"command": "scrape-gamefiles", "build": gamefiles.BUILD})
+    with _connect() as conn:
+        fetcher = Fetcher(delay=gamefiles.DELAY_SECONDS, headers=gamefiles.HEADERS)
+        result = gamefiles.scrape_gamefiles(conn, fetcher.get_bytes, allow_shrink)
+    log.info(
+        "run finished",
+        extra={
+            "command": "scrape-gamefiles",
+            "ok": result.ok,
+            "requests": dict(result.requests),
+            "files": dict(result.files),
+            "blocked": result.blocked,
+            "validation_failures": dict(result.validation_failures),
+        },
+    )
+    return _export(lambda: gamefiles.export_metrics(result, started)) and result.ok
 
 
 def _export(send) -> bool:

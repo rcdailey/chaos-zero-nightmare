@@ -1,6 +1,6 @@
 # czn-data
 
-Collects Chaos Zero Nightmare data from four sources into Postgres and serves it to Claude (or
+Collects Chaos Zero Nightmare data from five sources into Postgres and serves it to Claude (or
 any MCP client) through an MCP server:
 
 - [wiki.e7bot.top](https://wiki.e7bot.top/#/czn/cards) serves the game's own data: characters,
@@ -16,17 +16,20 @@ any MCP client) through an MCP server:
 - [Game8](https://game8.co/games/Chaos-Zero-Nightmare) explains how the game works: systems
   (Save Data, Distortion Adaptation, stress), Chaos modes and areas, boss modes, Ark City,
   events, and seasons.
+- The game's own data files, from the CDN the game downloads them from, supply the in-game Help
+  text: the rules its Help menus and tutorials explain.
 
 Each scrape only collects its source, in that source's own shape (schemas `e7bot`, `prydwen`,
-`stove`, and `game8`). A build step then merges e7bot and Prydwen into the tables the MCP server
-reads (schema `public`), and splits the Stove posts and Game8 pages into searchable sections. Where
+`stove`, `game8`, and `gamefiles`). A build step then merges e7bot and Prydwen into the tables the
+MCP server reads (schema `public`), splits the Stove posts and Game8 pages into searchable
+sections, and turns the game files into Help topics. Where
 both sources describe the same fact, e7bot's value wins; Prydwen fills only the fields and records
 e7bot lacks, such as a character Prydwen covers first. Every merged row has `source` (`e7bot` or
 `prydwen`), `url`, and `data_fetched_at`; Prydwen opinions on it link to `prydwen_url`.
 
 One container image (`ghcr.io/rcdailey/czn-data`) runs every workload:
 
-- `czn-data daily`: the scheduled run (a daily Kubernetes CronJob). It runs the four scrapes below
+- `czn-data daily`: the scheduled run (a daily Kubernetes CronJob). It runs the five scrapes below
   at once, then `enrich`, then one build, so a run takes about as long as the Prydwen scrape. A
   failed step fails the run but never stops a later one; enrich and the build then use the last good
   data of that source. Each scrape and enrich also runs on its own (for a manual rerun after a
@@ -48,6 +51,9 @@ One container image (`ghcr.io/rcdailey/czn-data`) runs every workload:
 - `czn-data scrape-game8`: the Game8 scrape. It pauses one second between requests. The game page
   and sitemap are read every run; a page is fetched only when its sitemap date changed or its copy
   is over 7 days old (about 90 pages, 2 minutes, on an empty database; seconds after).
+- `czn-data scrape-gamefiles`: the game files scrape. It reads the game's manifest (3 MB) every
+  run and downloads a file only when its manifest entry or the build changed (about 16 MB, 10
+  seconds, on an empty database or after a new build; seconds after).
 - `czn-data build`: merges the stored sources again without fetching anything.
 - `czn-data enrich`: derives data from what the Prydwen scrape stored (character gender and
   identity prints), without contacting Prydwen. A run that finds nothing new exits in seconds.
@@ -144,6 +150,27 @@ overlapping pieces as the posts do. Each section records where its text sits in 
 with newer pages winning close calls. Some pages are out of date; each result carries Game8's
 update date.
 
+## What gets stored from the game files
+
+The game downloads its data from a public CDN: a manifest that lists every file, and chunk files
+that hold the files back to back. `czn_data.gamefiles` reads the manifest, range-requests only
+the bytes of the files it needs, then decompresses and decrypts them (formats in
+[the investigation notes](../../docs/game-data-investigation.md)). It stores the rows of the
+English text table (every string in the game) and of the two Help menus with their pages. The
+files themselves are not kept: their rows in the database are the cache, and each file's
+manifest entry decides whether it is downloaded again.
+
+The build joins each Help menu entry to its pages and their English text, and serves one topic
+per entry (about 130 topics). Pages that only the tutorial shows become one topic each. The
+game's markup becomes plain text. `search_game_systems` searches the topics together with the
+Game8 sections, one ranking over both, and ranks the Help as the newest source so it wins close
+calls; each result names its origin.
+
+The game asks a version service, whose address is unknown, for its current build folder on the
+CDN. So `BUILD` in `czn_data.gamefiles` names one folder and is updated by hand after a patch
+(the folder is in `patch-meta.json` in the game's folder on a device). Until then the scrape
+keeps reading the old build, which stays correct as long as the CDN keeps serving it.
+
 ## How failures are handled
 
 An e7bot run replaces the stored responses only when every path fetched, decrypted, and kept
@@ -175,6 +202,11 @@ and date, and the run fails. A game page or sitemap that fails, a game page with
 headings, or a selection that shrinks by more than 20% keeps every stored page;
 `czn-data scrape-game8 --allow-shrink` accepts a real removal. Pages no longer selected are
 deleted.
+
+A game files run stores nothing unless every file due downloads and decodes, so the stored
+files always come from one manifest. A manifest without a needed file, or a table that shrinks
+by more than 20%, keeps every stored file; `czn-data scrape-gamefiles --allow-shrink` accepts a
+real removal. A 403 from the CDN usually means it dropped the build folder: update `BUILD`.
 
 The scraper exits non-zero on any failure, including a failed metrics export. It writes JSON logs
 (`time`, `level`, `msg`, plus fields such as `url` and `error`) that vlagent maps to VictoriaLogs
@@ -208,7 +240,9 @@ The e7bot scrape sends the same kind of series under `czn_e7bot_`: `success`,
 `requests{result}` (`ok`, `fetch_error`, `invalid`), and `validation_failures{field}`. The Stove
 scrape sends the same series under `czn_stove_`, plus `articles{result}` (`fetched`, `unchanged`,
 `removed`). The Game8 scrape sends the Stove series under `czn_game8_`, with `pages{result}`
-(`fetched`, `unchanged`, `removed`) in place of `articles`.
+(`fetched`, `unchanged`, `removed`) in place of `articles`. The game files scrape sends the
+e7bot series under `czn_gamefiles_`, plus `files{result}` (`fetched`, `unchanged`); `blocked` is
+1 when the CDN refused the build.
 
 Every command that builds also sends `czn_build_success`, `czn_build_last_run_timestamp_seconds`,
 and `czn_build_unmatched{entity}`.

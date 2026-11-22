@@ -32,24 +32,33 @@ class FetchFailed(Exception):
 
 
 class Fetcher:
-    def __init__(self, delay: float = CRAWL_DELAY_SECONDS, retries: int = 3):
+    """``headers`` go with every request, over the browser's own (a server that wants its
+    client's User-Agent)."""
+
+    def __init__(
+        self, delay: float = CRAWL_DELAY_SECONDS, retries: int = 3, headers: dict | None = None
+    ):
         self.delay = delay
         self.retries = retries
-        self._session = requests.Session(impersonate="chrome")
+        self._session = requests.Session(impersonate="chrome", headers=headers)
         self._last_request = 0.0
 
     def get(self, url: str) -> str:
         return self._get(url).text
 
-    def get_bytes(self, url: str) -> bytes:
-        return self._get(url).content
+    def get_bytes(self, url: str, start: int | None = None, end: int | None = None) -> bytes:
+        """The body, or only bytes ``start`` to ``end`` (exclusive) of it when given."""
+        if start is None or end is None:
+            return self._get(url).content
+        return self._get(url, {"Range": f"bytes={start}-{end - 1}"}).content
 
-    def _get(self, url: str) -> requests.Response:
+    def _get(self, url: str, headers: dict | None = None) -> requests.Response:
+        ok = 206 if headers else 200
         for attempt in range(self.retries + 1):
             backoff = self.delay * 2**attempt
             self._wait(self.delay)
             try:
-                response = self._session.get(url, timeout=30)
+                response = self._session.get(url, headers=headers, timeout=60)
             except requests.RequestsError as error:
                 log.warning("request error", extra={"url": url, "error": str(error)})
                 self._wait(backoff)
@@ -61,7 +70,7 @@ class Fetcher:
                 log.warning("retryable status", extra={"url": url, "status": response.status_code})
                 self._wait(float(retry_after) if retry_after.isdigit() else backoff)
                 continue
-            if response.status_code != 200:
+            if response.status_code != ok:
                 raise FetchFailed(f"{url}: HTTP {response.status_code}")
             return response
         raise FetchFailed(f"{url}: gave up after {self.retries + 1} attempts")

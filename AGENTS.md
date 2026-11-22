@@ -18,8 +18,8 @@ Independent projects, each with its own `mise.toml` toolchain; run commands from
 directory. Before working in a project, read its `AGENTS.md`; shell commands do not load it.
 
 - `projects/czn-data`: Python (uv) scrapers (e7bot game data, Prydwen guides, Stove posts, Game8
-  system guides), merge build, and MCP server. `README.md` there owns behavior, configuration, and
-  deployment.
+  system guides, in-game Help from the game's files), merge build, and MCP server. `README.md` there
+  owns behavior, configuration, and deployment.
 - `projects/czn-tools`: Vite/React static site.
 - `projects/czn-companion`: Android app that screenshots the game and shows Claude's advice in an
   overlay.
@@ -32,7 +32,8 @@ directory. Before working in a project, read its `AGENTS.md`; shell commands do 
   in `files/screenshots` (`run_entry.screenshot` names one; when Claude asked for character
   names, `<millis>.identify.json` beside it holds each figure's candidates and match scores);
   copy them with `run-as` too.
-- `docs/game-data-investigation.md`: findings on reading CZN's own game files; nothing implemented.
+- `docs/game-data-investigation.md`: formats of CZN's own game files and the open build-folder
+  lookup; only the Help text is implemented.
 - Markdown anywhere: check with `mise run lint` from the repository root.
 
 ## Tool documentation for Claude

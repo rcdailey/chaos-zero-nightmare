@@ -22,7 +22,7 @@ def database_url():
         pytest.skip("TEST_DATABASE_URL not set; run `mise run test` to start Postgres")
     with psycopg.connect(url, autocommit=True) as connection:
         connection.execute(
-            "DROP SCHEMA IF EXISTS prydwen, e7bot, stove, game8 CASCADE;"
+            "DROP SCHEMA IF EXISTS prydwen, e7bot, stove, game8, gamefiles CASCADE;"
             " DROP SCHEMA public CASCADE; CREATE SCHEMA public"
         )
     return url

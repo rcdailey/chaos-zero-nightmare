@@ -13,6 +13,7 @@ import io.ktor.http.contentType
 import io.ktor.http.isSuccess
 import kotlinx.coroutines.CancellationException
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.SerializationException
 import kotlinx.serialization.json.Json
 
 /** One character figure the data server found on a screenshot (`POST /identify`). */
@@ -50,39 +51,21 @@ class ScreenCharacters(
 ) {
     private val json = Json { ignoreUnknownKeys = true }
 
-    /**
-     * The characters on [jpeg] (full resolution: small figures match better), or null when the
-     * server could not answer in time; failures are logged.
-     */
-    suspend fun identify(jpeg: ByteArray): Identified? =
-        try {
-            val response =
-                http.post(IDENTIFY_URL) {
-                    bearerAuth(cznData.accessToken())
-                    contentType(ContentType.Image.JPEG)
-                    setBody(jpeg)
-                    timeout { requestTimeoutMillis = TIMEOUT_MILLIS }
-                }
-            val body = response.bodyAsText()
-            if (response.status.isSuccess()) {
-                val figures = json.decodeFromString<IdentifyResponse>(body).characters
-                Log.d(TAG, "identified ${figures.size} characters")
-                Identified(describe(figures), body)
-            } else {
-                Log.w(TAG, "identify failed: ${response.status} $body")
-                null
+    /** The characters on [jpeg], or null when the server could not answer ([postScreenshot]). */
+    suspend fun identify(jpeg: ByteArray): Identified? {
+        val body = postScreenshot(http, cznData, IDENTIFY_URL, jpeg) ?: return null
+        val figures =
+            try {
+                json.decodeFromString<IdentifyResponse>(body).characters
+            } catch (e: SerializationException) {
+                Log.w(TAG, "identify answered $body", e)
+                return null
             }
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            Log.w(TAG, "identify failed", e)
-            null
-        }
+        Log.d(TAG, "identified ${figures.size} characters")
+        return Identified(describe(figures), body)
+    }
 
     companion object {
-        private const val TAG = "CznAdvice"
-        private const val TIMEOUT_MILLIS = 20_000L
-
         /** On the same host as the MCP endpoint, which takes the same token. */
         val IDENTIFY_URL = CznDataAuth.MCP_URL.removeSuffix("/mcp") + "/identify"
 
@@ -100,3 +83,39 @@ class ScreenCharacters(
         }
     }
 }
+
+private const val TAG = "CznAdvice"
+private const val TIMEOUT_MILLIS = 20_000L
+
+/**
+ * Sends [jpeg] (full resolution: small figures and icons match better) to one of the data
+ * server's screenshot routes and returns its JSON answer, or null when it did not answer in
+ * time or failed; failures are logged.
+ */
+internal suspend fun postScreenshot(
+    http: HttpClient,
+    cznData: CznDataAuth,
+    url: String,
+    jpeg: ByteArray,
+): String? =
+    try {
+        val response =
+            http.post(url) {
+                bearerAuth(cznData.accessToken())
+                contentType(ContentType.Image.JPEG)
+                setBody(jpeg)
+                timeout { requestTimeoutMillis = TIMEOUT_MILLIS }
+            }
+        val body = response.bodyAsText()
+        if (response.status.isSuccess()) {
+            body
+        } else {
+            Log.w(TAG, "$url failed: ${response.status} $body")
+            null
+        }
+    } catch (e: CancellationException) {
+        throw e
+    } catch (e: Exception) {
+        Log.w(TAG, "$url failed", e)
+        null
+    }

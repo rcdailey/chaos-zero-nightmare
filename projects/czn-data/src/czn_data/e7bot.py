@@ -77,6 +77,14 @@ LISTS = {
 }
 # Between seasons the leaderboard can be empty.
 MAY_BE_EMPTY = {"czn/rankings/list"}
+# Image files, by their path under ASSETS (the paths e7bot's own pages request).
+ASSETS = "https://wiki.e7bot.top/api/assets/file/czn/data/"
+GEAR_ICON = "item/{}.webp"
+# The backgrounds the game draws behind an equipment icon, one per rarity.
+RARITY_BACKGROUNDS = tuple(
+    f"rarity/bg_equipment_rarity_{rarity}.webp" for rarity in ("common", "rare", "unique", "legend")
+)
+GEAR_SLOTS = {"EQUIP_WEAPON": "Weapon", "EQUIP_ARMOR": "Armor", "EQUIP_ACC": "Trinket"}
 CHARACTER_DETAIL = "czn/characters/{}"
 ENCOUNTER_DETAIL = "czn/encounters/{}"
 SAVE = "czn/rankings/savedata/{}"
@@ -346,3 +354,54 @@ def _fetch_saves(conn, client: Client, rankings: list[dict], result: E7botResult
                 "INSERT INTO e7bot.save (save_id, body, fetched_at) VALUES (%s, %s, %s)",
                 (save_id, Jsonb(body), datetime.now(UTC)),
             )
+
+
+def wearable(relic: dict) -> bool:
+    """Whether a relic list item is equipment a player can wear. EQUIPMENT_TRANSFORM items
+    (such as Eye of Gluttony) are worn like the rest; ``_test_`` items are developer benchmarks
+    and ``_tut_`` items tutorial copies, which players never obtain."""
+    return (
+        relic["relic_category"] in ("EQUIPMENT", "EQUIPMENT_TRANSFORM")
+        and relic["relic_type"] in GEAR_SLOTS
+        and "_test_" not in relic["id"]
+        and "_tut_" not in relic["id"]
+    )
+
+
+def fetch_gear_icons(
+    conn: psycopg.Connection, get_bytes: Callable[[str], bytes], result: E7botResult
+) -> None:
+    """Store the icon of every wearable item in the stored relic list, and the rarity
+    backgrounds, that is not stored yet, for gear prints (``czn_data.enrich``). A failed file
+    counts as a ``fetch_error`` and is tried again next run.
+
+    Stored files are never fetched again: e7bot names them after the game's own asset files, so
+    new art arrives under a new name. If the game ever redraws an icon under its old name, the
+    stored copy and its prints stay until the row is deleted.
+    """
+    row = conn.execute("SELECT body FROM e7bot.document WHERE path = 'czn/relics/list'").fetchone()
+    relics = row[0] if row else []
+    wanted = [
+        *RARITY_BACKGROUNDS,
+        *(GEAR_ICON.format(r["icon_name"]) for r in relics if r.get("icon_name") and wearable(r)),
+    ]
+    stored = {row[0] for row in conn.execute("SELECT path FROM e7bot.asset")}
+    missing = sorted(set(wanted) - stored)
+    if missing:
+        log.info("fetching e7bot assets", extra={"count": len(missing)})
+    for path in missing:
+        try:
+            image = get_bytes(ASSETS + path)
+        except Blocked as failure:
+            log.error("blocked", extra={"path": path, "error": str(failure)})
+            result.blocked = True
+            return
+        except FetchFailed as failure:
+            log.error("asset fetch failed", extra={"path": path, "error": str(failure)})
+            result.requests["fetch_error"] += 1
+            continue
+        result.requests["ok"] += 1
+        conn.execute(
+            "INSERT INTO e7bot.asset (path, image, fetched_at) VALUES (%s, %s, %s)",
+            (path, image, datetime.now(UTC)),
+        )

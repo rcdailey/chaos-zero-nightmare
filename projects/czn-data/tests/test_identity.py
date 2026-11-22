@@ -1,5 +1,5 @@
 """Contract: POST /identify takes the MCP Bearer token and a JPEG or PNG screenshot, and names
-figures from the card art prints stored for the current identity model.
+figures from the card art prints stored for the current print code.
 
 The models are replaced by a fake that names one figure per stored print; how well the real
 models name characters is checked by hand, not here.
@@ -17,7 +17,7 @@ from test_server import CHARACTER_HTML, CHARACTER_URL, MEI_LIN_PORTRAIT
 
 from czn_data import store
 from czn_data.build import build
-from czn_data.identity import MODEL, Figure
+from czn_data.identity import MODEL, Figure, prints_digest
 from czn_data.parse import page_kind, parse_page
 from czn_data.server import build_server
 
@@ -44,7 +44,7 @@ def screenshot() -> bytes:
 @pytest.fixture
 def endpoint(conn, database_url, monkeypatch):
     """The server's HTTP app over a database holding Mei Lin with a print from the current
-    model, and a stale print from an older model for the same art."""
+    print code, and a stale print from older code for the same art."""
     monkeypatch.setenv("DATABASE_URL", database_url)
     monkeypatch.setattr("czn_data.server.Identifier", OneFigurePerPrint)
     parsed = parse_page(CHARACTER_URL, CHARACTER_HTML)
@@ -53,11 +53,11 @@ def endpoint(conn, database_url, monkeypatch):
         conn, CHARACTER_URL, page_kind(CHARACTER_URL), CHARACTER_HTML, now, parsed, None
     )
     build(conn)
-    for model in (MODEL, "older-model"):
+    for code in (prints_digest(), "older-code"):
         conn.execute(
-            "INSERT INTO prydwen.portrait_identity (image_url, model, print, tagged_at)"
+            "INSERT INTO prydwen.portrait_identity (image_url, digest, print, tagged_at)"
             " VALUES (%s, %s, %s, now())",
-            (MEI_LIN_PORTRAIT, model, [1.0]),
+            (MEI_LIN_PORTRAIT, code, [1.0]),
         )
     auth = AuthSettings(
         issuer_url="https://auth.example.com",

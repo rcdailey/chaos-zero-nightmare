@@ -11,6 +11,7 @@ import app.dailey.czn.companion.auth.AnthropicAuth
 import app.dailey.czn.companion.auth.CznDataAuth
 import app.dailey.czn.companion.auth.SignInRequired
 import app.dailey.czn.companion.characters.ScreenCharacters
+import app.dailey.czn.companion.characters.ScreenGear
 import app.dailey.czn.companion.run.OpenTurn
 import app.dailey.czn.companion.run.RequestUsageRow
 import app.dailey.czn.companion.run.RunRepository
@@ -100,6 +101,7 @@ class ClaudeConversation(
     private val cznData: CznDataAuth,
     private val run: RunRepository,
     private val screenCharacters: ScreenCharacters,
+    private val screenGear: ScreenGear,
     private val archive: ScreenshotArchive,
 ) {
     val entries get() = run.entries
@@ -207,10 +209,18 @@ class ClaudeConversation(
                 if (uses.isNotEmpty()) {
                     turn +=
                         toolResults(uses) { use ->
-                            if (use.name() == MessagesRequest.IDENTIFY_CHARACTERS) {
-                                identifyCharacters(open.screenshot) { screen = it }
-                            } else {
-                                runTool(use, player, reply, asks)
+                            when (use.name()) {
+                                MessagesRequest.IDENTIFY_CHARACTERS -> {
+                                    identifyCharacters(open.screenshot) { screen = it }
+                                }
+
+                                MessagesRequest.IDENTIFY_GEAR -> {
+                                    identifyGear(open.screenshot)
+                                }
+
+                                else -> {
+                                    runTool(use, player, reply, asks)
+                                }
                             }
                         }
                     save()
@@ -433,6 +443,19 @@ class ClaudeConversation(
         val line = found.line ?: return "No character figures found on this screenshot." to false
         onLine(line)
         return line to false
+    }
+
+    /** Names the gear in slots on the archived [screenshot] for Claude. */
+    private suspend fun identifyGear(screenshot: String): Pair<String, Boolean> {
+        val jpeg =
+            screenshot.ifEmpty { null }?.let(archive::read)
+                ?: return "This request's screenshot is no longer kept; name no gear from its " +
+                    "icons." to true
+        val found =
+            screenGear.identify(jpeg)
+                ?: return "The data server did not answer; name no gear from its icons." to true
+        archive.saveIdentify(screenshot, found.response, kind = "gear")
+        return (found.line ?: "No gear slot on this screenshot shows a known icon.") to false
     }
 
     /**

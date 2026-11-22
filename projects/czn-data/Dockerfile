@@ -12,9 +12,11 @@ RUN --mount=type=cache,target=/root/.cache/uv uv sync --locked --no-dev --no-edi
 ENV FASTEMBED_CACHE_PATH=/app/models
 RUN .venv/bin/python -c "from czn_data import embed, rerank; \
     embed.passages(['warm up']); rerank.scores('warm', ['up'])"
-# So do the screenshot identity models, pinned to the revision the daily job computes prints with.
+# So do the screenshot models (characters and gear), pinned to the revisions the daily job
+# computes prints with.
 ENV CZN_IDENTITY_DIR=/app/identity
-RUN .venv/bin/python -c "from czn_data import identity; identity.download('/app/identity')"
+RUN .venv/bin/python -c "from czn_data import gear, identity; \
+    identity.download('/app/identity'); gear.download('/app/identity')"
 
 FROM python:3.14-slim-trixie
 RUN useradd --system --uid 1000 app

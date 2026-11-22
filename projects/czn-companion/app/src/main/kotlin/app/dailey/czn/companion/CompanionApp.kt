@@ -8,6 +8,7 @@ import app.dailey.czn.companion.auth.CznDataAuth
 import app.dailey.czn.companion.auth.TokenStore
 import app.dailey.czn.companion.characters.CharacterRoster
 import app.dailey.czn.companion.characters.ScreenCharacters
+import app.dailey.czn.companion.characters.ScreenGear
 import app.dailey.czn.companion.claude.ClaudeConversation
 import app.dailey.czn.companion.overlay.OverlaySettings
 import app.dailey.czn.companion.overlay.OverlayStatus
@@ -57,6 +58,7 @@ class CompanionApp : Application() {
             cznDataAuth,
             RunRepository(runDatabase),
             ScreenCharacters(http, cznDataAuth),
+            ScreenGear(http, cznDataAuth),
             ScreenshotArchive(File(filesDir, "screenshots")),
         )
     }

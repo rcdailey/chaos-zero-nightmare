@@ -37,13 +37,67 @@ def tag_genders(conn: psycopg.Connection, gender: Callable[[bytes], str], result
 
 def compute_identities(
     conn: psycopg.Connection,
-    model: str,
+    code: str,
     identity_print: Callable[[bytes], list[float]],
     result: EnrichResult,
 ):
-    """Store the identity print of every portrait that has none from ``model`` yet (see
-    ``czn_data.identity``)."""
-    _tag(conn, "identity", "portrait_identity", "print", identity_print, result, model)
+    """Store the identity print of every portrait that has none from the print code
+    fingerprinted as ``code`` yet (see ``czn_data.identity``), and drop prints of other code."""
+    conn.execute("DELETE FROM prydwen.portrait_identity WHERE digest <> %s", (code,))
+    _tag(conn, "identity", "portrait_identity", "print", identity_print, result, code)
+
+
+def compute_gear_prints(
+    conn: psycopg.Connection,
+    code: str,
+    gear_prints: Callable[[bytes, list[bytes]], list[list[float]]],
+    result: EnrichResult,
+):
+    """Store the prints of every equipment icon that has none from the print code fingerprinted
+    as ``code`` yet, one per rarity background (see ``czn_data.gear``), and drop prints of
+    other code; without stored backgrounds nothing can be printed."""
+    conn.execute("DELETE FROM e7bot.gear_print WHERE digest <> %s", (code,))
+    from .e7bot import GEAR_ICON, RARITY_BACKGROUNDS
+
+    backgrounds = dict(
+        conn.execute(
+            "SELECT path, image FROM e7bot.asset WHERE path = ANY(%s)", (list(RARITY_BACKGROUNDS),)
+        ).fetchall()
+    )
+    prefix, suffix = GEAR_ICON.split("{}")
+    printed = {row[0] for row in conn.execute("SELECT icon_name FROM e7bot.gear_print")}
+    icons = [
+        (icon_name, image)
+        for path, image in conn.execute(
+            "SELECT path, image FROM e7bot.asset WHERE starts_with(path, %s) ORDER BY path",
+            (prefix,),
+        )
+        if (icon_name := path.removeprefix(prefix).removesuffix(suffix)) not in printed
+    ]
+    if not icons:
+        return
+    if len(backgrounds) < len(RARITY_BACKGROUNDS):
+        log.error("rarity backgrounds missing", extra={"step": "gear"})
+        result.failures["gear"] += 1
+        return
+    log.info("printing gear icons", extra={"count": len(icons)})
+    drawn_on = [backgrounds[path] for path in RARITY_BACKGROUNDS]
+    for icon_name, image in icons:
+        try:
+            prints = gear_prints(image, drawn_on)
+        except ModelUnavailable as error:
+            log.error("gear model unavailable", extra={"error": str(error)})
+            result.failures["gear"] += 1
+            return
+        except Exception as error:  # noqa: BLE001 - one bad icon must not stop the rest
+            log.error("gear printing failed", extra={"icon": icon_name, "error": repr(error)})
+            result.failures["gear"] += 1
+            continue
+        conn.execute(
+            "INSERT INTO e7bot.gear_print (icon_name, digest, prints, tagged_at)"
+            " VALUES (%s, %s, %s, %s)",
+            (icon_name, code, prints, datetime.now(UTC)),
+        )
 
 
 def _tag(
@@ -53,18 +107,18 @@ def _tag(
     column: str,
     tag: Callable[[bytes], object],
     result: EnrichResult,
-    model: str | None = None,
+    code: str | None = None,
 ):
-    """Store ``tag`` of each portrait missing from ``table`` (for ``model``, when the table keeps
-    one row per model); a failure counts against ``step``."""
-    done = f"SELECT image_url FROM prydwen.{table}" + (" WHERE model = %(model)s" if model else "")
+    """Store ``tag`` of each portrait missing from ``table`` (for the print code ``code``, when
+    the table keeps one row per code); a failure counts against ``step``."""
+    done = f"SELECT image_url FROM prydwen.{table}" + (" WHERE digest = %(code)s" if code else "")
     portraits = conn.execute(
         f"""
         SELECT image_url, image FROM prydwen.portrait
         WHERE image_url NOT IN ({done})
         ORDER BY image_url
         """,
-        {"model": model},
+        {"code": code},
     ).fetchall()
     if portraits:
         log.info("tagging portraits", extra={"step": step, "count": len(portraits)})
@@ -82,8 +136,8 @@ def _tag(
             result.failures[step] += 1
             continue
         row = {"image_url": url, column: value, "tagged_at": datetime.now(UTC)}
-        if model:
-            row["model"] = model
+        if code:
+            row["digest"] = code
         conn.execute(
             f"INSERT INTO prydwen.{table} ({', '.join(row)})"
             f" VALUES ({', '.join(f'%({name})s' for name in row)})",
@@ -108,7 +162,7 @@ def export_metrics(result: EnrichResult, started: float) -> bool:
             )
         gauge("czn.enrich.duration", "Run duration", "s").set(now - started)
         failures = gauge("czn.enrich.failures", "Rows that failed, by step")
-        for step in ("gender", "identity"):
+        for step in ("gender", "identity", "gear"):
             failures.set(result.failures[step], {"step": step})
 
     return metrics.export("czn_data.enrich", record)

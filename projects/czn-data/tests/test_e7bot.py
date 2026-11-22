@@ -8,7 +8,17 @@ from pathlib import Path
 
 import pytest
 
-from czn_data.e7bot import API, Client, decode, scrape_e7bot
+from czn_data.e7bot import (
+    API,
+    ASSETS,
+    RARITY_BACKGROUNDS,
+    Client,
+    E7botResult,
+    decode,
+    fetch_gear_icons,
+    scrape_e7bot,
+)
+from czn_data.fetch import FetchFailed
 
 FIXTURE = Path(__file__).parent / "fixtures" / "e7bot_packs.json"
 
@@ -72,7 +82,26 @@ def api(**overrides) -> dict:
                 "relic_category": "EQUIPMENT",
                 "relic_type": "EQUIP_ACC",
                 "skills": [],
-            }
+                "icon_name": "relics/relic_1",
+            },
+            {
+                "id": "eq_nih_1",
+                "name": "Eye",
+                "rarity": "RARITY_UNIQUE",
+                "relic_category": "EQUIPMENT_TRANSFORM",
+                "relic_type": "EQUIP_ACC",
+                "skills": [],
+                "icon_name": "relics/relic_2",
+            },
+            {
+                "id": "eq_tut_1",
+                "name": "Tutorial Suit",
+                "rarity": "RARITY_COMMON",
+                "relic_category": "EQUIPMENT",
+                "relic_type": "EQUIP_ARMOR",
+                "skills": [],
+                "icon_name": "relics/relic_3",
+            },
         ],
         "czn/r-sparks/list": [
             {"id": "s", "description": "+30%", "god_type": "VITOR", "rarity": "R"}
@@ -115,6 +144,30 @@ def client(data: dict) -> Client:
 
 def stored_paths(conn) -> set[str]:
     return {row[0] for row in conn.execute("SELECT path FROM e7bot.document")}
+
+
+def test_wearable_gear_icons_and_backgrounds_are_stored_once_and_failures_retry(conn):
+    scrape_e7bot(conn, client(api()), allow_shrink=False)
+    # The tutorial copy's icon (relic_3) is not wanted: players never wear it.
+    wanted = {*RARITY_BACKGROUNDS, "item/relics/relic_1.webp", "item/relics/relic_2.webp"}
+    requested = []
+
+    def flaky(url: str) -> bytes:
+        requested.append(url.removeprefix(ASSETS))
+        if url.endswith("relic_1.webp") and requested.count("item/relics/relic_1.webp") == 1:
+            raise FetchFailed("timeout")
+        return b"webp"
+
+    failed = E7botResult()
+    fetch_gear_icons(conn, flaky, failed)
+    assert failed.requests["fetch_error"] == 1 and not failed.ok
+
+    retried = E7botResult()
+    fetch_gear_icons(conn, flaky, retried)
+    fetch_gear_icons(conn, flaky, retried)
+    assert retried.ok
+    assert sorted(requested) == sorted([*wanted, "item/relics/relic_1.webp"])
+    assert {row[0] for row in conn.execute("SELECT path FROM e7bot.asset")} == wanted
 
 
 def test_clean_run_stores_every_path_and_save(conn):

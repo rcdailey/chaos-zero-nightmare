@@ -40,7 +40,9 @@ One container image (`ghcr.io/rcdailey/czn-data`) runs every workload:
   second between requests. A run fetches the 11 list and diff documents; the 445 character and event
   details only when e7bot's diff timestamp shows new game data, or once a week (about 2 minutes
   then). Leaderboard saves never change, so each is fetched once; the first run fetches about 1,300
-  (about 6 minutes).
+  (about 6 minutes). The icons of wearable equipment and the rarity backgrounds slots draw behind
+  them are image files, fetched one at a time and once each (about 280, 5 minutes, on an empty
+  database).
 - `czn-data scrape`: the Prydwen scrape. It waits 10 seconds between requests, as Prydwen's
   robots.txt asks, so it downloads only pages that may have changed (see below) and then parses
   the stored pages whose HTML or parser changed. A run takes a few minutes; one that downloads
@@ -59,8 +61,8 @@ One container image (`ghcr.io/rcdailey/czn-data`) runs every workload:
 - `czn-data eval-search`: measures the search tools on their known questions (see "How search
   ranks"). The daily run does this after its build when the passages, the questions, or the
   search code changed since the last measurement; this command always measures.
-- `czn-data enrich`: derives data from what the Prydwen scrape stored (character gender and
-  identity prints), without contacting Prydwen. A run that finds nothing new exits in seconds.
+- `czn-data enrich`: derives data from what the scrapes stored (character gender, identity prints,
+  and gear prints), without contacting a source site. A run that finds nothing new exits in seconds.
 - `czn-data serve`: the MCP server (a Deployment), listening on port 8000.
 - `czn-data migrate`: upgrades the database schema, then exits. Every other command except
   `serve` runs it first on its own. Run it as an init container of the server Deployment, with
@@ -83,6 +85,13 @@ Any edit to that code, even a comment, processes every item of the step once.
   second). Each merged table then receives only the rows that differ from the stored ones, and the
   embedding model loads only when a passage's text is new.
 - Character images: downloaded again when their character page downloads again (see below).
+- Character and gear prints (`enrich`): each print table keys its rows by the fingerprint of the
+  code that made them (`czn_data.identity` or `czn_data.gear` and what it imports), not the
+  `processed` table, because the server must find the prints of its own code. After a change,
+  enrich prints every image again and drops the old prints; until it has run, the server names
+  no characters or gear. A deploy that changes this code needs `czn-data enrich` (about a minute).
+- Equipment icons: fetched once each and never again, since e7bot names them after the game's
+  asset files and new art gets a new name.
 - Search measurement: see `czn-data eval-search` above.
 
 ## What gets stored from e7bot
@@ -123,7 +132,10 @@ without downloading:
   then loads it (about 1 GB of memory). If Hugging Face is unreachable, the stored copy is used.
 - Character identity prints, for every character with card art, set by `enrich`: the CCIP
   model's 768-number print of each card art (see "Naming characters on a screenshot"). Each
-  image is printed once per model.
+  image is printed once per print code (see "What a run processes again").
+- Gear prints, for every stored e7bot equipment icon, set by `enrich`: DINOv2 small's print of
+  the icon drawn on each of the 4 rarity backgrounds (see "Naming gear on a screenshot"). Each
+  icon is printed once per print code, about 30 seconds for all 280.
 - `neutral-cards`, `equipment` (stats per level, drop source), `memory-fragments`, `partners`
   (passive, EGO skill, base stats), and `guides/effects-dictionary` (keyword and status
   definitions).
@@ -318,7 +330,7 @@ failed rows are tried again on the next run:
 
 - `czn_enrich_success`, `czn_enrich_last_success_timestamp_seconds`,
   `czn_enrich_last_run_timestamp_seconds`, `czn_enrich_duration_seconds`: as for the scrape.
-- `czn_enrich_failures{step}`: rows that failed per step (`gender`, `identity`).
+- `czn_enrich_failures{step}`: rows that failed per step (`gender`, `identity`, `gear`).
 
 ## Configuration
 
@@ -342,8 +354,8 @@ Environment variables:
 - `CZN_TAGGER_DIR` (daily, enrich): writable directory, kept across runs (such as a PVC of at
   least 1 GB), where the portrait tagger stores its model. Without it, new characters get no
   gender and the run fails. The scrape commands do not need it.
-- `CZN_IDENTITY_DIR` (daily, enrich, serve): where the screenshot identity models are kept
-  (about 250 MB). The image ships them there, pinned to one revision; outside it, they
+- `CZN_IDENTITY_DIR` (daily, enrich, serve): where the screenshot models for characters and
+  gear are kept (about 340 MB). The image ships them there, pinned to one revision; outside it, they
   download on first use.
 - `FASTEMBED_CACHE_PATH` (build, serve, daily): where the search models (embedding and
   cross-encoder) are kept. The image ships them there and sets `HF_HUB_OFFLINE=1`; outside it,
@@ -423,6 +435,36 @@ prints `enrich` stored. Characters added since the last `enrich` cannot be named
 one screenshot at a time: about 0.5 seconds per figure on 8 free cores, and about 400 MB of memory
 with the models loaded (about 700 MB while it reads a 6-figure screenshot). Art unlike the card art
 (battle screens) is untested.
+
+## Naming gear on a screenshot
+
+`POST /identify-gear` names the equipment a game screenshot shows as icons in square slots, such
+as the gear each character wears on the Equipment screen, which shows no names. The request and
+its errors are those of `POST /identify`. The answer lists each slot showing a known icon, top row
+first and left to right within a row, with `row` counting rows from 1:
+
+```json
+{"model": "dinov2-small", "gear": [
+  {"box": [2224, 561, 2393, 730], "row": 1, "result": "match", "icons": ["relics/relic_5084"],
+   "names": ["Runic Hammer"], "candidates": ["relics/relic_5084", "relics/relic_5041",
+   "relics/relic_5029"], "scores": [0.94, 0.59, 0.59]}
+]}
+```
+
+- `match`: one icon is at least 0.7 similar and leads every other by 0.1 or more.
+- `close`: the best two are within 0.1; `icons` and `names` hold both.
+- Slots no icon reaches 0.7 for, such as empty ones, are left out, and so are slots whose icon
+  names no item in `equipment` (rather than naming the next most similar gear).
+
+Several items share one icon (a Harmonization, Mutation, or Distortion form uses its base item's
+icon), so `names` lists every item drawn with the matched icon; the screen cannot tell them apart.
+
+Slots are found from their square outlines, plus slots in the gaps of a row of equal boxes where
+an icon covers an outline. Each box is compared with every icon's prints from DINOv2 small
+(`onnx-community/dinov2-small-ONNX`), a general image model, on each rarity background. Gear
+drawn outside a square slot (shop domes, reward cards) is not found; those screens print its
+name. On the Equipment screen it takes about 0.6 seconds on 8 free cores. Icons e7bot added since
+the last `enrich` cannot be named.
 
 ## Development
 

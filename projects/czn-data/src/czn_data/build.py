@@ -37,7 +37,7 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
 from . import digest, embed, metrics
-from .e7bot import SITE
+from .e7bot import GEAR_SLOTS, SITE, wearable
 from .game8 import split_page
 from .gamefiles import game_texts, help_topics
 from .posts import split_post
@@ -86,7 +86,6 @@ EQUIPMENT_RARITIES = {
     "RARITY_UNIQUE": "Unique",
     "RARITY_LEGEND": "Legendary",
 }
-SLOTS = {"EQUIP_WEAPON": "Weapon", "EQUIP_ARMOR": "Armor", "EQUIP_ACC": "Trinket"}
 ROMAN = {"rsp1": "I", "rsp2": "II", "rsp3": "III", "rsp4": "IV", "rsp5": "V"}
 # Other game version codes (c_<id>_pot, _lbk, _mut2) -> readable labels; a trailing number
 # is kept ("mutation 2").
@@ -126,8 +125,8 @@ COLUMNS = {
         " attack defense image_url prydwen_name prydwen_url source url data_fetched_at"
     ),
     "equipment": (
-        "game_id name rarity slot text stats obtained_from image_url prydwen_name prydwen_url"
-        " source url data_fetched_at"
+        "game_id name rarity slot text stats obtained_from image_url icon_name prydwen_name"
+        " prydwen_url source url data_fetched_at"
     ),
     "fragment_set": (
         "game_id name bonuses image_url prydwen_name prydwen_url source url data_fetched_at"
@@ -929,20 +928,16 @@ def _e7_equipment(sources: _Sources) -> list[dict]:
             "game_id": relic["id"],
             "name": (relic.get("names") or {}).get("en") or relic["name"],
             "rarity": EQUIPMENT_RARITIES.get(relic["rarity"], relic["rarity"]),
-            "slot": SLOTS[relic["relic_type"]],
+            "slot": GEAR_SLOTS[relic["relic_type"]],
             "text": "\n".join(plain(skill["description"]) for skill in relic["skills"]),
             "stats": {},
+            "icon_name": relic.get("icon_name"),
             "source": "e7bot",
             "url": URLS["equipment"],
             "data_fetched_at": fetched_at,
         }
         for relic in relics
-        if relic["relic_category"] == "EQUIPMENT"
-        and relic["relic_type"] in SLOTS
-        # Developer benchmark items and tutorial copies of real items, which players never
-        # obtain.
-        and "_test_" not in relic["id"]
-        and "_tut_" not in relic["id"]
+        if wearable(relic)
     ]
     unique = {}
     for row in rows:

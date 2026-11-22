@@ -7,8 +7,8 @@ import java.io.File
  * so a run can be debugged from the device after its replies finish. An open exchange also reads
  * its screenshot back from here to name the characters on it, even after the app was killed.
  *
- * Files are `<millis>.jpg` and `<millis>.identify.json` (the raw `POST /identify` response), so
- * file names sort by age.
+ * Files are `<millis>.jpg`, `<millis>.identify.json` (the raw `POST /identify` response), and
+ * `<millis>.gear.json` (`POST /identify-gear`), so file names sort by age.
  */
 class ScreenshotArchive(
     private val dir: File,
@@ -35,12 +35,16 @@ class ScreenshotArchive(
     /** The screenshot saved as [name], or null when it has been dropped. */
     fun read(name: String): ByteArray? = File(dir, name).takeIf(File::isFile)?.readBytes()
 
-    /** Keeps the data server's answer for the screenshot saved as [name]. */
+    /**
+     * Keeps the data server's answer for the screenshot saved as [name], as
+     * `<millis>.<kind>.json` (`identify` for characters, `gear` for equipment).
+     */
     fun saveIdentify(
         name: String,
         response: String,
+        kind: String = "identify",
     ) {
-        File(dir, "${name.substringBefore('.')}.identify.json").writeText(response)
+        File(dir, "${name.substringBefore('.')}.$kind.json").writeText(response)
     }
 
     companion object {

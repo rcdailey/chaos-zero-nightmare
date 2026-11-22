@@ -40,8 +40,10 @@ from psycopg.rows import dict_row
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
-from . import search
+from . import gear, identity, search
 from .gamefiles import TEXT_KINDS
+from .gear import MODEL as GEAR_MODEL
+from .gear import GearIdentifier
 from .identity import MODEL as IDENTITY_MODEL
 from .identity import Identifier
 from .render import render
@@ -747,13 +749,9 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
         rows = await _query("SELECT name, image_url FROM character ORDER BY name")
         return JSONResponse({"characters": rows})
 
-    identifier = Identifier()
-
-    @mcp.custom_route("/identify", methods=["POST"])
-    async def identify(request: Request) -> JSONResponse:
-        """REST endpoint for the companion app: names the characters on a game screenshot (see
-        ``czn_data.identity``). The body is the JPEG or PNG; the Bearer token is the same one
-        the MCP endpoint takes (see authorized)."""
+    async def screenshot(request: Request) -> bytes | JSONResponse:
+        """The screenshot a screenshot route was sent, or the error response to send back. The
+        body is the JPEG or PNG; the Bearer token is the one the MCP endpoint takes."""
         if not await authorized(request):
             return JSONResponse({"error": "invalid or missing Bearer token"}, 401)
         if request.headers.get("content-type") not in ("image/jpeg", "image/png"):
@@ -761,12 +759,26 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
         image = await request.body()
         if len(image) > IDENTIFY_MAX_BYTES:
             return JSONResponse({"error": "screenshot larger than 10 MB"}, 413)
+        return image
+
+    identifier = Identifier()
+    gear_identifier = GearIdentifier()
+    identity_prints = identity.prints_digest()
+    gear_prints = gear.prints_digest()
+
+    @mcp.custom_route("/identify", methods=["POST"])
+    async def identify(request: Request) -> JSONResponse:
+        """REST endpoint for the companion app: names the characters on a game screenshot (see
+        ``czn_data.identity``)."""
+        image = await screenshot(request)
+        if isinstance(image, JSONResponse):
+            return image
         rows = await _query(
             """
             SELECT c.name, i.print FROM character c
-            JOIN prydwen.portrait_identity i ON i.image_url = c.image_url AND i.model = %(model)s
+            JOIN prydwen.portrait_identity i ON i.image_url = c.image_url AND i.digest = %(code)s
             """,
-            {"model": IDENTITY_MODEL},
+            {"code": identity_prints},
         )
         prints = {row["name"]: row["print"] for row in rows}
         started = time.monotonic()
@@ -787,6 +799,46 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
         return JSONResponse(
             {"model": IDENTITY_MODEL, "characters": [asdict(figure) for figure in figures]}
         )
+
+    @mcp.custom_route("/identify-gear", methods=["POST"])
+    async def identify_gear(request: Request) -> JSONResponse:
+        """REST endpoint for the companion app: names the equipment a game screenshot shows as
+        icons in slots (see ``czn_data.gear``)."""
+        image = await screenshot(request)
+        if isinstance(image, JSONResponse):
+            return image
+        rows = await _query(
+            """
+            SELECT p.icon_name, p.prints,
+                   array_agg(DISTINCT e.name ORDER BY e.name)
+                       FILTER (WHERE e.name IS NOT NULL) AS names
+            FROM e7bot.gear_print p
+            LEFT JOIN equipment e ON e.icon_name = p.icon_name
+            WHERE p.digest = %(code)s
+            GROUP BY p.icon_name, p.digest
+            """,
+            {"code": gear_prints},
+        )
+        # Icons that name no item still compete, so a slot showing one is left out rather than
+        # named as the next most similar gear.
+        prints = {row["icon_name"]: row["prints"] for row in rows}
+        names = {row["icon_name"]: row.get("names", []) for row in rows}
+        started = time.monotonic()
+        try:
+            gear = await anyio.to_thread.run_sync(
+                gear_identifier.identify, image, prints, names, limiter=search.MODELS
+            )
+        except UnidentifiedImageError:
+            return JSONResponse({"error": "body is not a readable image"}, 400)
+        log.info(
+            "identified gear",
+            extra={
+                "slots": len(gear),
+                "seconds": round(time.monotonic() - started, 2),
+                "bytes": len(image),
+            },
+        )
+        return JSONResponse({"model": GEAR_MODEL, "gear": [asdict(slot) for slot in gear]})
 
     @tool
     async def lookup(name: str, kind: LookupKind | None = None, limit: int = 10) -> list[dict]:

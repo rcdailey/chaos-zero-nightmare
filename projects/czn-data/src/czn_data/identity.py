@@ -20,6 +20,7 @@ prints always come from the same weights. They are downloaded on first use into
 ``CZN_IDENTITY_DIR`` (about 250 MB).
 """
 
+import functools
 import io
 import json
 import logging
@@ -27,15 +28,24 @@ import os
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Protocol
 
 import numpy as np
 import onnxruntime
 from PIL import Image
 
-from . import hub
+from . import digest, hub
 
 log = logging.getLogger(__name__)
+
+
+@functools.cache
+def prints_digest() -> str:
+    """Fingerprint of the code that makes prints (``czn_data.digest``). Stored prints are kept
+    under it, the server compares only prints of its own code, and enrich prints every image
+    again after any change to that code or the packages it uses."""
+    return digest.code(__name__)
+
 
 MODEL = "ccip-caformer-24-randaug-pruned"
 _CCIP_REPO = "deepghs/ccip_onnx"
@@ -144,27 +154,10 @@ class Identifier:
         return session.run(["output"], {"input": batch})[0][0, 1:]
 
     def _session(self, repo: str, revision: str, name: str) -> onnxruntime.InferenceSession:
-        if name in self._sessions:
-            return self._sessions[name]
-        if not self.model_dir:
-            raise hub.ModelUnavailable("CZN_IDENTITY_DIR is not set")
-        model_dir = Path(self.model_dir) / repo.split("/")[1]
-        files = _CCIP_FILES if repo == _CCIP_REPO else _DETECTOR_FILES
-        try:
-            hub.download(repo, revision, files, model_dir)
-        except OSError as error:  # urllib errors are OSErrors
-            raise hub.ModelUnavailable(f"model download failed: {error!r}") from error
-        # onnxruntime's CPU memory arena keeps the most memory any run needed and grows again
-        # for each new input size (figures per screenshot), so the server held about 1.7 GB
-        # instead of about 650 MB with the search models loaded. Turning it off cost no
-        # measurable time here and about 5% on a search.
-        options = onnxruntime.SessionOptions()
-        options.enable_cpu_mem_arena = False
-        session = onnxruntime.InferenceSession(
-            model_dir / name, options, providers=["CPUExecutionProvider"]
-        )
-        self._sessions[name] = session
-        return session
+        if name not in self._sessions:
+            files = _CCIP_FILES if repo == _CCIP_REPO else _DETECTOR_FILES
+            self._sessions[name] = hub.session(repo, revision, files, name, self.model_dir)
+        return self._sessions[name]
 
 
 def download(model_dir: str) -> None:
@@ -213,19 +206,27 @@ def _suppress_overlaps(boxes: np.ndarray, scores: np.ndarray) -> list[int]:
 
 
 def _reading_order(figures: list[Figure]) -> list[Figure]:
-    """Rows from the top, left to right within a row. A figure joins the current row when its
-    height overlaps the row's by at least half its own height, so a small icon beside tall
-    cards stays in their row even when it sits above their middle."""
-    figures = sorted(figures, key=lambda f: f.box[1])
-    rows: list[list[Figure]] = []
+    return [figure for row in reading_rows(figures) for figure in row]
+
+
+class Boxed(Protocol):
+    @property
+    def box(self) -> tuple[int, int, int, int]: ...
+
+
+def reading_rows[T: Boxed](items: list[T]) -> list[list[T]]:
+    """Rows from the top, each left to right. An item joins the current row when its height
+    overlaps the row's by at least half its own height, so a small icon beside tall cards stays
+    in their row even when it sits above their middle."""
+    rows: list[list[T]] = []
     row_top = row_bottom = 0
-    for figure in figures:
-        top, bottom = figure.box[1], figure.box[3]
+    for item in sorted(items, key=lambda i: i.box[1]):
+        top, bottom = item.box[1], item.box[3]
         overlap = min(bottom, row_bottom) - max(top, row_top)
         if rows and overlap >= (bottom - top) / 2:
-            rows[-1].append(figure)
+            rows[-1].append(item)
             row_top, row_bottom = min(row_top, top), max(row_bottom, bottom)
         else:
-            rows.append([figure])
+            rows.append([item])
             row_top, row_bottom = top, bottom
-    return [figure for row in rows for figure in sorted(row, key=lambda f: f.box[0])]
+    return [sorted(row, key=lambda i: i.box[0]) for row in rows]

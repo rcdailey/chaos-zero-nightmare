@@ -13,6 +13,8 @@ import shutil
 import urllib.request
 from pathlib import Path
 
+import onnxruntime
+
 log = logging.getLogger(__name__)
 
 HUB = "https://huggingface.co"
@@ -60,6 +62,29 @@ def download(repo: str, revision: str, files: tuple[str, ...], model_dir: Path) 
         (staging / name).replace(model_dir / name)
     (model_dir / "revision").write_text(revision)
     shutil.rmtree(staging)
+
+
+def session(
+    repo: str, revision: str, files: tuple[str, ...], name: str, root: str | None
+) -> onnxruntime.InferenceSession:
+    """An onnxruntime CPU session for ``name``, one of ``files`` of ``repo`` kept under
+    ``root``/<repository name> and downloaded first when missing; raises ModelUnavailable."""
+    if not root:
+        raise ModelUnavailable("CZN_IDENTITY_DIR is not set")
+    model_dir = Path(root) / repo.split("/")[1]
+    try:
+        download(repo, revision, files, model_dir)
+    except OSError as error:  # urllib errors are OSErrors
+        raise ModelUnavailable(f"model download failed: {error!r}") from error
+    # onnxruntime's CPU memory arena keeps the most memory any run needed and grows again
+    # for each new input size (figures per screenshot), so the server held about 1.7 GB
+    # instead of about 650 MB with the search models loaded. Turning it off cost no
+    # measurable time here and about 5% on a search.
+    options = onnxruntime.SessionOptions()
+    options.enable_cpu_mem_arena = False
+    return onnxruntime.InferenceSession(
+        model_dir / name, options, providers=["CPUExecutionProvider"]
+    )
 
 
 def get_json(url: str) -> dict:

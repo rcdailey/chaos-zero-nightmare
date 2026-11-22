@@ -223,6 +223,7 @@ def _eval_search(only_if_changed: bool = False) -> bool:
 
 def _scrape_e7bot(allow_shrink: bool) -> bool:
     from . import e7bot
+    from .fetch import Fetcher
 
     log = logging.getLogger("czn_data")
     started = time.time()
@@ -230,6 +231,9 @@ def _scrape_e7bot(allow_shrink: bool) -> bool:
     with _connect() as conn:
         client = e7bot.Client(e7bot.threaded_get())
         result = e7bot.scrape_e7bot(conn, client, allow_shrink)
+        if not result.blocked:
+            fetcher = Fetcher(delay=e7bot.DELAY_SECONDS)
+            e7bot.fetch_gear_icons(conn, fetcher.get_bytes, result)
     log.info(
         "run finished",
         extra={
@@ -328,8 +332,14 @@ def _export(send) -> bool:
 
 
 def _enrich() -> bool:
-    from .enrich import EnrichResult, compute_identities, export_metrics, tag_genders
-    from .identity import MODEL, Identifier
+    from . import gear, identity
+    from .enrich import (
+        EnrichResult,
+        compute_gear_prints,
+        compute_identities,
+        export_metrics,
+        tag_genders,
+    )
     from .tagger import Tagger
 
     log = logging.getLogger("czn_data")
@@ -338,7 +348,10 @@ def _enrich() -> bool:
     result = EnrichResult()
     with _connect() as conn:
         tag_genders(conn, Tagger().gender, result)
-        compute_identities(conn, MODEL, Identifier().print_of, result)
+        identifier = identity.Identifier()
+        compute_identities(conn, identity.prints_digest(), identifier.print_of, result)
+        gear_identifier = gear.GearIdentifier()
+        compute_gear_prints(conn, gear.prints_digest(), gear_identifier.prints_of, result)
     log.info(
         "run finished",
         extra={

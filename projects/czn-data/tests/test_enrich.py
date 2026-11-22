@@ -1,13 +1,14 @@
-"""Contract: enrich derives gender and identity prints from stored portraits only,
-once per image (and per identity model), and reports and retries every portrait it could not
-process. The models are replaced by functions; the database is real Postgres.
+"""Contract: enrich derives gender and identity prints from stored portraits, and gear prints
+from stored equipment icons, once per image and per print code (old code's prints are dropped),
+and reports and retries every image it could not process. The models are replaced by functions; the database is real Postgres.
 """
 
 from datetime import UTC, datetime
 
 import pytest
 
-from czn_data.enrich import EnrichResult, compute_identities, tag_genders
+from czn_data.e7bot import RARITY_BACKGROUNDS
+from czn_data.enrich import EnrichResult, compute_gear_prints, compute_identities, tag_genders
 from czn_data.hub import ModelUnavailable
 
 PORTRAIT = "https://cdn.prydwen.gg/images/chaos/characters/mei-lin_card.webp"
@@ -42,12 +43,12 @@ def test_stored_portraits_get_a_gender_once(stored):
     assert genders(stored) == [(PORTRAIT, "female")]
 
 
-def test_stored_portraits_get_an_identity_print_once_per_model_and_failures_retry(stored):
+def test_stored_portraits_get_an_identity_print_once_per_code_and_failures_retry(stored):
     def broken(image: bytes) -> list[float]:
         raise ValueError("not an image")
 
     failed = EnrichResult()
-    compute_identities(stored, "ccip-a", broken, failed)
+    compute_identities(stored, "code-a", broken, failed)
     assert failed.failures == {"identity": 1}
 
     computed = []
@@ -57,15 +58,17 @@ def test_stored_portraits_get_an_identity_print_once_per_model_and_failures_retr
         return [0.5, 0.25]
 
     result = EnrichResult()
-    compute_identities(stored, "ccip-a", identity_print, result)
-    compute_identities(stored, "ccip-a", identity_print, result)
-    compute_identities(stored, "ccip-b", identity_print, result)
+    compute_identities(stored, "code-a", identity_print, result)
+    compute_identities(stored, "code-a", identity_print, result)
+    assert computed == [b"art"]
+
+    compute_identities(stored, "code-b", identity_print, result)
 
     assert result.ok
     assert computed == [b"art", b"art"]
     assert stored.execute(
-        "SELECT image_url, model, print FROM prydwen.portrait_identity ORDER BY model"
-    ).fetchall() == [(PORTRAIT, "ccip-a", [0.5, 0.25]), (PORTRAIT, "ccip-b", [0.5, 0.25])]
+        "SELECT image_url, digest, print FROM prydwen.portrait_identity"
+    ).fetchall() == [(PORTRAIT, "code-b", [0.5, 0.25])]
 
 
 def test_portrait_that_fails_is_reported_and_retried_next_run(stored):
@@ -80,6 +83,41 @@ def test_portrait_that_fails_is_reported_and_retried_next_run(stored):
     tag_genders(stored, lambda image: "male", retried)
     assert retried.ok
     assert genders(stored) == [(PORTRAIT, "male")]
+
+
+def store_asset(conn, path: str, image: bytes) -> None:
+    conn.execute(
+        "INSERT INTO e7bot.asset (path, image, fetched_at) VALUES (%s, %s, now())", (path, image)
+    )
+
+
+def test_gear_icons_get_prints_on_every_background_once_per_code(conn):
+    store_asset(conn, "item/relics/relic_1.webp", b"icon")
+
+    def gear_prints(icon: bytes, backgrounds: list[bytes]) -> list[list[float]]:
+        computed.append((icon, backgrounds))
+        return [[float(i)] for i in range(len(backgrounds))]
+
+    computed = []
+    missing_backgrounds = EnrichResult()
+    compute_gear_prints(conn, "code-a", gear_prints, missing_backgrounds)
+    assert missing_backgrounds.failures == {"gear": 1} and computed == []
+
+    for number, path in enumerate(RARITY_BACKGROUNDS):
+        store_asset(conn, path, f"bg{number}".encode())
+    result = EnrichResult()
+    compute_gear_prints(conn, "code-a", gear_prints, result)
+    compute_gear_prints(conn, "code-a", gear_prints, result)
+    backgrounds = [f"bg{n}".encode() for n in range(len(RARITY_BACKGROUNDS))]
+    assert computed == [(b"icon", backgrounds)]
+
+    compute_gear_prints(conn, "code-b", gear_prints, result)
+
+    assert result.ok
+    assert computed == [(b"icon", backgrounds)] * 2
+    assert conn.execute("SELECT icon_name, digest, prints FROM e7bot.gear_print").fetchall() == [
+        ("relics/relic_1", "code-b", [[0.0], [1.0], [2.0], [3.0]])
+    ]
 
 
 def test_unavailable_tagger_is_reported_once(stored):

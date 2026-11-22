@@ -71,6 +71,7 @@ object MessagesRequest {
     const val ASK_RUN_CHARACTER = "ask_run_character"
     const val ASK_PLAYER = "ask_player"
     const val IDENTIFY_CHARACTERS = "identify_characters"
+    const val IDENTIFY_GEAR = "identify_gear"
 
     /**
      * Old tool results the API clears from the prompt it reads, while the app keeps sending
@@ -149,6 +150,7 @@ object MessagesRequest {
             .addTool(ASK_RUN_CHARACTER_TOOL)
             .addTool(ASK_PLAYER_TOOL)
             .addTool(IDENTIFY_CHARACTERS_TOOL)
+            .addTool(IDENTIFY_GEAR_TOOL)
             .contextManagement(CLEAR_OLD_TOOL_RESULTS)
             .diagnostics(
                 BetaDiagnosticsParam.builder().previousMessageId(previousMessageId).build(),
@@ -392,6 +394,22 @@ object MessagesRequest {
             emptyList(),
         )
 
+    private val IDENTIFY_GEAR_TOOL =
+        tool(
+            IDENTIFY_GEAR,
+            """
+            Names the equipment drawn as icons in square slots on this request's screenshot, such
+            as what each character wears on the Equipment screen, by comparing each slot with
+            every equipment icon. Returns a line "Gear in slots, by row from the top, left to
+            right: row 1: ...; ...": "A / B" means items drawn with the same icon, which the
+            screen cannot tell apart; "A or B" means one of two icons, too close to choose. Slots
+            left out showed no known icon, such as empty ones. Gear outside square slots (shop
+            items, reward cards) is not named; those screens print the name.
+            """,
+            emptyMap(),
+            emptyList(),
+        )
+
     private val ASK_RUN_CHARACTER_TOOL =
         tool(
             ASK_RUN_CHARACTER,
@@ -504,6 +522,9 @@ object MessagesRequest {
           identify_characters; its answer is authoritative, and earlier player messages carry
           the answer for their screenshot. Narrow "A or B" to one only when the screen shows a
           name. You MUST NOT name a character from looks, element icons, or class icons.
+        - Before you name equipment the screen shows only as an icon, such as what a character
+          wears, you MUST call identify_gear; its answer is authoritative. You MUST NOT name
+          equipped gear from looks, or assume a character wears the plan's gear.
         - When you check a card's version (base, Epiphany I to V), you MUST state the version
           the czn tools matched, then how it differs from what the plan or the player wants. A
           version name on screen, often in parentheses after the card's name, decides the

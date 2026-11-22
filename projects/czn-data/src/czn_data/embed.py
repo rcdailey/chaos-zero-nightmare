@@ -15,6 +15,9 @@ from functools import cache
 
 MODEL = "BAAI/bge-small-en-v1.5"
 PASSAGE_CHARS = 300
+# fastembed's default of 256 texts per batch peaks near 1.2 GiB, over the pod's 1 GiB limit;
+# 32 peaks near 370 MiB (about 270 MiB of that is the model).
+PASSAGE_BATCH_SIZE = 32
 
 
 def passage_text(post_title: str, heading: str | None, text: str) -> str:
@@ -29,7 +32,8 @@ def _model():
 
 
 def passages(texts: Iterable[str]) -> list[list[float]]:
-    return [vector.tolist() for vector in _model().passage_embed(list(texts))]
+    vectors = _model().passage_embed(list(texts), batch_size=PASSAGE_BATCH_SIZE)
+    return [vector.tolist() for vector in vectors]
 
 
 def query(text: str) -> list[float]:

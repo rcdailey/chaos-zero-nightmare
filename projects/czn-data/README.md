@@ -43,8 +43,8 @@ One container image (`ghcr.io/rcdailey/czn-data`) runs every workload:
   (about 6 minutes).
 - `czn-data scrape`: the Prydwen scrape. It waits 10 seconds between requests, as Prydwen's
   robots.txt asks, so it downloads only pages that may have changed (see below) and then parses
-  every stored page again. A run takes a few minutes; one that downloads every page (the first,
-  and about once a week) takes about 20.
+  the stored pages whose HTML or parser changed. A run takes a few minutes; one that downloads
+  every page (the first, and about once a week) takes about 20.
 - `czn-data scrape-stove`: the Stove scrape. It pauses one second between requests. Board lists are
   read every run; a post is fetched only when its edit time changed (about 120 posts, 2 minutes,
   on an empty database; seconds after).
@@ -54,15 +54,36 @@ One container image (`ghcr.io/rcdailey/czn-data`) runs every workload:
 - `czn-data scrape-gamefiles`: the game files scrape. It reads the game's manifest (3 MB) every
   run and downloads a file only when its manifest entry or the build changed (about 16 MB, 10
   seconds, on an empty database or after a new build; seconds after).
-- `czn-data build`: merges the stored sources again without fetching anything.
+- `czn-data build`: merges the stored sources again without fetching anything (see "What a run
+  processes again").
 - `czn-data eval-search`: measures the search tools on their known questions (see "How search
-  ranks"); the daily run does this after its build.
+  ranks"). The daily run does this after its build when the passages, the questions, or the
+  search code changed since the last measurement; this command always measures.
 - `czn-data enrich`: derives data from what the Prydwen scrape stored (character gender and
   identity prints), without contacting Prydwen. A run that finds nothing new exits in seconds.
 - `czn-data serve`: the MCP server (a Deployment), listening on port 8000.
 - `czn-data migrate`: upgrades the database schema, then exits. Every other command except
   `serve` runs it first on its own. Run it as an init container of the server Deployment, with
   the scraper's database credentials, so a new image never serves an old schema.
+
+## What a run processes again
+
+Each step processes an item again only when the item's input or the step's code changed since
+the item last processed cleanly, so a deploy or a day with one changed page costs little more
+than a day with none. The `processed` table holds a fingerprint per step and item
+(`czn_data.digest`): a hash of the item's input and of the step's source code, which covers the
+step's module, every `czn_data` module it imports, and the versions of the packages they import.
+Any edit to that code, even a comment, processes every item of the step once.
+
+- Prydwen parsing: a stored page is parsed again when its HTML or the parser changed. A page that
+  fails to parse is parsed again every run, so it keeps failing the run until a fix. `reparse`
+  and a migration that requests a rebuild parse every page.
+- Build: a Stove post or Game8 page is split into sections again when its content or the
+  splitting code changed. Matching records across sources reads every source each build (about a
+  second). Each merged table then receives only the rows that differ from the stored ones, and the
+  embedding model loads only when a passage's text is new.
+- Character images: downloaded again when their character page downloads again (see below).
+- Search measurement: see `czn-data eval-search` above.
 
 ## What gets stored from e7bot
 
@@ -81,7 +102,8 @@ there is no stored copy, the sitemap gives it no date, its sitemap date differs 
 copy's, or the copy is more than 7 days old (which bounds how long a change the date misses, such
 as a listing page gaining a character, goes unnoticed). A page that fails to download keeps its
 copy and date and is tried again next run. The scraper saves each downloaded page's HTML, then
-parses every stored page, so a parser change applies on the next run without downloading:
+parses the stored pages whose HTML or parser changed, so a parser change applies on the next run
+without downloading:
 
 - Character pages: rarity, element, class, cards and their Epiphany variants (I to V) with
   Prydwen's star ratings and per-variant reviews, Neutral and Divine advice, potentials,
@@ -89,7 +111,9 @@ parses every stored page, so a parser change applies on the next run without dow
   into the game, and the Chaos the deck farms, both from the flight payload), equipment and
   seasonal powers per season tab, fragment and partner rankings, synergies, and the prose
   sections (pros, cons, introduction, stats, and so on).
-- Each character's card art (about 30 KB per image), fetched once per image URL.
+- Each character's card art (about 30 KB per image). Prydwen keeps the URL when it replaces the
+  art, so an image is downloaded again whenever its character page downloads again (a changed
+  page, or the 7-day refresh); new art replaces the stored image and is tagged again.
 - Character gender, female or male, set by `enrich` for characters e7bot lacks (e7bot states
   every other character's gender). Prydwen does not state it, so `enrich` runs
   the WD14 anime image tagger (`SmilingWolf/wd-swinv2-tagger-v3`) on each stored card art: a
@@ -269,9 +293,9 @@ Every series also carries the OTLP resource attributes as labels, such as `servi
 - `czn_scrape_last_run_timestamp_seconds`, `czn_scrape_duration_seconds`: end and length of the
   run.
 - `czn_scrape_blocked`, `czn_scrape_discovery_failed`: 1 when the run stopped early.
-- `czn_scrape_pages{result}`: pages per result. `ok` and `parse_error` count every stored page
-  parsed in the run, downloaded or not; `fetch_error` counts failed downloads, card images
-  included.
+- `czn_scrape_pages{result}`: pages per result. `ok` and `parse_error` count the stored pages
+  parsed in the run, downloaded or not; `unchanged` counts pages not parsed again because their
+  HTML and the parser did not change; `fetch_error` counts failed downloads, card images included.
 - `czn_scrape_fetches{result}`: pages `fetched` and pages skipped as `unchanged`.
 - `czn_scrape_validation_failures{kind,field}`: page kind and field that stopped parsing.
 - `czn_data_rows{table}`: rows per table after the run (Prydwen tables from the scrape, merged

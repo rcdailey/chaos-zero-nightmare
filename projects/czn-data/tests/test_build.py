@@ -1,5 +1,6 @@
-"""Contract: the build reports Prydwen ratings it cannot attach, and an unmappable source value
-fails the build without touching the merged tables.
+"""Contract: the build reports Prydwen ratings it cannot attach, an unmappable source value
+fails the build without touching the merged tables, and a build reprocesses only the posts whose
+content or splitting code changed and writes only the rows that differ.
 
 Real Postgres holding one scraped Prydwen character page plus e7bot documents.
 """
@@ -10,7 +11,7 @@ from pathlib import Path
 import pytest
 from psycopg.types.json import Jsonb
 
-from czn_data import store
+from czn_data import digest, store
 from czn_data.build import BuildError, build
 from czn_data.parse import ParsedPage, page_kind, parse_page
 
@@ -161,6 +162,51 @@ def test_unknown_game_value_fails_the_build_and_keeps_merged_data(conn, prydwen)
 
     assert conn.execute("SELECT slug, element, source FROM character").fetchall() == before
     assert before == [("mei-lin", "Passion", "e7bot")]
+
+
+def post(conn, article_id: int, content: str) -> None:
+    conn.execute(
+        "INSERT INTO stove.article"
+        " (article_id, board, title, content, created_at, updated_at, fetched_at)"
+        " VALUES (%s, 1, 'Notice', %s, now(), now(), now())"
+        " ON CONFLICT (article_id) DO UPDATE SET content = excluded.content",
+        (article_id, content),
+    )
+
+
+def test_unchanged_sources_rebuild_without_writing_or_splitting(conn, prydwen):
+    put(conn, "czn/characters/list", roster("love"))
+    post(conn, 1, "<p>Maintenance on Monday.</p>")
+    build(conn)
+
+    result = build(conn)
+
+    assert not any(result.changed.values())
+    assert not any(result.split.values())
+
+
+def test_only_the_changed_post_is_split_again(conn):
+    post(conn, 1, "<p>Maintenance on Monday.</p>")
+    post(conn, 2, "<p>New event.</p>")
+    build(conn)
+    post(conn, 2, "<p>New event, extended.</p>")
+
+    result = build(conn)
+
+    assert result.split["build.post_sections"] == 1
+    texts = {row[0] for row in conn.execute("SELECT text FROM post_section").fetchall()}
+    assert texts == {"Maintenance on Monday.", "New event, extended."}
+
+
+def test_after_a_splitter_change_every_post_is_split_again(conn, monkeypatch):
+    post(conn, 1, "<p>Maintenance on Monday.</p>")
+    post(conn, 2, "<p>New event.</p>")
+    build(conn)
+    monkeypatch.setattr(digest, "code", lambda *modules: "edited splitter")
+
+    result = build(conn)
+
+    assert result.split["build.post_sections"] == 2
 
 
 def test_a_version_the_game_names_itself_keeps_that_name(conn):

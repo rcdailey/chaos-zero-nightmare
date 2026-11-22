@@ -14,11 +14,13 @@ from datetime import UTC, datetime, timedelta
 import psycopg
 from opentelemetry.metrics import Meter
 
-from . import metrics, store
+from . import digest, metrics, store
 from .fetch import Blocked, FetchFailed, Listing, sitemap_pages
 from .parse import ParseError, page_kind, parse_page
 
 log = logging.getLogger(__name__)
+
+PARSE_STEP = "prydwen.parse"
 
 # With the 10 s crawl delay this is about one progress line per six pages, so a stalled run
 # goes quiet for no more than a minute or two plus one page's retries.
@@ -32,7 +34,8 @@ MAX_AGE = timedelta(days=7)
 
 @dataclass
 class RunResult:
-    pages: Counter = field(default_factory=Counter)  # ok, parse_error, fetch_error -> count
+    # ok, unchanged (not parsed again), parse_error, fetch_error -> count
+    pages: Counter = field(default_factory=Counter)
     fetches: Counter = field(default_factory=Counter)  # fetched, unchanged -> count
     validation_failures: Counter = field(default_factory=Counter)  # (kind, field) -> count
     blocked: bool = False
@@ -49,8 +52,8 @@ class RunResult:
 
 
 def scrape(conn: psycopg.Connection, get: Callable[[str], str], allow_shrink: bool) -> RunResult:
-    """Download the pages that may have changed (see ``_due``), then parse every stored page,
-    so a parser change reaches pages that were not downloaded."""
+    """Download the pages that may have changed (see ``_due``), then parse the stored pages
+    whose HTML or parser changed (see ``_parse_stored``)."""
     result = RunResult()
     stored = {
         url: (lastmod, fetched_at, sitemap)
@@ -130,24 +133,27 @@ def _fetch(conn, get, urls: list[str], listed: dict, result: RunResult) -> bool:
 def fetch_portraits(
     conn: psycopg.Connection, get_bytes: Callable[[str], bytes], result: RunResult
 ) -> None:
-    """Store every character image not stored yet, for post-processing (``czn_data.enrich``).
+    """Store every character image not stored yet, and download a stored one again when its
+    character page was downloaded after it, for post-processing (``czn_data.enrich``).
 
-    An image that fails to download counts as a ``fetch_error`` and is tried again next run.
+    Images keep their URL when Prydwen replaces the art, so a downloaded image that differs from
+    the stored one replaces it and loses its tags, which the next enrich computes again. An
+    image that fails to download counts as a ``fetch_error`` and is tried again next run.
     """
-    urls = [
-        url
-        for (url,) in conn.execute(
-            """
-            SELECT DISTINCT image_url FROM prydwen.character
-            WHERE image_url IS NOT NULL
-              AND image_url NOT IN (SELECT image_url FROM prydwen.portrait)
-            ORDER BY image_url
-            """
-        )
-    ]
-    if urls:
-        log.info("fetching portraits", extra={"count": len(urls)})
-    for url in urls:
+    due = conn.execute(
+        """
+        SELECT c.image_url, p.image FROM prydwen.character c
+        JOIN prydwen.page USING (url)
+        LEFT JOIN prydwen.portrait p ON p.image_url = c.image_url
+        WHERE c.image_url IS NOT NULL
+        GROUP BY c.image_url, p.image, p.fetched_at
+        HAVING p.fetched_at IS NULL OR p.fetched_at < max(page.fetched_at)
+        ORDER BY c.image_url
+        """
+    ).fetchall()
+    if due:
+        log.info("fetching portraits", extra={"count": len(due)})
+    for url, stored in due:
         try:
             image = get_bytes(url)
         except Blocked as error:
@@ -158,26 +164,48 @@ def fetch_portraits(
             log.error("fetch failed", extra={"url": url, "error": str(error)})
             result.pages["fetch_error"] += 1
             continue
-        conn.execute(
-            "INSERT INTO prydwen.portrait (image_url, image, fetched_at) VALUES (%s, %s, %s)",
-            (url, image, datetime.now(UTC)),
-        )
+        with conn.transaction():
+            if stored is not None and image != stored:
+                for table in ("portrait_gender", "portrait_identity"):
+                    conn.execute(f"DELETE FROM prydwen.{table} WHERE image_url = %s", (url,))
+            conn.execute(
+                "INSERT INTO prydwen.portrait (image_url, image, fetched_at) VALUES (%s, %s, %s)"
+                " ON CONFLICT (image_url) DO UPDATE"
+                " SET image = excluded.image, fetched_at = excluded.fetched_at",
+                (url, image, datetime.now(UTC)),
+            )
 
 
 def reparse(conn: psycopg.Connection, allow_shrink: bool) -> RunResult:
-    """Parse the stored HTML again, for example after fixing a parser. Fetches nothing."""
+    """Parse every stored page again, changed or not. Fetches nothing."""
     result = RunResult()
-    _parse_stored(conn, allow_shrink, result)
+    _parse_stored(conn, allow_shrink, result, every_page=True)
     return result
 
 
-def _parse_stored(conn, allow_shrink: bool, result: RunResult) -> None:
-    for (url,) in conn.execute("SELECT url FROM prydwen.page ORDER BY url").fetchall():
+def _parse_stored(conn, allow_shrink: bool, result: RunResult, every_page: bool = False) -> None:
+    """Parse each stored page whose HTML or parser code changed since it last parsed cleanly
+    (``czn_data.digest``); a page that failed is parsed again every run, so it keeps failing the
+    run until a fix. A skipped page's rows came from identical HTML, so they take the time of
+    its newest download."""
+    code = digest.code("czn_data.parse", "czn_data.store")
+    done = {} if every_page else digest.recorded(conn, PARSE_STEP)
+    stored = conn.execute("SELECT url, md5(html) FROM prydwen.page ORDER BY url").fetchall()
+    for url, html_md5 in stored:
+        fingerprint = digest.item(code, url, html_md5)
+        if done.get(url, (None,))[0] == fingerprint:
+            conn.execute(
+                "UPDATE prydwen.page SET data_fetched_at = fetched_at WHERE url = %s", (url,)
+            )
+            result.pages["unchanged"] += 1
+            continue
         (html,) = conn.execute("SELECT html FROM prydwen.page WHERE url = %s", (url,)).fetchone()
-        _process(conn, url, html, allow_shrink, result)
+        if _process(conn, url, html, allow_shrink, result):
+            digest.record(conn, PARSE_STEP, url, fingerprint)
 
 
-def _process(conn, url, html, allow_shrink, result: RunResult) -> None:
+def _process(conn, url, html, allow_shrink, result: RunResult) -> bool:
+    """Parse one page and store its rows; False when it failed and kept its previous rows."""
     kind = page_kind(url)
     parsed, error = None, None
     try:
@@ -196,6 +224,7 @@ def _process(conn, url, html, allow_shrink, result: RunResult) -> None:
     else:
         result.pages["ok"] += 1
     store.save_parse(conn, url, kind, parsed, error)
+    return error is None
 
 
 def export_metrics(conn: psycopg.Connection, result: RunResult, started: float) -> bool:
@@ -219,7 +248,7 @@ def export_metrics(conn: psycopg.Connection, result: RunResult, started: float) 
             )
         gauge("czn.scrape.duration", "Run duration", "s").set(now - started)
         pages = gauge("czn.scrape.pages", "Pages by result")
-        for outcome in ("ok", "fetch_error", "parse_error"):
+        for outcome in ("ok", "unchanged", "fetch_error", "parse_error"):
             pages.set(result.pages[outcome], {"result": outcome})
         fetches = gauge("czn.scrape.fetches", "Pages downloaded or skipped as unchanged")
         for outcome in ("fetched", "unchanged"):

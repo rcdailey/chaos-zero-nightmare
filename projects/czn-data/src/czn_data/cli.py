@@ -130,7 +130,8 @@ def _then_build(step: Callable[[], bool]) -> int:
 
 
 def _run_daily(allow_shrink: bool) -> int:
-    """The scheduled run: every scrape at once, then enrich, then one build.
+    """The scheduled run: every scrape at once, then enrich, then one build, then the search
+    evaluation when the searchable data or search code changed.
 
     The scrapes write disjoint schemas and fetch different sites, so they share nothing. Enrich
     tags the card art the Prydwen scrape stores, and the build merges all of it, so both wait.
@@ -147,7 +148,8 @@ def _run_daily(allow_shrink: bool) -> int:
         ok = all(list(pool.map(_guarded, scrapes)))
     ok = _guarded(_enrich) and ok
     built = _build_step()
-    return 0 if _guarded(_eval_search) and built and ok else 1
+    evaluated = _guarded(lambda: _eval_search(only_if_changed=True))
+    return 0 if evaluated and built and ok else 1
 
 
 def _guarded(step: Callable[[], bool]) -> bool:
@@ -188,15 +190,22 @@ def _build_step() -> bool:
     return result is not None and exported
 
 
-def _eval_search() -> bool:
+def _eval_search(only_if_changed: bool = False) -> bool:
     """Measure the search ranking on its known questions (``czn_data.search_eval``), log each
     miss, and export recall and MRR. A low score is a finding for the dashboard, not a failed
-    run; only an error fails it."""
+    run; only an error fails it. With ``only_if_changed``, skip when the cases, search code, and
+    passages are the ones last measured, since the score would be the same."""
     import anyio
 
-    from . import search_eval
+    from . import digest, search_eval
 
     log = logging.getLogger("czn_data")
+    with _connect() as conn:
+        fingerprint = search_eval.fingerprint(conn)
+        last = digest.recorded(conn, search_eval.STEP).get("", (None,))[0]
+    if only_if_changed and fingerprint == last:
+        log.info("search unchanged since its last evaluation, skipping")
+        return True
     result = anyio.run(search_eval.evaluate, os.environ["DATABASE_URL"])
     for case in result.cases:
         if case.rank is None or case.rank > search_eval.TOP:
@@ -205,7 +214,11 @@ def _eval_search() -> bool:
                 extra={"tool": case.tool, "query": case.query, "rank": case.rank, "top": case.top},
             )
     log.info("search evaluated", extra={"recall": result.recall, "mrr": result.mrr})
-    return _export(lambda: search_eval.export_metrics(result))
+    if not _export(lambda: search_eval.export_metrics(result)):
+        return False  # measured again next run, so the dashboard gets this score
+    with _connect() as conn:
+        digest.record(conn, search_eval.STEP, "", fingerprint)
+    return True
 
 
 def _scrape_e7bot(allow_shrink: bool) -> bool:

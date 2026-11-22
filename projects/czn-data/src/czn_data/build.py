@@ -12,16 +12,21 @@ apart from case, quote characters, and the odd typo, so an exact normalized matc
 first and a close spelling second. A Prydwen card rating that finds no card on a character e7bot
 knows is counted in ``unmatched``, because that means an opinion attached to nothing.
 
-The whole build replaces every merged table in one transaction, so readers see either the old
+The whole build updates every merged table in one transaction, so readers see either the old
 or the new data, and it is deterministic: running it again on the same sources gives the same
-rows.
+rows. It writes only the rows that differ from the stored ones, and splits again only the posts
+and pages whose content or splitting code changed (``_Memo``); the rest of the merge reads every
+source each time, because matching records across sources needs them all and takes about a
+second.
 """
 
 import difflib
 import logging
+import pickle
 import re
 import time
 from collections import Counter, defaultdict
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
@@ -31,7 +36,7 @@ from opentelemetry.metrics import Meter
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
-from . import embed, metrics
+from . import digest, embed, metrics
 from .e7bot import SITE
 from .game8 import split_page
 from .gamefiles import game_texts, help_topics
@@ -175,6 +180,8 @@ class BuildError(Exception):
 @dataclass
 class BuildResult:
     rows: dict[str, int] = field(default_factory=dict)
+    changed: dict[str, int] = field(default_factory=dict)  # table -> rows inserted or deleted
+    split: Counter = field(default_factory=Counter)  # source -> posts or pages split again
     unmatched: Counter = field(default_factory=Counter)  # entity -> Prydwen rows matched to nothing
 
 
@@ -208,18 +215,64 @@ def build(conn: psycopg.Connection) -> BuildResult:
         sources = _Sources(conn)
         tables = _merge(sources, result)
         for table, rows in tables.items():
-            _replace(conn, table, rows)
+            result.changed[table] = _write(conn, table, rows)
             result.rows[table] = len(rows)
+        for memo in (sources.posts, sources.game8):
+            result.split[memo.step] = memo.save(conn)
     if result.unmatched:
         log.warning("Prydwen rows matched no e7bot record", extra=dict(result.unmatched))
-    log.info("build finished", extra={"rows": result.rows})
+    log.info(
+        "build finished",
+        extra={
+            "rows": result.rows,
+            "changed": {table: n for table, n in result.changed.items() if n},
+            "split": dict(result.split),
+        },
+    )
     return result
+
+
+class _Memo:
+    """The output of one per-item step of the build (splitting a post or page into sections),
+    reused while the item's input and the step's code are unchanged (``czn_data.digest``).
+    Outputs are pickled in ``processed``; ``save`` stores the new ones and forgets items the
+    build no longer saw."""
+
+    def __init__(self, conn: psycopg.Connection, step: str, module: str):
+        self.step = step
+        self.code = digest.code(module)
+        self.stored = digest.recorded(conn, step)
+        self.fresh: dict[str, tuple[str, bytes]] = {}
+        self.seen: list[str] = []
+
+    def get(
+        self, key: str, inputs: tuple[str | bytes | None, ...], step: Callable, *args: Any
+    ) -> Any:
+        """``step(*args)`` for item ``key``, reused while ``inputs`` (which determine ``args``)
+        and the step's code are unchanged."""
+        fingerprint = digest.item(self.code, *inputs)
+        self.seen.append(key)
+        stored_fingerprint, value = self.stored.get(key, (None, None))
+        if stored_fingerprint == fingerprint:
+            return pickle.loads(value)
+        output = step(*args)
+        self.fresh[key] = (fingerprint, pickle.dumps(output))
+        return output
+
+    def save(self, conn: psycopg.Connection) -> int:
+        """Store the outputs computed this build; the number of them."""
+        for key, (fingerprint, value) in self.fresh.items():
+            digest.record(conn, self.step, key, fingerprint, value)
+        digest.forget_others(conn, self.step, self.seen)
+        return len(self.fresh)
 
 
 class _Sources:
     """Everything the build reads: e7bot documents and Prydwen rows."""
 
     def __init__(self, conn: psycopg.Connection):
+        self.posts = _Memo(conn, "build.post_sections", "czn_data.posts")
+        self.game8 = _Memo(conn, "build.game8_sections", "czn_data.game8")
         self.documents: dict[str, tuple[Any, datetime]] = {
             path: (body, fetched_at)
             for path, body, fetched_at in conn.execute(
@@ -229,6 +282,8 @@ class _Sources:
         self.saves = [row[0] for row in conn.execute("SELECT body FROM e7bot.save")]
         cursor = conn.cursor(row_factory=dict_row)
         self.prydwen: dict[str, list[dict]] = {}
+        # Ordered by content, not storage position: a reparse moves rows, and where one page
+        # repeats a name (two arts for one card), the order picks the row the merge keeps.
         for table in (
             "character",
             "card",
@@ -241,7 +296,7 @@ class _Sources:
             self.prydwen[table] = cursor.execute(
                 f"""
                 SELECT t.*, p.data_fetched_at FROM prydwen.{table} t
-                JOIN prydwen.page p USING (url) ORDER BY t.url, t.ctid
+                JOIN prydwen.page p USING (url) ORDER BY t.url, t::text
                 """
             ).fetchall()
         self.genders = dict(
@@ -348,10 +403,15 @@ def _post_sections(sources: _Sources) -> list[dict]:
             "url": POST_URL.format(article["article_id"]),
             "data_fetched_at": article["fetched_at"],
         }
-        rows.extend(
-            post | vars(section)
-            for section in split_post(article["content"], article["created_at"])
+        content, created_at = article["content"], article["created_at"]
+        sections = sources.posts.get(
+            str(article["article_id"]),
+            (content, created_at.isoformat()),
+            split_post,
+            content,
+            created_at,
         )
+        rows.extend(post | vars(section) for section in sections)
     return rows
 
 
@@ -359,7 +419,7 @@ def _game8(sources: _Sources) -> dict[str, list[dict]]:
     """Game8 pages and their sections (see ``czn_data.game8.split_page``)."""
     pages, sections = [], []
     for url, html, lastmod, fetched_at in sources.game8_pages:
-        page = split_page(html)
+        page = sources.game8.get(url, (html,), split_page, html)
         pages.append(
             {
                 "url": url,
@@ -489,7 +549,9 @@ def _passages(
         ]
     texts = [embed.passage_text(r["title"], r.get("heading"), r["text"]) for r in rows]
     missing = [text for text in dict.fromkeys(texts) if text not in sources.embeddings]
-    vectors = sources.embeddings | dict(zip(missing, embed.passages(missing), strict=True))
+    vectors = dict(sources.embeddings)
+    if missing:  # loading the model alone takes about 300 MB
+        vectors |= dict(zip(missing, embed.passages(missing), strict=True))
     for row, text in zip(rows, texts, strict=True):
         row["embedding"] = vectors[text]
     return rows
@@ -1407,18 +1469,49 @@ def export_metrics(result: BuildResult | None, started: float) -> bool:
     return metrics.export("czn_data.build", record)
 
 
-def _replace(conn: psycopg.Connection, table: str, rows: list[dict]) -> None:
+def _write(conn: psycopg.Connection, table: str, rows: list[dict]) -> int:
+    """Make ``table`` hold exactly ``rows``, deleting and inserting only the rows that differ;
+    the number of rows deleted or inserted."""
     columns = COLUMNS[table].split()
-    conn.execute(f"DELETE FROM {table}")
-    if not rows:
-        return
     names = ", ".join(f'"{c}"' for c in columns)
-    placeholders = ", ".join(["%s"] * len(columns))
-    with conn.cursor() as cursor:
-        cursor.executemany(
-            f"INSERT INTO {table} ({names}) VALUES ({placeholders})",
-            [
-                [Jsonb(row.get(c)) if c in JSON_COLUMNS else row.get(c) for c in columns]
-                for row in rows
-            ],
+    json = [c in JSON_COLUMNS for c in columns]
+
+    def frozen(values: list) -> tuple:
+        """The row as a hashable that equals another exactly when the stored rows are equal,
+        so a row read back from the table matches the row the build computed. Non-JSON lists
+        are Postgres arrays of plain values (such as an embedding), so a tuple suffices."""
+        return tuple(
+            _frozen(v) if is_json else tuple(v) if isinstance(v, list) else v
+            for v, is_json in zip(values, json, strict=True)
         )
+
+    stored: dict[tuple, list[str]] = defaultdict(list)
+    for ctid, *values in conn.execute(f"SELECT ctid::text, {names} FROM {table}"):
+        stored[frozen(values)].append(ctid)
+    added = []
+    for row in rows:
+        values = [row.get(c) for c in columns]
+        key = frozen(values)
+        if stored[key]:
+            stored[key].pop()
+        else:
+            added.append(
+                [Jsonb(v) if is_json else v for v, is_json in zip(values, json, strict=True)]
+            )
+    removed = [ctid for ctids in stored.values() for ctid in ctids]
+    if removed:
+        conn.execute(f"DELETE FROM {table} WHERE ctid = ANY (%s::tid[])", (removed,))
+    if added:
+        placeholders = ", ".join(["%s"] * len(columns))
+        with conn.cursor() as cursor:
+            cursor.executemany(f"INSERT INTO {table} ({names}) VALUES ({placeholders})", added)
+    return len(added) + len(removed)
+
+
+def _frozen(value: Any) -> Any:
+    """A JSON value as a hashable; a tuple stored as JSON reads back as a list."""
+    if isinstance(value, dict):
+        return ("dict", tuple(sorted((k, _frozen(v)) for k, v in value.items())))
+    if isinstance(value, list | tuple):
+        return tuple(_frozen(v) for v in value)
+    return value

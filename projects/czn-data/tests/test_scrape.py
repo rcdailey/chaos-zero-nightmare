@@ -8,6 +8,7 @@ from pathlib import Path
 
 from test_parse import banner_html
 
+from czn_data import digest
 from czn_data.fetch import Blocked, FetchFailed
 from czn_data.scrape import MAX_AGE, RunResult, fetch_portraits, reparse, scrape
 
@@ -160,6 +161,49 @@ def test_new_portraits_are_stored_once(conn):
     assert stored == [(PORTRAIT, b"art")]
 
 
+def tag_portrait(conn) -> None:
+    conn.execute(
+        "INSERT INTO prydwen.portrait_gender (image_url, gender, tagged_at)"
+        " VALUES (%s, 'female', now())",
+        (PORTRAIT,),
+    )
+
+
+def portrait_tags(conn) -> list:
+    return conn.execute("SELECT gender FROM prydwen.portrait_gender").fetchall()
+
+
+def test_new_art_at_the_same_url_replaces_the_portrait_and_its_tags(conn):
+    scrape(conn, site({CHARACTER_URL: CHARACTER_HTML}), allow_shrink=False)
+    fetch_portraits(conn, {PORTRAIT: b"old art"}.__getitem__, RunResult())
+    tag_portrait(conn)
+    scrape(conn, site({CHARACTER_URL: CHARACTER_HTML}), allow_shrink=False)  # page downloaded
+
+    fetch_portraits(conn, {PORTRAIT: b"new art"}.__getitem__, RunResult())
+
+    stored = conn.execute("SELECT image FROM prydwen.portrait").fetchall()
+    assert stored == [(b"new art",)]
+    assert portrait_tags(conn) == []  # the next enrich tags the new art
+
+
+def test_same_art_after_a_page_download_keeps_its_tags_and_is_not_fetched_again(conn):
+    scrape(conn, site({CHARACTER_URL: CHARACTER_HTML}), allow_shrink=False)
+    fetch_portraits(conn, {PORTRAIT: b"art"}.__getitem__, RunResult())
+    tag_portrait(conn)
+    scrape(conn, site({CHARACTER_URL: CHARACTER_HTML}), allow_shrink=False)
+    fetched = []
+
+    def get_bytes(url: str) -> bytes:
+        fetched.append(url)
+        return b"art"
+
+    fetch_portraits(conn, get_bytes, RunResult())
+    fetch_portraits(conn, get_bytes, RunResult())
+
+    assert fetched == [PORTRAIT]
+    assert portrait_tags(conn) == [("female",)]
+
+
 def test_portrait_that_fails_is_reported_and_retried_next_run(conn):
     scrape(conn, site({CHARACTER_URL: CHARACTER_HTML}), allow_shrink=False)
 
@@ -250,9 +294,10 @@ def test_failed_download_is_retried_next_run(conn):
     assert CHARACTER_URL in get.requested
 
 
-def test_stored_pages_are_parsed_again_without_downloading(conn):
+def test_after_a_parser_change_stored_pages_are_parsed_again_without_downloading(conn, monkeypatch):
     scrape(conn, site(BOTH_PAGES, DATED), allow_shrink=False)
-    conn.execute("DELETE FROM prydwen.card")  # as if the parser now yields different rows
+    conn.execute("DELETE FROM prydwen.card")  # as if the new parser yields different rows
+    monkeypatch.setattr(digest, "code", lambda *modules: "edited parser")
     get = site(BOTH_PAGES, DATED)
 
     result = scrape(conn, get, allow_shrink=False)
@@ -260,6 +305,32 @@ def test_stored_pages_are_parsed_again_without_downloading(conn):
     assert result.ok
     assert CHARACTER_URL not in get.requested
     assert card_names(conn) == {"Strike", "Rising Dragon Spire", "Rising Dragon Spire V"}
+
+
+def test_only_pages_whose_html_changed_are_parsed_again(conn):
+    scrape(conn, site(BOTH_PAGES, DATED), allow_shrink=False)
+    edited = GUIDE_HTML.replace("Pull Mei Lin.", "Pull Mei Lin first.")
+    newer = DATED | {GUIDE_URL: "2026-11-21T12:30:02.426Z"}
+
+    result = scrape(conn, site({CHARACTER_URL: CHARACTER_HTML, GUIDE_URL: edited}, newer), False)
+
+    # The banners page downloads every run, but its HTML is the same.
+    assert result.pages == {"ok": 1, "unchanged": 2}
+    (body,) = conn.execute(
+        "SELECT body FROM prydwen.document WHERE url = %s", (GUIDE_URL,)
+    ).fetchone()
+    assert "Pull Mei Lin first." in body
+
+
+def test_a_page_that_fails_to_parse_fails_every_run_until_fixed(conn):
+    broken = {CHARACTER_URL: CHARACTER_HTML.replace("czn-hero-name", "hero-v2")}
+    scrape(conn, site(broken, DATED), allow_shrink=False)
+    get = site(broken, DATED)
+
+    result = scrape(conn, get, allow_shrink=False)
+
+    assert CHARACTER_URL not in get.requested
+    assert result.validation_failures == {("character", "character.name"): 1}
 
 
 def sitemaps_read(get) -> set[str]:

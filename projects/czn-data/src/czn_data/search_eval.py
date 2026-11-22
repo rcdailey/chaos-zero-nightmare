@@ -15,7 +15,7 @@ from importlib.resources import files
 import psycopg
 from opentelemetry.metrics import Meter
 
-from . import metrics
+from . import digest, metrics
 from .search import TOOL_SOURCES, search
 
 TOP = 5
@@ -43,8 +43,30 @@ class EvalResult:
         return sum(1 / c.rank for c in self.cases if c.rank is not None) / len(self.cases)
 
 
+STEP = "search_eval"
+
+
+def _cases_text() -> str:
+    return files(__package__).joinpath("search_eval.toml").read_text()
+
+
 def cases() -> list[dict]:
-    return tomllib.loads(files(__package__).joinpath("search_eval.toml").read_text())["case"]
+    return tomllib.loads(_cases_text())["case"]
+
+
+def fingerprint(conn: psycopg.Connection) -> str:
+    """Fingerprint of what the evaluation measures: the cases, the search code, and every
+    passage's searchable text. A passage's embedding is left out: it follows from its text and
+    the embedding code, which the fingerprint holds."""
+    (passages,) = conn.execute(
+        """
+        SELECT md5(string_agg(
+            concat_ws(chr(31), source, key, position, title, heading, text, published_at),
+            chr(30) ORDER BY source, key, position))
+        FROM passage
+        """
+    ).fetchone()
+    return digest.item(digest.code(__name__), _cases_text(), passages)
 
 
 def _matches(passage: dict, expected: dict) -> bool:

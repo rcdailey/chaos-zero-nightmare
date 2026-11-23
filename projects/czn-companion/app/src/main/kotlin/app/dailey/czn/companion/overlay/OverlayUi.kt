@@ -416,7 +416,6 @@ private fun Conversation(
                     state.streaming,
                     state.pendingTools,
                     state.pendingAsks,
-                    complete = false,
                     // The spinner would claim Claude is working while it waits for the player.
                     working = ask == null,
                 )
@@ -433,7 +432,6 @@ private fun Conversation(
                     entry.text,
                     entry.tools,
                     entry.asks,
-                    complete = true,
                     working = false,
                     screen = entries.getOrNull(index - 1)?.screen.orEmpty(),
                 )
@@ -444,24 +442,21 @@ private fun Conversation(
 
 /**
  * A reply: the CZN data lookups behind it, its collapsed details (what the app found on the
- * screenshot, [screen], and Claude's seen block), then the advice with each set of questions
- * Claude asked where it asked them; a spinner while Claude is [working] and no advice follows
- * the last question yet.
+ * screenshot, [screen]), then the advice with each set of questions Claude asked where it asked
+ * them; a spinner while Claude is [working] and no advice follows the last question yet.
  */
 @Composable
 private fun Reply(
     text: String,
     tools: List<String>,
     asks: List<AnsweredAsk>,
-    complete: Boolean,
     working: Boolean,
     screen: String = "",
 ) {
-    val parts = ReplyParts.parse(text, complete, asks.map { it.offset })
-    val details = listOfNotNull(screen.ifBlank { null }, parts.seen).joinToString("\n\n")
+    val parts = ReplyParts.parse(text, asks.map { it.offset })
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         if (tools.isNotEmpty()) ToolCalls(tools)
-        if (details.isNotEmpty()) DetailsBlock(details)
+        if (screen.isNotBlank()) DetailsBlock(screen)
         parts.advice.forEachIndexed { index, advice ->
             if (advice.isNotEmpty()) SteadyMarkdown(advice)
             asks.getOrNull(index)?.let { AnsweredAskCard(it) }
@@ -485,7 +480,7 @@ private fun ToolCalls(tools: List<String>) =
     Column {
         tools.forEach { label ->
             Text(
-                "Looked up $label",
+                "Used $label",
                 style = MaterialTheme.typography.labelSmall,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
@@ -612,12 +607,12 @@ private fun PanelPreviewContent() =
                     RunEntry(EntryKind.User, ""),
                     RunEntry(
                         EntryKind.Assistant,
-                        "<seen>Epiphany offer, 3 cards.</seen>\n\nPick **Blade of the Cycle**.",
+                        "Pick **Blade of the Cycle**.",
                     ),
                 ),
             pendingQuestion = "Why not Radiant Sword Flow?",
-            pendingTools = listOf("get_card: Radiant Sword Flow", "find_teams: Rossweisse"),
-            streaming = "<seen>Same offer.</seen>\n\nRadiant Sword Flow needs more Justice",
+            pendingTools = listOf("lookup: Radiant Sword Flow", "character_guide: Rossweisse"),
+            streaming = "Radiant Sword Flow needs more Justice",
             busy = true,
             character = "Rossweisse",
             pendingAsks =

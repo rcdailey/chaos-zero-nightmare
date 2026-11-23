@@ -14,6 +14,7 @@ import app.dailey.czn.companion.overlay.OverlaySettings
 import app.dailey.czn.companion.overlay.OverlayStatus
 import app.dailey.czn.companion.run.RunDatabase
 import app.dailey.czn.companion.run.RunRepository
+import app.dailey.czn.companion.run.SaveDataCost
 import app.dailey.czn.companion.run.ScreenshotArchive
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.okhttp.OkHttp
@@ -59,6 +60,7 @@ class CompanionApp : Application() {
             RunRepository(runDatabase),
             ScreenCharacters(http, cznDataAuth),
             ScreenGear(http, cznDataAuth),
+            SaveDataCost(http, cznDataAuth),
             ScreenshotArchive(File(filesDir, "screenshots")),
         )
     }

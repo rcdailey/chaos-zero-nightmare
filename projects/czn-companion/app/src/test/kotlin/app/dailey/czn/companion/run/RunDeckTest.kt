@@ -65,5 +65,27 @@ class RunDeckTest {
             )
         assertTrue(refused.isFailure)
         assertTrue(RunDecks.parse("""{"limit": 0}""").isFailure)
+        assertTrue(RunDecks.parse("""{"character": " "}""").isFailure)
+    }
+
+    @Test
+    fun `an update can name the run's character`() {
+        assertEquals(
+            "Rossweisse",
+            RunDecks.parse("""{"character": "Rossweisse"}""").getOrThrow().character,
+        )
+    }
+
+    @Test
+    fun `Claude reads each costed character's points, or that the cost is unknown`() {
+        val cost = DeckCost("Mika", 60, unknown = listOf("Zap"), warnings = listOf("4 Duplicates"))
+        assertEquals(
+            "Mika: 60 Faint Memory points; no card matches Zap, not counted; 4 Duplicates",
+            SaveDataCost.describe("Mika", cost),
+        )
+        assertEquals(
+            "Mika: Faint Memory cost unknown; the data server did not answer.",
+            SaveDataCost.describe("Mika", null),
+        )
     }
 }

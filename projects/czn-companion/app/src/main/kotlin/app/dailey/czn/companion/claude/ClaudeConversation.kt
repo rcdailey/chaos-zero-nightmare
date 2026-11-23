@@ -4,7 +4,6 @@ import android.database.sqlite.SQLiteException
 import android.util.Log
 import app.dailey.czn.companion.ask.Answer
 import app.dailey.czn.companion.ask.AnsweredAsk
-import app.dailey.czn.companion.ask.Option
 import app.dailey.czn.companion.ask.PlayerAsks
 import app.dailey.czn.companion.ask.Question
 import app.dailey.czn.companion.auth.AnthropicAuth
@@ -12,10 +11,13 @@ import app.dailey.czn.companion.auth.CznDataAuth
 import app.dailey.czn.companion.auth.SignInRequired
 import app.dailey.czn.companion.characters.ScreenCharacters
 import app.dailey.czn.companion.characters.ScreenGear
+import app.dailey.czn.companion.run.CharacterUpdate
 import app.dailey.czn.companion.run.OpenTurn
 import app.dailey.czn.companion.run.RequestUsageRow
 import app.dailey.czn.companion.run.RunDecks
 import app.dailey.czn.companion.run.RunRepository
+import app.dailey.czn.companion.run.RunUpdate
+import app.dailey.czn.companion.run.SaveDataCost
 import app.dailey.czn.companion.run.ScreenshotArchive
 import com.anthropic.client.AnthropicClient
 import com.anthropic.client.okhttp.AnthropicOkHttpClient
@@ -33,6 +35,8 @@ import com.anthropic.models.beta.messages.BetaToolResultBlockParam
 import com.anthropic.models.beta.messages.BetaToolUseBlockParam
 import com.anthropic.models.beta.messages.MessageCreateParams
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.FlowCollector
@@ -104,6 +108,7 @@ class ClaudeConversation(
     private val run: RunRepository,
     private val screenCharacters: ScreenCharacters,
     private val screenGear: ScreenGear,
+    private val saveDataCost: SaveDataCost,
     private val archive: ScreenshotArchive,
 ) {
     val entries get() = run.entries
@@ -211,18 +216,10 @@ class ClaudeConversation(
                 if (uses.isNotEmpty()) {
                     turn +=
                         toolResults(uses) { use ->
-                            when (use.name()) {
-                                MessagesRequest.IDENTIFY_CHARACTERS -> {
-                                    identifyCharacters(open.screenshot) { screen = it }
-                                }
-
-                                MessagesRequest.IDENTIFY_GEAR -> {
-                                    identifyGear(open.screenshot)
-                                }
-
-                                else -> {
-                                    runTool(use, player, reply, asks)
-                                }
+                            if (use.name() == MessagesRequest.IDENTIFY_SCREEN) {
+                                identifyScreen(open.screenshot) { screen = it }
+                            } else {
+                                runTool(use, player, reply, asks)
                             }
                         }
                     save()
@@ -445,38 +442,39 @@ class ClaudeConversation(
     }
 
     /**
-     * Names the characters on the archived [screenshot] for Claude; [onLine] receives the names
-     * line to save with the question. The server's full answer joins the archive.
+     * Names the characters and the gear in slots on the archived [screenshot] for Claude, asking
+     * the data server for both at once; [onLine] receives the characters line to save with the
+     * question. The server's full answers join the archive.
      */
-    private suspend fun identifyCharacters(
+    private suspend fun identifyScreen(
         screenshot: String,
         onLine: (String) -> Unit,
     ): Pair<String, Boolean> {
         val jpeg =
             screenshot.ifEmpty { null }?.let(archive::read)
                 ?: return "This request's screenshot is no longer kept; call the characters " +
-                    "unidentified." to true
-        val found =
-            screenCharacters.identify(jpeg)
-                ?: return "The data server did not answer; call the characters unidentified." to
-                    true
-        archive.saveIdentify(screenshot, found.response)
-        val line = found.line ?: return "No character figures found on this screenshot." to false
-        onLine(line)
-        return line to false
-    }
-
-    /** Names the gear in slots on the archived [screenshot] for Claude. */
-    private suspend fun identifyGear(screenshot: String): Pair<String, Boolean> {
-        val jpeg =
-            screenshot.ifEmpty { null }?.let(archive::read)
-                ?: return "This request's screenshot is no longer kept; name no gear from its " +
-                    "icons." to true
-        val found =
-            screenGear.identify(jpeg)
-                ?: return "The data server did not answer; name no gear from its icons." to true
-        archive.saveIdentify(screenshot, found.response, kind = "gear")
-        return (found.line ?: "No gear slot on this screenshot shows a known icon.") to false
+                    "unidentified and name no gear from its icons." to true
+        val (characters, gear) =
+            coroutineScope {
+                val characters = async { screenCharacters.identify(jpeg) }
+                val gear = async { screenGear.identify(jpeg) }
+                characters.await() to gear.await()
+            }
+        val charactersLine =
+            if (characters == null) {
+                "Characters: the data server did not answer; call them unidentified."
+            } else {
+                archive.saveIdentify(screenshot, characters.response)
+                characters.line?.also(onLine) ?: "No character figures found on this screenshot."
+            }
+        val gearLines =
+            if (gear == null) {
+                "Gear: the data server did not answer; name no gear from its icons."
+            } else {
+                archive.saveIdentify(screenshot, gear.response, kind = "gear")
+                gear.line ?: "No gear slot on this screenshot shows a known icon."
+            }
+        return "$charactersLine\n$gearLines" to false
     }
 
     /**
@@ -490,83 +488,89 @@ class ClaudeConversation(
         asks: MutableList<AnsweredAsk>,
     ): Pair<String, Boolean> {
         val inputJson = JSON.writeValueAsString(use._input())
-        val input = JsonValue.from(JSON.readTree(inputJson)).asObject().orElse(emptyMap())
-
-        suspend fun ask(questions: List<Question>): List<Answer>? {
-            val answers = player.ask(questions)
-            val ask = AnsweredAsk(reply.length, questions, answers)
-            asks += ask
-            emit(ReplyEvent.Asked(ask))
-            return answers
-        }
         return when (use.name()) {
             MessagesRequest.ASK_PLAYER -> {
                 PlayerAsks.parse(inputJson).fold(
-                    onSuccess = { questions ->
-                        PlayerAsks.describe(questions, ask(questions)) to
-                            false
-                    },
+                    onSuccess = { questions -> askPlayer(questions, player, reply, asks) to false },
                     onFailure = { it.message.orEmpty() to true },
                 )
             }
 
             MessagesRequest.UPDATE_RUN_STATE -> {
                 RunDecks.parse(inputJson).fold(
-                    onSuccess = { update ->
-                        val deck = run.updateDeck(update)
-                        "Saved. The run state now:\n${RunDecks.describe(deck)}" to false
-                    },
+                    onSuccess = { update -> updateRunState(update) to false },
                     onFailure = { it.message.orEmpty() to true },
                 )
-            }
-
-            MessagesRequest.SET_RUN_CHARACTER -> {
-                val character = input["name"]?.asString()?.orElse(null)?.trim()
-                if (character.isNullOrEmpty()) {
-                    "name is required." to true
-                } else {
-                    run.setCharacter(character)
-                    "Saved. The run's character is $character." to false
-                }
-            }
-
-            MessagesRequest.ASK_RUN_CHARACTER -> {
-                val candidates =
-                    input["candidates"]
-                        ?.asArray()
-                        ?.orElse(null)
-                        ?.mapNotNull { it.asString().orElse(null)?.trim() }
-                        ?.filter(String::isNotEmpty)
-                        .orEmpty()
-                val answer =
-                    if (candidates.isEmpty()) {
-                        player.pickCharacter()?.let { Answer(picked = listOf(it)) }
-                    } else {
-                        ask(listOf(characterQuestion(candidates)))?.single()
-                    }
-                val picked = answer?.picked?.singleOrNull()
-                val typed = answer?.typed
-                when {
-                    picked != null -> {
-                        run.setCharacter(picked)
-                        "The player picked $picked; it is saved as the run's character." to false
-                    }
-
-                    typed != null -> {
-                        "The player typed \"$typed\", which is not saved. Find the name as the " +
-                            "czn tools spell it and call set_run_character." to false
-                    }
-
-                    else -> {
-                        "The player skipped the choice." to false
-                    }
-                }
             }
 
             else -> {
                 "Unknown tool: ${use.name()}" to true
             }
         }
+    }
+
+    /**
+     * Asks the player [questions] and returns the answers for Claude. A run-character question
+     * without options shows the whole roster instead and must be asked alone ([PlayerAsks]); a
+     * character picked in a run-character question is saved as the run's character.
+     */
+    private suspend fun FlowCollector<ReplyEvent>.askPlayer(
+        questions: List<Question>,
+        player: PlayerInput,
+        reply: StringBuilder,
+        asks: MutableList<AnsweredAsk>,
+    ): String {
+        val roster = questions.singleOrNull()?.takeIf { it.characters && it.options.isEmpty() }
+        val answers =
+            if (roster != null) {
+                player.pickCharacter()?.let { listOf(Answer(picked = listOf(it))) }
+            } else {
+                player.ask(questions).also {
+                    val ask = AnsweredAsk(reply.length, questions, it)
+                    asks += ask
+                    emit(ReplyEvent.Asked(ask))
+                }
+            }
+        val saved =
+            questions.zip(answers.orEmpty()).firstNotNullOfOrNull { (question, answer) ->
+                answer.picked.singleOrNull()?.takeIf { question.characters }
+            }
+        saved?.let { run.setCharacter(it) }
+        return listOfNotNull(
+            PlayerAsks.describe(questions, answers),
+            saved?.let { "$it is saved as the run's character." },
+        ).joinToString("\n")
+    }
+
+    /**
+     * Applies Claude's run state [update], then costs each character whose cards or removals it
+     * changed with the data server's Faint Memory rules. A character the update gives no points
+     * for takes that cost as its points.
+     */
+    private suspend fun updateRunState(update: RunUpdate): String {
+        update.character?.trim()?.let { run.setCharacter(it) }
+        var deck = run.updateDeck(update)
+        val costed =
+            update.characters
+                .filter { it.cards.isNotEmpty() || it.removed != null }
+                .mapNotNull { change ->
+                    deck.characters.firstOrNull { it.name.equals(change.name.trim(), true) }?.let {
+                        Triple(it, change.points, saveDataCost.cost(it))
+                    }
+                }
+        val points =
+            costed.mapNotNull { (character, given, cost) ->
+                cost?.takeIf { given == null }?.let { CharacterUpdate(character.name, it.total) }
+            }
+        if (points.isNotEmpty()) deck = run.updateDeck(RunUpdate(characters = points))
+        return buildList {
+            add("Saved. The run state now:")
+            update.character?.let { add("Character: ${it.trim()}") }
+            add(RunDecks.describe(deck))
+            costed.forEach { (character, _, cost) ->
+                add(SaveDataCost.describe(character.name, cost))
+            }
+        }.joinToString("\n")
     }
 
     private suspend fun FlowCollector<ReplyEvent>.tokenOrNull(
@@ -596,7 +600,7 @@ class ClaudeConversation(
         return ReplyEvent.Failed(kind, "${e.statusCode()}: $message")
     }
 
-    /** "get_card: Blade of the Cycle": the tool name and its first text argument, if any. */
+    /** "character_guide: Rossweisse": the tool name and its first text argument, if any. */
     private fun toolLabel(
         name: String,
         input: String,
@@ -607,14 +611,6 @@ class ClaudeConversation(
         val first = arguments?.values?.firstNotNullOfOrNull { it.asString().orElse(null) }
         return if (first == null) name else "$name: $first"
     }
-
-    private fun characterQuestion(candidates: List<String>) =
-        Question(
-            question = "Which character's deck does this run build?",
-            header = "Run character",
-            options = candidates.map { Option(it) },
-            characters = true,
-        )
 
     private companion object {
         val JSON = com.anthropic.core.jsonMapper()

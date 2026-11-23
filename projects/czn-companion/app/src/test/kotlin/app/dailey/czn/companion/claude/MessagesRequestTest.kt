@@ -211,7 +211,7 @@ class MessagesRequestTest {
                         BetaToolUseBlockParam
                             .builder()
                             .id("t1")
-                            .name(MessagesRequest.ASK_RUN_CHARACTER)
+                            .name(MessagesRequest.ASK_PLAYER)
                             .input(JsonValue.from(emptyMap<String, Any>()))
                             .build(),
                     ),
@@ -338,7 +338,7 @@ class MessagesRequestTest {
                 .single()
                 .jsonObject
         val kept = edit["exclude_tools"]!!.jsonArray.map { it.jsonPrimitive.content }
-        assertTrue("plan_deck" in kept)
+        assertTrue("character_guide" in kept)
     }
 
     @Test
@@ -372,10 +372,17 @@ class MessagesRequestTest {
     }
 
     @Test
-    fun `Claude can ask the player questions and the app to name the characters on screen`() {
+    fun `Claude has the three app tools`() {
         val names = build()["tools"]!!.jsonArray.mapNotNull { it.jsonObject.string("name") }
-        assertTrue(MessagesRequest.ASK_PLAYER in names)
-        assertTrue(MessagesRequest.IDENTIFY_CHARACTERS in names)
+        assertEquals(
+            setOf(
+                MessagesRequest.UPDATE_RUN_STATE,
+                MessagesRequest.ASK_PLAYER,
+                MessagesRequest.IDENTIFY_SCREEN,
+            ),
+            names.toSet(),
+        )
+        assertEquals(3, names.size)
     }
 
     @Test

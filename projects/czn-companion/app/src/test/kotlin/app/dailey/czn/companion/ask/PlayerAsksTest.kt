@@ -15,11 +15,11 @@ class PlayerAsksTest {
         }
 
     @Test
-    fun `Claude's input becomes questions, without the app's character flag`() {
+    fun `Claude's input becomes questions`() {
         val json =
             """
             {"questions":[{"question":"Which path?","header":"Path","multi_select":true,
-            "characters":true,"options":[{"label":"Elite","description":"Hard",
+            "options":[{"label":"Elite","description":"Hard",
             "recommended":true},{"label":"Shop"}]}]}
             """.trimIndent()
         assertEquals(
@@ -33,6 +33,20 @@ class PlayerAsksTest {
             ),
             PlayerAsks.parse(json).getOrThrow(),
         )
+    }
+
+    @Test
+    fun `a run character question offers candidates, or the whole roster when asked alone`() {
+        val run = """{"question":"Whose deck?","header":"Run","characters":true"""
+        val candidates = """$run,"options":${options(3)}}"""
+        val roster = "$run}"
+        val other = """{"question":"Q?","header":"H","options":${options(2)}}"""
+
+        assertTrue(PlayerAsks.parse("""{"questions":[$candidates,$other]}""").isSuccess)
+        val alone = PlayerAsks.parse("""{"questions":[$roster]}""").getOrThrow().single()
+        assertTrue(alone.characters && alone.options.isEmpty())
+        assertTrue(PlayerAsks.parse("""{"questions":[$roster,$other]}""").isFailure)
+        assertTrue(PlayerAsks.parse("""{"questions":[$candidates,$candidates]}""").isFailure)
     }
 
     @Test

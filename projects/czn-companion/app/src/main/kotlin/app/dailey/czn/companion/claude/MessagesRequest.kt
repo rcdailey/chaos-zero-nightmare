@@ -70,12 +70,9 @@ object MessagesRequest {
         )
 
     /** Tools the app runs itself, in [ClaudeConversation]. */
-    const val SET_RUN_CHARACTER = "set_run_character"
     const val UPDATE_RUN_STATE = "update_run_state"
-    const val ASK_RUN_CHARACTER = "ask_run_character"
     const val ASK_PLAYER = "ask_player"
-    const val IDENTIFY_CHARACTERS = "identify_characters"
-    const val IDENTIFY_GEAR = "identify_gear"
+    const val IDENTIFY_SCREEN = "identify_screen"
 
     /**
      * Old tool results the API clears from the prompt it reads, while the app keeps sending
@@ -88,11 +85,12 @@ object MessagesRequest {
      * The trigger compares one sampling pass's prompt, not a response's summed usage: run 30
      * (2026-11-22) logged up to 304,076 prompt tokens, but those were 3 passes of about 100,000
      * (the API samples again after each round of CZN data calls), so nothing was cleared.
-     * Compare against `request_usage.largestPromptTokens`.
-     * plan_deck results are never cleared; run state updates may be, since the current state
-     * ends every request. `request_usage` records each clearing.
+     * Compare against `request_usage.largestPromptTokens`. The trigger sits at 70,000 so a long
+     * run stops growing near that size: run 30's last decision point replayed at about 105,000.
+     * character_guide results (the run's deck plan) are never cleared; run state updates may
+     * be, since the current state ends every request. `request_usage` records each clearing.
      */
-    private const val CLEAR_TRIGGER_TOKENS = 120_000L
+    private const val CLEAR_TRIGGER_TOKENS = 70_000L
     private const val KEEP_TOOL_USES = 30L
     private const val CLEAR_AT_LEAST_TOKENS = 50_000L
 
@@ -154,12 +152,9 @@ object MessagesRequest {
                     .authorizationToken(cznToken)
                     .build(),
             ).addTool(BetaMcpToolset.builder().mcpServerName(CZN_SERVER).build())
-            .addTool(SET_RUN_CHARACTER_TOOL)
             .addTool(UPDATE_RUN_STATE_TOOL)
-            .addTool(ASK_RUN_CHARACTER_TOOL)
             .addTool(ASK_PLAYER_TOOL)
-            .addTool(IDENTIFY_CHARACTERS_TOOL)
-            .addTool(IDENTIFY_GEAR_TOOL)
+            .addTool(IDENTIFY_SCREEN_TOOL)
             .contextManagement(CLEAR_OLD_TOOL_RESULTS)
             .diagnostics(
                 BetaDiagnosticsParam.builder().previousMessageId(previousMessageId).build(),
@@ -177,7 +172,7 @@ object MessagesRequest {
                     .keep(BetaToolUsesKeep.builder().value(KEEP_TOOL_USES).build())
                     .clearAtLeast(
                         BetaInputTokensClearAtLeast.builder().value(CLEAR_AT_LEAST_TOKENS).build(),
-                    ).excludeTools(listOf("plan_deck"))
+                    ).excludeTools(listOf("character_guide"))
                     .build(),
             ).build()
 
@@ -368,23 +363,6 @@ object MessagesRequest {
                 .build(),
         ).build()
 
-    private val SET_RUN_CHARACTER_TOOL =
-        tool(
-            SET_RUN_CHARACTER,
-            """
-            Saves the character whose deck this run builds, when the screen shows it beyond doubt;
-            otherwise use ask_run_character. The player sees it and can change it.
-            """,
-            mapOf(
-                "name" to
-                    mapOf(
-                        "type" to "string",
-                        "description" to "Character name as the czn tools spell it",
-                    ),
-            ),
-            listOf("name"),
-        )
-
     private val DECK_CARD_SCHEMA =
         mapOf(
             "type" to "object",
@@ -428,8 +406,8 @@ object MessagesRequest {
                         mapOf(
                             "type" to "integer",
                             "description" to
-                                "Faint Memory points the Save Data holds now: a counter on " +
-                                "screen, else save_data_cost's total",
+                                "Faint Memory points the Save Data holds now, when a counter on " +
+                                "screen shows them; otherwise omit it",
                         ),
                     "cards" to
                         mapOf(
@@ -466,9 +444,19 @@ object MessagesRequest {
             what changed, as many changes at once as needed; every field or entry left out stays
             as saved. Characters are matched by name, and a new name adds one. A character's
             cards are the whole deck, starting cards included, in the form save_data_cost takes.
-            Returns the whole state after the change.
+            Returns the whole state after the change, and for each character whose cards or
+            removals changed, the Faint Memory points of the whole deck under the game's rules;
+            those points are saved as the character's points unless the update gives points.
             """,
             mapOf(
+                "character" to
+                    mapOf(
+                        "type" to "string",
+                        "description" to
+                            "The character whose deck this run builds, as the czn tools spell " +
+                            "it, when the screen shows it beyond doubt; otherwise ask with " +
+                            "ask_player. The player sees it and can change it",
+                    ),
                 "plan" to
                     mapOf(
                         "type" to "string",
@@ -503,59 +491,28 @@ object MessagesRequest {
             emptyList(),
         )
 
-    private val IDENTIFY_CHARACTERS_TOOL =
+    private val IDENTIFY_SCREEN_TOOL =
         tool(
-            IDENTIFY_CHARACTERS,
+            IDENTIFY_SCREEN,
             """
-            Names the characters drawn on this request's screenshot by comparing each figure with
-            every character's card art. Returns a line "Characters on screen, top to bottom, left
-            to right: ...": "A or B" means one of the two, too close to choose; "unidentified"
-            means no character matched, such as a monster. Card art counts as a figure, so a
-            card screen returns its owner's name for each card.
+            Names the characters and the equipment drawn on this request's screenshot, by
+            comparing each figure with every character's card art and each square slot with every
+            equipment icon. Returns two parts. Characters: a line "Characters on screen, top to
+            bottom, left to right: ..."; "A or B" means one of the two, too close to choose;
+            "unidentified" means no character matched, such as a monster. Card art counts as a
+            figure, so a card screen returns its owner's name for each card. Gear: one line per
+            named slot, by row from the top and left to right ("row 1: ..."; a left-out slot
+            shifts the rest of its row left), each item as "Name (rarity slot, stat values per
+            upgrade level): effect"; stats are left out where the data has none. These details
+            suffice to compare gear; do not look the named items up again to compare them. "if a
+            Chaos event transformed it this run: ..." lists forms (Harmonization, Mutation, ...)
+            drawn with the base item's icon: assume the base item unless this run transformed it.
+            "A / B" means different items drawn with the same icon. "A or B" means one of two
+            icons, too close to choose. Slots left out showed no known icon, such as empty ones.
+            Gear outside square slots (shop items, reward cards) is not named; those screens
+            print the name.
             """,
             emptyMap(),
-            emptyList(),
-        )
-
-    private val IDENTIFY_GEAR_TOOL =
-        tool(
-            IDENTIFY_GEAR,
-            """
-            Names the equipment drawn as icons in square slots on this request's screenshot, such
-            as what each character wears on the Equipment screen, by comparing each slot with
-            every equipment icon. Returns one line per named slot, by row from the top and left
-            to right ("row 1: ..."; a left-out slot shifts the rest of its row left), each item
-            as "Name (rarity slot, stat values per upgrade level): effect"; stats are left out
-            where the data has none. These details suffice to compare gear; do not look the
-            named items up again to compare them. "if a Chaos event transformed it this run: ..."
-            lists forms (Harmonization, Mutation, ...) drawn with the base item's icon: assume the base
-            item unless this run transformed it. "A / B" means different items drawn with the
-            same icon. "A or B" means one of two icons, too close to choose. Slots left out
-            showed no known icon, such as empty ones. Gear outside square slots (shop items,
-            reward cards) is not named; those screens print the name.
-            """,
-            emptyMap(),
-            emptyList(),
-        )
-
-    private val ASK_RUN_CHARACTER_TOOL =
-        tool(
-            ASK_RUN_CHARACTER,
-            """
-            Shows the player character cards and waits until they pick the character whose deck
-            this run builds; the pick is saved. Returns the name, or that the player skipped the
-            choice.
-            """,
-            mapOf(
-                "candidates" to
-                    mapOf(
-                        "type" to "array",
-                        "items" to mapOf("type" to "string"),
-                        "description" to
-                            "Only the plausible characters, as the czn tools spell them, such as " +
-                            "the team of three on screen; omit to offer every character",
-                    ),
-            ),
             emptyList(),
         )
 
@@ -585,7 +542,11 @@ object MessagesRequest {
             Shows the player questions with options and waits for the answers. The player picks
             one option, or several when multi_select is true, and can always type their own
             answer instead. Returns each question with its answer, or that the player skipped
-            them.
+            them. A characters question asks which character's deck this run builds: its options
+            are character names as the czn tools spell them (such as the team of three on
+            screen), shown with their card art, and a pick is saved as the run's character;
+            without options it must be the only question, and the player picks from every
+            character.
             """,
             mapOf(
                 "questions" to
@@ -623,8 +584,14 @@ object MessagesRequest {
                                                 "description" to
                                                     "Allow picking several options",
                                             ),
+                                        "characters" to
+                                            mapOf(
+                                                "type" to "boolean",
+                                                "description" to
+                                                    "Makes this a characters question",
+                                            ),
                                     ),
-                                "required" to listOf("question", "header", "options"),
+                                "required" to listOf("question", "header"),
                             ),
                     ),
             ),
@@ -642,16 +609,16 @@ object MessagesRequest {
         The key words MUST, MUST NOT, SHOULD, and MAY are to be read as in RFC 2119.
 
         - You MUST confirm every card, character, equipment, and partner name or text read
-          from the screen with the czn tools before relying on it. Make independent lookups in
-          parallel. Where the screen's values differ from the tools' base values, the screen
+          from the screen with the czn tools before relying on it. Make all of a screen's
+          lookups in one round of parallel calls: every name it shows in one lookup call, every
+          card text in one match_card_text call. Where the screen's values differ from the tools' base values, the screen
           shows the player's actual values; prefer it. czn tool results leave out empty
           fields, so a missing field means the data has no value for it.
-        - Before you name a character the screen shows only as a picture, you MUST call
-          identify_characters; its answer is authoritative, and earlier player messages carry
-          the answer for their screenshot. Narrow "A or B" to one only when the screen shows a
-          name. You MUST NOT name a character from looks, element icons, or class icons.
-        - Before you name equipment the screen shows only as an icon, such as what a character
-          wears, you MUST call identify_gear; its answer is authoritative. You MUST NOT name
+        - Before you name a character the screen shows only as a picture, or equipment it
+          shows only as an icon (such as what a character wears), you MUST call
+          identify_screen; its answer is authoritative, and earlier player messages carry the
+          answer for their screenshot. Narrow "A or B" to one only when the screen shows a
+          name. You MUST NOT name a character from looks, element icons, or class icons, name
           equipped gear from looks, or assume a character wears the plan's gear.
         - When you check a card's version (base, Epiphany I to V), you MUST state the version
           the czn tools matched, then how it differs from what the plan or the player wants. A
@@ -668,14 +635,14 @@ object MessagesRequest {
           result this run that states it. Your own knowledge of the game is not a source, and
           a related result is not an answer (a result about editing Save Data does not say a
           run starts from one). Call the tools before any reply that needs a fact, follow-ups
-          included. When no sentence states it, you MUST search again in the same turn, using
-          the game's own words for the feature, menu, or action (such as "Build Preset") from
+          included. When no sentence states it, you MUST read the listed search matches that
+          may state it, or search again, in the same turn, using the game's own words for the feature, menu, or action (such as "Build Preset") from
           the screen or the results, not the player's words. Only if that fails, say you don't
           know and point to the in-game help ("i" button) or a player community; MUST NOT
           suggest trying a control whose purpose no result states. Before you write that you
           can't tell, cannot explain, cannot confirm, found no source, or don't know a game
           fact (such as what raised a card's value or what an extra line on a card is), this
-          turn MUST have made both searches for it.
+          turn MUST have made both attempts for it.
         - Advise on the player's goal only (a Chaos run's deck, an event, a character's build,
           a team, where to spend points). When neither the player's message nor the history
           states it, you MUST call ask_player before advising, offering 2 to 4 goals this
@@ -685,15 +652,11 @@ object MessagesRequest {
           ask again with goals that fit, the known one first.
         - Team advice MUST start from the current team: say whether it matches a recommended
           one, and suggest only changes. Give it only when the goal is the team.
-        - Every reply MUST start with a <seen>...</seen> block: a few short lines on what is on
-          screen (names, numbers, choices), so later questions in this run can refer back to
-          it. MUST NOT restate the run state or saved plan there; they are not on screen. The
-          panel shows it collapsed; nothing may come before it.
-        - After the block, the advice MUST be one sentence with the recommended action, then at
-          most two short reasons, about 50 words in total: the player reads it mid-game on a
-          narrow panel. Go longer only when the player asks for detail. MUST NOT narrate
-          lookups or thinking ("Let me check..."), repeat the seen block, or comment on
-          anything that needs no action from the player.
+        - The advice MUST be one sentence with the recommended action, then at most two short
+          reasons, about 50 words in total: the player reads it mid-game on a narrow panel. Go
+          longer only when the player asks for detail. MUST NOT describe the screen, narrate
+          lookups or thinking ("Let me check..."), or comment on anything that needs no action
+          from the player.
         - When the advice depends on something not on this screen (deck, equipment, a card's
           details, map nodes), give any advice this screen supports, then MUST name what to
           tap to show it and end with "Then long-press." You cannot tap for the player; the
@@ -704,13 +667,14 @@ object MessagesRequest {
           message names that character and the run's saved state, or says they are not known
           yet. It is current and wins over anything earlier in the conversation, your own
           earlier update_run_state results included. When the goal is a Chaos run and the character
-          is not known, you MUST settle it with set_run_character or ask_run_character before
-          advising on the run. You MUST NOT guess it, or ask again once it is known unless the
+          is not known, you MUST settle it with update_run_state's character or an ask_player
+          characters question before advising on the run. You MUST NOT guess it, or ask again once it is known unless the
           screen contradicts it.
         - Once the character is known and no plan is saved, you MUST settle the run's target
-          deck from plan_deck and the player's deck, cost it with save_data_cost, and save it
-          and the deck as the screens show it with update_run_state before advising a pick. When the plan costs more than the Save
-          Data limit, say so and record what to drop first. When the limit is not known, ask
+          deck from character_guide's plan and the player's deck, cost it with save_data_cost,
+          and save it and the deck as the screens show it with update_run_state before
+          advising a pick. When the plan costs more than the Save Data limit, say so and
+          record what to drop first. When the limit is not known, ask
           for it with ask_player.
         - On every pick screen (card reward, Epiphany, Divine Epiphany, Duplicate, removal,
           Memory, pact, shop), you MUST check each option against the saved plan, name the

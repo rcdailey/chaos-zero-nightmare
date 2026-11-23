@@ -16,11 +16,12 @@ data class Question(
     val question: String,
     /** A short label for the question, shown in the step line and the answer summary. */
     val header: String,
-    val options: List<Option>,
+    val options: List<Option> = emptyList(),
     @SerialName("multi_select") val multiSelect: Boolean = false,
     /**
-     * The options are character names, shown with their card art. Set by the app for its own
-     * character question; Claude's schema does not offer it.
+     * Asks for the run's character: the options are character names, shown with their card
+     * art, and the pick is saved as the run's character. Without options the player picks
+     * from the whole roster, which only a question asked alone can do.
      */
     val characters: Boolean = false,
 )
@@ -71,7 +72,7 @@ object PlayerAsks {
 
     /**
      * Reads Claude's `ask_player` input. Fails with a message for Claude when the input breaks
-     * the limits the card is sized for; the app's own character flag is cleared.
+     * the limits the card is sized for.
      */
     fun parse(inputJson: String): Result<List<Question>> {
         val questions =
@@ -88,7 +89,18 @@ object PlayerAsks {
                     "Ask 1 to $MAX_QUESTIONS questions."
                 }
 
-                questions.any { it.options.size !in MIN_OPTIONS..MAX_OPTIONS } -> {
+                questions.size > 1 && questions.any { it.characters && it.options.isEmpty() } -> {
+                    "A run character question without options must be asked alone."
+                }
+
+                questions.count { it.characters } > 1 -> {
+                    "Ask for the run character in one question."
+                }
+
+                questions.any {
+                    it.options.size !in MIN_OPTIONS..MAX_OPTIONS &&
+                        !(it.characters && it.options.isEmpty())
+                } -> {
                     "Give each question $MIN_OPTIONS to $MAX_OPTIONS options."
                 }
 
@@ -103,7 +115,7 @@ object PlayerAsks {
                 }
             }
         if (problem != null) return Result.failure(IllegalArgumentException(problem))
-        return Result.success(questions.map { it.copy(characters = false) })
+        return Result.success(questions)
     }
 
     /** The answers as Claude reads them, in its tool result and in later turns' history. */

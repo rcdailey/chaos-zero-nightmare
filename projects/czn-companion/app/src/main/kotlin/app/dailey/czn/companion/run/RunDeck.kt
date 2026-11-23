@@ -56,6 +56,8 @@ data class DeckGear(
  */
 @Serializable
 data class RunUpdate(
+    /** The character whose deck this run builds; the app saves it apart from [RunDeck]. */
+    val character: String? = null,
     val plan: String? = null,
     val limit: Int? = null,
     @SerialName("drop_first") val dropFirst: List<String>? = null,
@@ -96,6 +98,10 @@ object RunDecks {
             when {
                 update.limit != null && update.limit <= 0 -> {
                     "limit must be positive."
+                }
+
+                update.character != null && update.character.isBlank() -> {
+                    "character must not be empty."
                 }
 
                 update.characters.any { it.name.isBlank() } -> {

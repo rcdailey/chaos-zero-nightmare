@@ -35,6 +35,8 @@ android {
 
     testOptions {
         unitTests.all { it.useJUnitPlatform() }
+        // Robolectric reads the merged manifest and resources.
+        unitTests.isIncludeAndroidResources = true
     }
 }
 
@@ -69,4 +71,10 @@ dependencies {
     testImplementation(libs.coroutines.test)
     testImplementation(libs.ktor.client.mock)
     testRuntimeOnly(libs.junit.platform.launcher)
+    // Room migration tests run on the JVM under Robolectric (JUnit 4), never on a device:
+    // device test runs uninstall the app afterwards, which deletes the player's runs.
+    testImplementation(libs.junit4)
+    testImplementation(libs.robolectric)
+    testImplementation(libs.test.core)
+    testRuntimeOnly(libs.junit.vintage.engine)
 }

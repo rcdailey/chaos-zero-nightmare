@@ -68,12 +68,20 @@ class RunRepository(
             connection.immediateTransaction { dao.setCharacter(activeRunId(), name) }
         }
 
-    /** The active run's saved target deck; null until Claude saves one, and after [newRun]. */
+    /** The active run's plan text saved before deck state existed; null for newer runs. */
     suspend fun planNow(): String? = dao.activeRun()?.plan
 
-    suspend fun setPlan(plan: String) =
+    /** The active run's deck state; null until Claude saves one, and after [newRun]. */
+    suspend fun deckNow(): RunDeck? = dao.activeRun()?.deck?.let(RunDecks::decode)
+
+    /** Applies [update] to the active run's deck state in one transaction; the state after it. */
+    suspend fun updateDeck(update: RunUpdate): RunDeck =
         db.useWriterConnection { connection ->
-            connection.immediateTransaction { dao.setPlan(activeRunId(), plan) }
+            connection.immediateTransaction {
+                val runId = activeRunId()
+                val saved = dao.activeRun()?.deck?.let(RunDecks::decode)
+                RunDecks.apply(saved, update).also { dao.setDeck(runId, RunDecks.encode(it)) }
+            }
         }
 
     /** The newest response id of the active run's requests, for cache diagnostics. */

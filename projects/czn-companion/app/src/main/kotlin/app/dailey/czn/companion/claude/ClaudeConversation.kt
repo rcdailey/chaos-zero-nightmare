@@ -14,6 +14,7 @@ import app.dailey.czn.companion.characters.ScreenCharacters
 import app.dailey.czn.companion.characters.ScreenGear
 import app.dailey.czn.companion.run.OpenTurn
 import app.dailey.czn.companion.run.RequestUsageRow
+import app.dailey.czn.companion.run.RunDecks
 import app.dailey.czn.companion.run.RunRepository
 import app.dailey.czn.companion.run.ScreenshotArchive
 import com.anthropic.client.AnthropicClient
@@ -175,7 +176,7 @@ class ClaudeConversation(
     ) {
         val history = run.entriesNow()
         // Read once, so the newest message stays identical, and cached, across this turn.
-        val state = RunState(run.characterNow(), run.planNow())
+        val state = RunState(run.characterNow(), run.planNow(), run.deckNow())
         var previousMessageId = run.lastMessageId()
         var round = 0
         val reply = StringBuilder(open.reply)
@@ -378,6 +379,15 @@ class ClaudeConversation(
                 ?.cacheMissReason()
                 ?.orElse(null)
         val missJson = miss?.let { JSON.readTree(JSON.writeValueAsString(it)) }
+        val passes =
+            usage
+                .iterations()
+                .orElse(null)
+                .orEmpty()
+                .filter { it.isMessage() }
+                .map {
+                    it.inputTokens() + it.cacheCreationInputTokens() + it.cacheReadInputTokens()
+                }
         val row =
             RequestUsageRow(
                 runId = 0,
@@ -398,6 +408,8 @@ class ClaudeConversation(
                 clearedInputTokens = cleared.sumOf { it.clearedInputTokens() },
                 cacheMissReason = missJson?.get("type")?.asText().orEmpty(),
                 cacheMissedTokens = missJson?.get("cache_missed_input_tokens")?.asLong() ?: 0,
+                iterations = passes.size,
+                largestPromptTokens = passes.maxOrNull() ?: 0,
             )
         // The response's block types in order, such as thinking,mcp_tool_use,text.
         val blocks =
@@ -498,14 +510,14 @@ class ClaudeConversation(
                 )
             }
 
-            MessagesRequest.SET_RUN_PLAN -> {
-                val plan = input["plan"]?.asString()?.orElse(null)?.trim()
-                if (plan.isNullOrEmpty()) {
-                    "plan is required." to true
-                } else {
-                    run.setPlan(plan)
-                    "Saved. Later requests of this run carry the plan." to false
-                }
+            MessagesRequest.UPDATE_RUN_STATE -> {
+                RunDecks.parse(inputJson).fold(
+                    onSuccess = { update ->
+                        val deck = run.updateDeck(update)
+                        "Saved. The run state now:\n${RunDecks.describe(deck)}" to false
+                    },
+                    onFailure = { it.message.orEmpty() to true },
+                )
             }
 
             MessagesRequest.SET_RUN_CHARACTER -> {

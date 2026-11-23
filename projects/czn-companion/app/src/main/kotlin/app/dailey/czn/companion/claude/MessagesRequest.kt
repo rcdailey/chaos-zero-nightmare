@@ -3,6 +3,8 @@ package app.dailey.czn.companion.claude
 import app.dailey.czn.companion.ask.AnsweredAsk
 import app.dailey.czn.companion.ask.PlayerAsks
 import app.dailey.czn.companion.run.EntryKind
+import app.dailey.czn.companion.run.RunDeck
+import app.dailey.czn.companion.run.RunDecks
 import app.dailey.czn.companion.run.RunEntry
 import com.anthropic.core.JsonValue
 import com.anthropic.models.beta.messages.BetaBase64ImageSource
@@ -28,8 +30,10 @@ import kotlin.io.encoding.Base64
 data class RunState(
     /** The run's character, or null while unknown. */
     val character: String? = null,
-    /** The target deck Claude saved with set_run_plan, or null before it saves one. */
+    /** Plan text of a run saved before deck state existed; ignored once [deck] is set. */
     val plan: String? = null,
+    /** The deck state Claude built with update_run_state, or null before its first update. */
+    val deck: RunDeck? = null,
 )
 
 /**
@@ -67,7 +71,7 @@ object MessagesRequest {
 
     /** Tools the app runs itself, in [ClaudeConversation]. */
     const val SET_RUN_CHARACTER = "set_run_character"
-    const val SET_RUN_PLAN = "set_run_plan"
+    const val UPDATE_RUN_STATE = "update_run_state"
     const val ASK_RUN_CHARACTER = "ask_run_character"
     const val ASK_PLAYER = "ask_player"
     const val IDENTIFY_CHARACTERS = "identify_characters"
@@ -81,7 +85,12 @@ object MessagesRequest {
      * frees at least [CLEAR_AT_LEAST_TOKENS]. Measured on the 76-turn run of 2026-11-21: its
      * full history is about 222,000 tokens, and clearing 115 old results brings each request
      * to about 111,000, read from the cache. A run passes the trigger after roughly 40 turns.
-     * The plan tools are never cleared. `request_usage` records each clearing.
+     * The trigger compares one sampling pass's prompt, not a response's summed usage: run 30
+     * (2026-11-22) logged up to 304,076 prompt tokens, but those were 3 passes of about 100,000
+     * (the API samples again after each round of CZN data calls), so nothing was cleared.
+     * Compare against `request_usage.largestPromptTokens`.
+     * plan_deck results are never cleared; run state updates may be, since the current state
+     * ends every request. `request_usage` records each clearing.
      */
     private const val CLEAR_TRIGGER_TOKENS = 120_000L
     private const val KEEP_TOOL_USES = 30L
@@ -146,7 +155,7 @@ object MessagesRequest {
                     .build(),
             ).addTool(BetaMcpToolset.builder().mcpServerName(CZN_SERVER).build())
             .addTool(SET_RUN_CHARACTER_TOOL)
-            .addTool(SET_RUN_PLAN_TOOL)
+            .addTool(UPDATE_RUN_STATE_TOOL)
             .addTool(ASK_RUN_CHARACTER_TOOL)
             .addTool(ASK_PLAYER_TOOL)
             .addTool(IDENTIFY_CHARACTERS_TOOL)
@@ -168,14 +177,29 @@ object MessagesRequest {
                     .keep(BetaToolUsesKeep.builder().value(KEEP_TOOL_USES).build())
                     .clearAtLeast(
                         BetaInputTokensClearAtLeast.builder().value(CLEAR_AT_LEAST_TOKENS).build(),
-                    ).excludeTools(listOf(SET_RUN_PLAN, "plan_deck"))
+                    ).excludeTools(listOf("plan_deck"))
                     .build(),
             ).build()
 
     /** The run state block at the end of the newest message. */
-    private fun describe(run: RunState) =
-        "Run state. Character: ${run.character ?: "not known yet"}. Saved plan: " +
-            (run.plan?.let { "\n$it" } ?: "none yet.")
+    private fun describe(run: RunState): String {
+        val head = "Run state. Character: ${run.character ?: "not known yet"}."
+        return when {
+            run.deck != null -> {
+                "Current run state, newer than any earlier one in this conversation. " +
+                    "Character: ${run.character ?: "not known yet"}.\n" +
+                    RunDecks.describe(run.deck)
+            }
+
+            run.plan != null -> {
+                "$head Saved plan: \n${run.plan}"
+            }
+
+            else -> {
+                "$head Saved state: none yet."
+            }
+        }
+    }
 
     /**
      * One saved turn (the player's message, then the reply) as it is sent again. A reply with a
@@ -361,23 +385,122 @@ object MessagesRequest {
             listOf("name"),
         )
 
-    private val SET_RUN_PLAN_TOOL =
+    private val DECK_CARD_SCHEMA =
+        mapOf(
+            "type" to "object",
+            "properties" to
+                mapOf(
+                    "card" to
+                        mapOf(
+                            "type" to "string",
+                            "description" to
+                                "Base card name as the czn tools spell it, without the " +
+                                "Epiphany numeral",
+                        ),
+                    "version" to
+                        mapOf(
+                            "type" to "string",
+                            "description" to "Epiphany I-V; omit for the base card",
+                        ),
+                    "divine" to
+                        mapOf(
+                            "type" to "boolean",
+                            "description" to "Every copy in this entry carries a Divine Epiphany",
+                        ),
+                    "copies" to
+                        mapOf(
+                            "type" to "integer",
+                            "minimum" to 0,
+                            "description" to
+                                "Copies of this version the deck now holds; 0 deletes the entry",
+                        ),
+                ),
+            "required" to listOf("card"),
+        )
+
+    private val DECK_CHARACTER_SCHEMA =
+        mapOf(
+            "type" to "object",
+            "properties" to
+                mapOf(
+                    "name" to mapOf("type" to "string"),
+                    "points" to
+                        mapOf(
+                            "type" to "integer",
+                            "description" to
+                                "Faint Memory points the Save Data holds now: a counter on " +
+                                "screen, else save_data_cost's total",
+                        ),
+                    "cards" to
+                        mapOf(
+                            "type" to "array",
+                            "items" to DECK_CARD_SCHEMA,
+                            "description" to
+                                "Changed entries only, each matched by card and version and " +
+                                "replacing that entry",
+                        ),
+                    "removed" to
+                        mapOf(
+                            "type" to "array",
+                            "items" to mapOf("type" to "string"),
+                            "description" to "Every card removed so far; replaces the saved list",
+                        ),
+                    "gear" to
+                        mapOf(
+                            "type" to "object",
+                            "description" to "Worn equipment; a given slot replaces that slot",
+                            "properties" to
+                                listOf("weapon", "armor", "trinket").associateWith {
+                                    mapOf("type" to "string")
+                                },
+                        ),
+                ),
+            "required" to listOf("name"),
+        )
+
+    private val UPDATE_RUN_STATE_TOOL =
         tool(
-            SET_RUN_PLAN,
+            UPDATE_RUN_STATE,
             """
-            Saves the target deck for this run's character, replacing any saved before; the
-            app sends it with every later request of the run. Write each card with its Epiphany
-            version and copy count, which cards the Duplicates go to, which cards to remove,
-            and the equipment to take.
+            Changes the run state the app saves and sends at the end of every request. Send only
+            what changed, as many changes at once as needed; every field or entry left out stays
+            as saved. Characters are matched by name, and a new name adds one. A character's
+            cards are the whole deck, starting cards included, in the form save_data_cost takes.
+            Returns the whole state after the change.
             """,
             mapOf(
                 "plan" to
                     mapOf(
                         "type" to "string",
-                        "description" to "The target deck as short lines",
+                        "description" to
+                            "The target deck as short lines: each card with its Epiphany " +
+                            "version and copies, where Duplicates go, removals, the equipment " +
+                            "to take, and its Faint Memory cost from save_data_cost",
+                    ),
+                "limit" to
+                    mapOf(
+                        "type" to "integer",
+                        "description" to
+                            "The Save Data Storage Limit in points as shown on screen; omit " +
+                            "while unknown",
+                    ),
+                "characters" to
+                    mapOf(
+                        "type" to "array",
+                        "description" to
+                            "Changed team members; each has their own Save Data",
+                        "items" to DECK_CHARACTER_SCHEMA,
+                    ),
+                "drop_first" to
+                    mapOf(
+                        "type" to "array",
+                        "items" to mapOf("type" to "string"),
+                        "description" to
+                            "Parts of the plan to give up first, in order, when it costs more " +
+                            "than the limit",
                     ),
             ),
-            listOf("plan"),
+            emptyList(),
         )
 
     private val IDENTIFY_CHARACTERS_TOOL =
@@ -404,8 +527,8 @@ object MessagesRequest {
             to right ("row 1: ..."; a left-out slot shifts the rest of its row left), each item
             as "Name (rarity slot, stat values per upgrade level): effect"; stats are left out
             where the data has none. These details suffice to compare gear; do not look the
-            named items up again to compare them. "if a Chaos event transformed it this run: ..." lists
-            forms (Harmonization, Mutation, ...) drawn with the base item's icon: assume the base
+            named items up again to compare them. "if a Chaos event transformed it this run: ..."
+            lists forms (Harmonization, Mutation, ...) drawn with the base item's icon: assume the base
             item unless this run transformed it. "A / B" means different items drawn with the
             same icon. "A or B" means one of two icons, too close to choose. Slots left out
             showed no known icon, such as empty ones. Gear outside square slots (shop items,
@@ -549,9 +672,10 @@ object MessagesRequest {
           the game's own words for the feature, menu, or action (such as "Build Preset") from
           the screen or the results, not the player's words. Only if that fails, say you don't
           know and point to the in-game help ("i" button) or a player community; MUST NOT
-          suggest trying a control whose purpose no result states. You MUST NOT write that you
-          found no source, cannot confirm, or don't know a game fact unless this turn made
-          both searches for it.
+          suggest trying a control whose purpose no result states. Before you write that you
+          can't tell, cannot explain, cannot confirm, found no source, or don't know a game
+          fact (such as what raised a card's value or what an extra line on a card is), this
+          turn MUST have made both searches for it.
         - Advise on the player's goal only (a Chaos run's deck, an event, a character's build,
           a team, where to spend points). When neither the player's message nor the history
           states it, you MUST call ask_player before advising, offering 2 to 4 goals this
@@ -577,16 +701,31 @@ object MessagesRequest {
         - The panel renders Markdown. You SHOULD bold card and choice names. You MUST NOT use
           headings or tables.
         - A Chaos run builds one character's deck; the run state at the end of the newest
-          message names that character and the run's saved plan, or says they are not known
-          yet. When the goal is a Chaos run and the character is not known, you MUST settle it
-          with set_run_character or ask_run_character before advising on the run. You MUST
-          NOT guess it, or ask again once it is known unless the screen contradicts it.
+          message names that character and the run's saved state, or says they are not known
+          yet. It is current and wins over anything earlier in the conversation, your own
+          earlier update_run_state results included. When the goal is a Chaos run and the character
+          is not known, you MUST settle it with set_run_character or ask_run_character before
+          advising on the run. You MUST NOT guess it, or ask again once it is known unless the
+          screen contradicts it.
         - Once the character is known and no plan is saved, you MUST settle the run's target
-          deck from plan_deck and the player's deck and save it with set_run_plan before
-          advising a pick; save it again when the plan changes. On a Duplicate, Epiphany,
-          Divine Epiphany, removal, or card reward screen, you MUST check each option against
-          the saved plan and name the part of the plan the pick serves, such as the card the
-          plan sends Duplicates to.
+          deck from plan_deck and the player's deck, cost it with save_data_cost, and save it
+          and the deck as the screens show it with update_run_state before advising a pick. When the plan costs more than the Save
+          Data limit, say so and record what to drop first. When the limit is not known, ask
+          for it with ask_player.
+        - On every pick screen (card reward, Epiphany, Divine Epiphany, Duplicate, removal,
+          Memory, pact, shop), you MUST check each option against the saved plan, name the
+          part of the plan the pick serves, and state the pick's cost from save_data_cost and
+          the points left after it. When a pick is outside the plan and costs points, you
+          SHOULD recommend Skip. Use a free reroll before settling for a card outside the plan.
+        - Before recommending an Epiphany version outside the plan, you MUST search whether a
+          later Epiphany can still replace it with the plan's version.
+        - After each pick, you MUST call update_run_state with what the pick changed. When the
+          screen shows a points counter, a deck, or worn gear that differs from the saved state,
+          the screen wins: update the entries that differ.
+        - Decide a choice yourself when the tools can settle it, such as which teammate gains
+          more from a card; ask the player only for what they alone know.
+        - Once per run, you MUST ask with ask_player whether the teammates' Save Data matters.
+          If it does not, say that picks for them only help this run.
         - On a Chaos event screen, you MUST weigh each choice by everything it can lead to:
           for a choice that opens another screen, the best rewards that screen can offer and
           what they cost or risk. Recommend a choice only after comparing it with the others

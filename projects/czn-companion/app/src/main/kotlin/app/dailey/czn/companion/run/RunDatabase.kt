@@ -25,8 +25,13 @@ data class RunRow(
     val active: Boolean,
     /** The character whose deck this run builds, as the CZN data server names it. */
     val character: String? = null,
-    /** The target deck Claude saved for this run (set_run_plan), sent with every request. */
+    /**
+     * The target deck Claude saved with the retired set_run_plan tool; runs saved before [deck]
+     * existed still send it.
+     */
     val plan: String? = null,
+    /** The run's deck state Claude saved (update_run_state), as [RunDecks.encode] JSON. */
+    val deck: String? = null,
 )
 
 /**
@@ -67,6 +72,15 @@ data class RequestUsageRow(
      */
     val cacheMissReason: String,
     val cacheMissedTokens: Long,
+    /**
+     * Sampling passes the API ran for this request: one, plus one after each round of CZN data
+     * tool calls it ran itself. The token fields above add up every pass, so a request with 3
+     * passes reports about 3 times its prompt; 0 when the API reported no passes, and for rows saved
+     * before this was kept.
+     */
+    @ColumnInfo(defaultValue = "0") val iterations: Int = 0,
+    /** The largest single pass's prompt, which is what the context-editing trigger compares. */
+    @ColumnInfo(defaultValue = "0") val largestPromptTokens: Long = 0,
 )
 
 /**
@@ -157,10 +171,10 @@ interface RunDao {
         character: String,
     )
 
-    @Query("UPDATE run SET plan = :plan WHERE id = :runId")
-    suspend fun setPlan(
+    @Query("UPDATE run SET deck = :deck WHERE id = :runId")
+    suspend fun setDeck(
         runId: Long,
-        plan: String,
+        deck: String,
     )
 
     @Insert
@@ -199,7 +213,7 @@ interface RunDao {
 
 @Database(
     entities = [RunRow::class, RunEntryRow::class, OpenTurnRow::class, RequestUsageRow::class],
-    version = 9,
+    version = 11,
     autoMigrations = [
         AutoMigration(from = 1, to = 2),
         AutoMigration(from = 2, to = 3),
@@ -209,6 +223,8 @@ interface RunDao {
         AutoMigration(from = 6, to = 7, spec = MoveNamesToScreen::class),
         AutoMigration(from = 7, to = 8),
         AutoMigration(from = 8, to = 9),
+        AutoMigration(from = 9, to = 10),
+        AutoMigration(from = 10, to = 11),
     ],
 )
 abstract class RunDatabase : RoomDatabase() {

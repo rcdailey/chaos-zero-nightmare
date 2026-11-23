@@ -4,7 +4,11 @@ import app.dailey.czn.companion.ask.Answer
 import app.dailey.czn.companion.ask.AnsweredAsk
 import app.dailey.czn.companion.ask.Option
 import app.dailey.czn.companion.ask.Question
+import app.dailey.czn.companion.run.DeckCard
+import app.dailey.czn.companion.run.DeckCharacter
+import app.dailey.czn.companion.run.DeckGear
 import app.dailey.czn.companion.run.EntryKind
+import app.dailey.czn.companion.run.RunDeck
 import app.dailey.czn.companion.run.RunEntry
 import com.anthropic.core.JsonValue
 import com.anthropic.core.jsonMapper
@@ -158,6 +162,47 @@ class MessagesRequestTest {
         assertTrue("not known" in unknown && "none" in unknown)
     }
 
+    @Test
+    fun `the saved deck state is the newest message's last block and nowhere earlier`() {
+        val deck =
+            RunDeck(
+                plan = "Radiant Sword Flow II x3 (Divine)",
+                limit = 120,
+                characters =
+                    listOf(
+                        DeckCharacter(
+                            "Rossweisse",
+                            points = 40,
+                            cards = listOf(DeckCard("Radiant Sword Flow", "III", divine = true)),
+                            removed = listOf("Sword Slash"),
+                            gear = DeckGear(weapon = "Criticism of Discord"),
+                        ),
+                    ),
+                dropFirst = listOf("Sword Resonance V Divine"),
+            )
+        val messages = build(run = RunState("Rossweisse", "old plan text", deck)).messages()
+        val state =
+            messages
+                .last()
+                .content()
+                .last()
+                .text()
+                .orEmpty()
+        for (part in listOf(
+            "40/120 points",
+            "Radiant Sword Flow III (Divine)",
+            "Sword Slash",
+            "weapon Criticism of Discord",
+            "Radiant Sword Flow II x3 (Divine)",
+            "Sword Resonance V Divine",
+        )) {
+            assertTrue(part in state, part)
+        }
+        assertTrue("old plan text" !in state)
+        val earlier = messages.dropLast(1).flatMap { it.content() }.mapNotNull { it.text() }
+        assertTrue(earlier.none { "40/120" in it })
+    }
+
     private fun toolExchange(): Pair<BetaMessageParam, BetaMessageParam> {
         val toolUse =
             BetaMessageParam.ofAssistantOfContentBlockParams(
@@ -285,7 +330,7 @@ class MessagesRequestTest {
     }
 
     @Test
-    fun `clearing old tool results never clears the run's plan`() {
+    fun `clearing old tool results never clears deck plans`() {
         val edit =
             build()["context_management"]!!
                 .jsonObject["edits"]!!
@@ -293,7 +338,7 @@ class MessagesRequestTest {
                 .single()
                 .jsonObject
         val kept = edit["exclude_tools"]!!.jsonArray.map { it.jsonPrimitive.content }
-        assertTrue(MessagesRequest.SET_RUN_PLAN in kept && "plan_deck" in kept)
+        assertTrue("plan_deck" in kept)
     }
 
     @Test

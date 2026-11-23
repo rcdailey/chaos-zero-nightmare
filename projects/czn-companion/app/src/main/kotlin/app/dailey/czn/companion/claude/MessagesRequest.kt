@@ -56,7 +56,7 @@ data class RunState(
  */
 object MessagesRequest {
     const val IDENTITY = "You are Claude Code, Anthropic's official CLI for Claude."
-    const val MODEL = "claude-sonnet-5-5"
+    const val MODEL = "claude-opus-5-5"
     const val CZN_SERVER = "czn"
 
     /** Sent for a screen read without typed text; the API rejects empty text blocks. */

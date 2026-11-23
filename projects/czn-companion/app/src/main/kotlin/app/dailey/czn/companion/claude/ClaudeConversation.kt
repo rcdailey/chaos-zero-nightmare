@@ -27,6 +27,7 @@ import com.anthropic.models.beta.messages.BetaContentBlockParam
 import com.anthropic.models.beta.messages.BetaMessage
 import com.anthropic.models.beta.messages.BetaMessageParam
 import com.anthropic.models.beta.messages.BetaStopReason
+import com.anthropic.models.beta.messages.BetaTextBlockParam
 import com.anthropic.models.beta.messages.BetaToolResultBlockParam
 import com.anthropic.models.beta.messages.BetaToolUseBlockParam
 import com.anthropic.models.beta.messages.MessageCreateParams
@@ -245,7 +246,15 @@ class ClaudeConversation(
                     // App tools run at the start of the next round, from the saved message.
                     // A paused reply (a long server-side tool call) resumes when resent.
                     BetaStopReason.TOOL_USE, BetaStopReason.PAUSE_TURN -> {
-                        turn += message.toParam()
+                        val param = message.toParam()
+                        turn += param
+                        // A tool_use stop can come with only CZN data lookups and thinking (seen
+                        // on device, 2026-11-22). Resent as is, the request would end on Claude's
+                        // message, which the model rejects as prefill.
+                        val stalled =
+                            message.stopReason().get() == BetaStopReason.TOOL_USE &&
+                                waitingToolUses(param).isEmpty()
+                        if (stalled) turn += CONTINUE
                         save()
                     }
 
@@ -615,6 +624,16 @@ class ClaudeConversation(
                 .orEmpty()
                 .mapNotNull { it.toolUse().orElse(null) }
         }
+
+        /** The player's message that lets a stalled reply go on. */
+        val CONTINUE: BetaMessageParam =
+            BetaMessageParam.ofUserOfContentBlockParams(
+                listOf(
+                    BetaContentBlockParam.ofText(
+                        BetaTextBlockParam.builder().text("Continue.").build(),
+                    ),
+                ),
+            )
 
         /** Requests per reply; a reply that needs more is assumed stuck in a tool loop. */
         const val MAX_ROUNDS = 8

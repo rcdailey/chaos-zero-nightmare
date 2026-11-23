@@ -29,6 +29,12 @@ Sideloaded app for Android 16+ (Lenovo Legion Y700 Gen 5 on a China ROM, Nothing
 - Install with `adb install` (exempt from developer verification). Enabling the service needs
   Settings > Apps > the app > Allow restricted settings once. Android 17 Advanced Protection
   blocks non-accessibility-tool services; keep it off on test devices.
+- Lenovo tablet: ZUI blocks background starts of apps without auto-start, so after an install
+  the service stays enabled but unbound (logcat `ZuiAutoRunManager ... not allow start`). An
+  uninstall resets auto-start; updates keep it. To allow it: `pm enable com.zui.safecenter`,
+  Settings search "Autostart" > Autostart Manager, switch on CZN Companion, then
+  `pm disable-user --user 0 com.zui.safecenter`. Safe Center's own screen asks for consent;
+  this path does not.
 - Claude access: Anthropic account OAuth as opencode and pi do it: PKCE copy-code flow, then a
   Bearer token with the `oauth-2025-04-20` and `claude-code-20250219` betas. The first system
   block MUST be exactly the Claude Code identity line, with the app's prompt in a later block;

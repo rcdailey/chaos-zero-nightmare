@@ -1033,6 +1033,71 @@ def test_every_tool_call_logs_its_tool_arguments_time_and_reply_size(call, caplo
     assert record.reply_chars == len(reply) and record.seconds >= 0
 
 
+@pytest.fixture
+def cost_cards(conn, game_data):
+    """Mei Lin starting with two Strikes, and cards of no character: a Neutral with an
+    Epiphany, and a Legendary and a Rare Monster card."""
+    add_e7bot(conn, "czn/characters/1027", {"combatant": {"start_cards": [{"name": "Strike"}] * 2}})
+    (listed,) = conn.execute("SELECT body FROM e7bot.document WHERE path = 'czn/cards/list'")
+    spark_i = card("card_n1_rsp1", "Spark", 1, "Spark I") | {"base_combatant": None}
+    others = [
+        card("card_n1", "Spark", 1, "Spark", [spark_i], sort="SORT_NEUTRAL"),
+        card("card_mon_1", "Bloom: Slaughter", 2, "Shield", sort="SORT_MONSTER_UNIQUE")
+        | {"rarity": "RARITY_LEGEND"},
+        card("card_mon_2", "Triniel", 2, "Shield", sort="SORT_MONSTER_UNIQUE"),
+    ]
+    conn.execute(
+        "UPDATE e7bot.document SET body = %s WHERE path = 'czn/cards/list'",
+        (Jsonb(listed[0] + [c | {"base_combatant": None} for c in others] + [spark_i]),),
+    )
+
+
+def cost(call, cards: list[dict], removed: list[str] = ()) -> tuple[str, list[str]]:
+    reply = call("save_data_cost", character="mei lin", cards=cards, removed=list(removed))
+    return top_field(reply, "total"), lines_with(top_field(reply, "lines") or "", "- ")
+
+
+def test_save_data_cost_follows_the_games_faint_memory_rules(call, cost_cards):
+    # Three Divine copies of an Epiphany card plus one of another version: 3 Duplicates, the
+    # third paid; removed starting cards are paid.
+    total, lines = cost(
+        call,
+        [
+            {"card": "Rising Dragon Spire", "version": "V", "divine": True, "copies": 3},
+            {"card": "Rising Dragon Spire"},
+        ],
+        removed=["Strike", "Strike"],
+    )
+    assert total == "140"
+    assert lines[1].startswith("- Rising Dragon Spire; copies: 1; points: 40;")
+
+    # A Neutral is paid with or without its Epiphany; Monster cards by rarity.
+    for spark in ("Spark", "Spark I"):
+        assert cost(call, [{"card": spark}])[0] == "20"
+    assert cost(call, [{"card": "Bloom: Slaughter"}])[0] == "80"
+    assert cost(call, [{"card": "Triniel"}])[0] == "50"
+
+    # The starting deck's own copies are free; a third Strike is a Duplicate.
+    assert cost(call, [{"card": "Strike", "copies": 2}])[0] == "0"
+    assert "Duplicate 1: free" in cost(call, [{"card": "Strike", "copies": 3}])[1][0]
+
+    # Removing a card the character did not start with is free.
+    assert cost(call, [], removed=["Rising Dragon Spire"])[0] == "0"
+
+
+def test_save_data_cost_lists_unknown_cards_without_points(call, cost_cards):
+    reply = call("save_data_cost", character="mei lin", cards=[{"card": "Zzyzx Qwv"}])
+    assert (top_field(reply, "total"), top_field(reply, "unknown")) == ("0", "Zzyzx Qwv")
+
+
+def test_plan_deck_gives_each_prydwen_decks_faint_memory_points(call, cost_cards):
+    decks = top_field(call("plan_deck", character="mei lin"), "prydwen_decks")
+    # Three Strikes, one with a Divine: the third is a free Duplicate, the Divine costs 20.
+    faint_memory = decks.split("faint_memory:\n")[1].splitlines()
+    assert faint_memory[0] == "total: 20"
+    assert faint_memory[3].startswith("- Strike; copies: 1; points: 20;")
+
+
 def test_plan_deck_for_unknown_character_says_no_match(call):
     assert call("plan_deck", character="zzzz") == "No match."
 

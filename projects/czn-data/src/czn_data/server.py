@@ -37,6 +37,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 from mcp.server.transport_security import TransportSecuritySettings
 from PIL import UnidentifiedImageError
 from psycopg.rows import dict_row
+from pydantic import BaseModel, Field, ValidationError
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
@@ -691,6 +692,105 @@ def _deck_duplicates(cards: list[dict], starting: set[str]) -> list[str]:
     return lines
 
 
+class DeckCard(BaseModel):
+    """One card in a Save Data deck: copies of one version, each carrying a Divine Epiphany
+    when divine is set."""
+
+    card: str
+    version: str | None = None
+    divine: bool = False
+    copies: int = Field(default=1, ge=1)
+
+
+# Faint Memory points, from the in-game Help topic "Save Rules for Faint Memories".
+DIVINE_POINTS = 20
+CARD_POINTS = 20  # Neutral and Forbidden cards
+MONSTER_POINTS = {"White": 20, "Blue": 50, "Gold": 80}  # Normal, Rare, Legendary
+FREE_DUPLICATES = 2
+DUPLICATE_POINTS = 40
+REMOVED_STARTING_POINTS = 20
+MAX_DUPLICATES = 3
+MAX_REMOVALS = 5
+# Cards the character starts with or gains as her own (Epiphany cards): no points.
+OWN_CATEGORIES = frozenset({"starting", "unique", "ego", "desire"})
+# Prydwen files Season 5's Memory cards under Neutral, and the game charged 20 for one in run 30.
+NEUTRAL_CATEGORIES = frozenset({"neutral", "memory", "forbidden"})
+
+
+def _card_points(row: dict) -> tuple[int, str]:
+    """A card's own points and the rule that set them, before Divines and Duplicates."""
+    category = row["category"]
+    if category in OWN_CATEGORIES:
+        return 0, f"{category} card: free"
+    if category in NEUTRAL_CATEGORIES:
+        return CARD_POINTS, f"{category} card"
+    if category == "monster":
+        points = MONSTER_POINTS.get(row.get("color"))
+        if points is not None:
+            return points, f"monster card ({row['color']})"
+        return 0, f"monster card of unknown rarity ({row.get('color')}): not counted"
+    return 0, f"{category} card: the Help names no rule, not counted"
+
+
+def _save_data_cost(
+    entries: list[tuple[DeckCard, dict | None]], removed: list[tuple[str, dict | None]]
+) -> dict:
+    """The Faint Memory points of a deck: entries pair each DeckCard with its card row (None
+    when no card matched), removed pairs each removed card's name with its row."""
+    lines = []
+    unknown = []
+    held: Counter = Counter()
+    duplicates = 0
+    for entry, row in entries:
+        name = f"{entry.card} {entry.version}" if entry.version else entry.card
+        if row is None:
+            unknown.append(name)
+            continue
+        points, rule = _card_points(row)
+        total = points * entry.copies
+        rules = [rule + (f" x{entry.copies}" if points and entry.copies > 1 else "")]
+        if entry.divine:
+            total += DIVINE_POINTS * entry.copies
+            rules.append(f"Divine Epiphany x{entry.copies}")
+        # Copies beyond the starting deck's (one for any card it does not start with) are
+        # Duplicates, whichever versions they are.
+        free = row.get("starting_copies") or 1
+        before = held[row["base_name"]]
+        held[row["base_name"]] += entry.copies
+        new = held[row["base_name"]] - max(before, free)
+        for _ in range(max(new, 0)):
+            duplicates += 1
+            if duplicates > FREE_DUPLICATES:
+                total += DUPLICATE_POINTS
+                rules.append(f"Duplicate {duplicates}")
+            else:
+                rules.append(f"Duplicate {duplicates}: free")
+        lines.append({"card": row["name"], "copies": entry.copies, "points": total, "rules": rules})
+    for name, row in removed:
+        if row is None:
+            unknown.append(name)
+            continue
+        starting = row["category"] == "starting"
+        lines.append(
+            {
+                "removed": row["name"],
+                "points": REMOVED_STARTING_POINTS if starting else 0,
+                "rules": ["removed starting card" if starting else "removed card: free"],
+            }
+        )
+    warnings = []
+    if duplicates > MAX_DUPLICATES:
+        warnings.append(f"{duplicates} Duplicates; Save Data keeps at most {MAX_DUPLICATES}")
+    if len(removed) > MAX_REMOVALS:
+        warnings.append(f"{len(removed)} removals; Save Data keeps the first {MAX_REMOVALS} only")
+    return {
+        "total": sum(line["points"] for line in lines),
+        "lines": lines,
+        "unknown": unknown or None,
+        "warnings": warnings or None,
+    }
+
+
 def _log_arguments(arguments: dict) -> str:
     """A tool call's arguments as one JSON string for its log line, cut to LOG_ARGUMENT_CHARS
     so card text sent to match_card_text cannot flood the log."""
@@ -890,7 +990,8 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
         each with full text, cost, tags, Prydwen's star rating (1 to 5) and its own
         review; alias is the version's name in the game, when it has one (Unbound in
         "Flicker Blade (Unbound)"). The base card also carries the overall review, the
-        recommended Neutral Epiphany (target_neutral) and Prydwen's Neutral and Divine advice."""
+        recommended Neutral Epiphany (target_neutral) and Prydwen's Neutral and Divine advice,
+        and for a starting card, starting_copies: how many copies the starting deck holds."""
         return await _query(
             f"""
             WITH best AS (
@@ -1553,7 +1654,8 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
         item with its slot, the share of leaderboard decks wearing it, and how many Prydwen
         decks list it. prydwen_decks are Prydwen's decks, each with its deck code (to paste
         into the game's deck import) when Prydwen gives one, and duplicates: the cards the deck
-        holds more than one of, which are where its Duplicates go. Names are the game's; use
+        holds more than one of, which are where its Duplicates go, and faint_memory: its points
+        as save_data_cost gives them, without removals (Prydwen lists none). Names are the game's; use
         get_card for card text."""
         found = await _find_character(character)
         if found is None:
@@ -1580,6 +1682,15 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
         for deck in decks:
             if duplicates := _deck_duplicates(deck.get("cards") or [], starting):
                 deck["duplicates"] = duplicates
+            held = [
+                DeckCard(
+                    card=card["name"],
+                    divine=bool(card.get("divine_epiphany")),
+                    copies=card.get("count") or 1,
+                )
+                for card in deck.get("cards") or []
+            ]
+            deck["faint_memory"] = await _cost(found["slug"], held, [])
         plan = {
             "character": found["name"],
             "season": season,
@@ -1595,6 +1706,71 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
                 " to plan from."
             )
         return plan
+
+    async def _deck_card(slug: str, name: str) -> dict | None:
+        """The best-matching card of this character or with no character (Neutral, Monster,
+        Forbidden), with its base card's starting deck copies."""
+        found = await _query(
+            f"""
+            SELECT name, base_name, category, color,
+                   (SELECT b.starting_copies FROM card b
+                    WHERE b.base_name = card.base_name AND b.variant = ''
+                      AND b.character_slug IS NOT DISTINCT FROM card.character_slug
+                    LIMIT 1) AS starting_copies
+            FROM card
+            WHERE (character_slug = %(slug)s OR character_slug IS NULL) AND {NAME_MATCH}
+            ORDER BY {NAME_ORDER} LIMIT 1
+            """,
+            {"slug": slug, "name": name},
+        )
+        return found[0] if found else None
+
+    async def _cost(slug: str, cards: list[DeckCard], removed: list[str]) -> dict:
+        entries = [
+            (card, await _deck_card(slug, f"{card.card} {card.version or ''}".strip()))
+            for card in cards
+        ]
+        removals = [(name, await _deck_card(slug, name)) for name in removed]
+        return _save_data_cost(entries, removals)
+
+    @tool
+    async def save_data_cost(
+        character: str, cards: list[DeckCard], removed: list[str] | None = None
+    ) -> dict | None:
+        """Faint Memory points of one character's Save Data, by the game's Save Rules for Faint
+        Memories. Use it for every point total or a pick's cost; never add points up yourself.
+        cards: the deck's cards (the whole deck, or only those gained or changed), one entry
+        per version: card (name as
+        shown, may include the Epiphany numeral), version (I-V, when not in the name), divine
+        (every copy in the entry carries a Divine Epiphany), copies (how many copies of that
+        version the deck holds, starting copies included). Copies of a card beyond the starting
+        deck's (one for a card it does not start with) are Duplicates, across versions. removed:
+        removed card names. lines: each entry's points and the rules that set them. A pick's
+        cost is the total with the pick minus the total without it."""
+        found = await _find_character(character)
+        if found is None:
+            return None
+        return {"character": found["name"]} | await _cost(found["slug"], cards, removed or [])
+
+    @mcp.custom_route("/save-data-cost", methods=["POST"])
+    async def save_data_cost_route(request: Request) -> JSONResponse:
+        """REST endpoint for programs: save_data_cost's input as a JSON body, its result as
+        JSON."""
+        if not await authorized(request):
+            return JSONResponse({"error": "invalid or missing Bearer token"}, 401)
+        try:
+            body = await request.json()
+            character = str(body["character"])
+            cards = [DeckCard.model_validate(card) for card in body.get("cards") or []]
+            removed = [str(name) for name in body.get("removed") or []]
+        except (ValueError, KeyError, TypeError, ValidationError) as error:
+            return JSONResponse({"error": f"invalid body: {error}"}, 400)
+        found = await _find_character(character)
+        if found is None:
+            return JSONResponse({"error": f"no character matches {character}"}, 404)
+        return JSONResponse(
+            {"character": found["name"]} | await _cost(found["slug"], cards, removed)
+        )
 
     @tool
     async def get_encounter(

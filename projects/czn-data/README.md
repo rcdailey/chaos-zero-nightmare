@@ -408,6 +408,22 @@ character picker:
 {"characters": [{"name": "Mei Lin", "image_url": "https://cdn.prydwen.gg/images/chaos/characters/mei-lin_card.webp"}]}
 ```
 
+`POST /save-data-cost` gives the Faint Memory points of one character's Save Data, as the
+`save_data_cost` tool does. The JSON body takes `character`, `cards` (each with `card`, and
+optionally `version`, `divine`, and `copies`), and `removed` (card names). It answers 400 for a
+body it cannot read and 404 when no character matches:
+
+```json
+{"character": "Rossweisse", "total": 40, "lines": [
+  {"card": "Sword Resonance V", "copies": 1, "points": 20,
+   "rules": ["unique card: free", "Divine Epiphany x1"]},
+  {"removed": "Sword Slash", "points": 20, "rules": ["removed starting card"]}
+], "unknown": null, "warnings": null}
+```
+
+Points follow the in-game Help topic "Save Rules for Faint Memories". Season 5's Memory cards
+count as Neutral cards, as Prydwen files them, and the game charged 20 points for one.
+
 ## Naming characters on a screenshot
 
 `POST /identify` names the characters on a game screenshot, for the companion app. Send the

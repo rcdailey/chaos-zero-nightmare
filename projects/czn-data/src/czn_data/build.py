@@ -117,7 +117,8 @@ COLUMNS = {
     "card": (
         "character_slug game_id category base_name variant name alias cost type color element"
         " tags text rules seasonal rating epiphany_review target_neutral neutral_review"
-        " divine_review image_url prydwen_name prydwen_url source url data_fetched_at"
+        " divine_review image_url prydwen_name prydwen_url starting_copies source url"
+        " data_fetched_at"
     ),
     "potential": "character_slug position name text source url data_fetched_at",
     "partner": (
@@ -665,6 +666,12 @@ def _cards(sources, slugs, characters, known, result) -> list[dict]:
         key = (row["character_slug"], normalize(row["base_name"]), row["variant"])
         prydwen[key].append(row)
     guide_names = _guide_names(bases, slugs, prydwen)
+    # A starting deck can hold several copies of one card, each under its own id.
+    starting_copies: Counter = Counter()
+    for game_id, slug in slugs.items():
+        detail, _ = sources.detail(f"czn/characters/{game_id}")
+        for start in ((detail or {}).get("combatant") or {}).get("start_cards") or []:
+            starting_copies[(slug, plain(start["name"]))] += 1
 
     rows = []
     for base in bases:
@@ -728,6 +735,7 @@ def _cards(sources, slugs, characters, known, result) -> list[dict]:
                 "tags": [t["title"] for t in card.get("talent") or []],
                 "text": plain(card["desc_display"]),
                 "prydwen_url": (found or {}).get("url"),
+                "starting_copies": starting_copies.get((slug, base["name"])) if not code else None,
                 "source": "e7bot",
                 "url": URLS["card"],
                 "data_fetched_at": fetched_at,

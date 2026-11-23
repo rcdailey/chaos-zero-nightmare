@@ -80,7 +80,7 @@ def serve(conn, database_url, monkeypatch):
 
 
 @pytest.fixture
-def endpoint(serve, monkeypatch):
+def endpoint(serve, conn, monkeypatch):
     """Two items that share one icon, printed by the current code, and a third item's icon
     printed only by older code; the identifier names one slot per stored icon."""
     monkeypatch.setattr("czn_data.server.GearIdentifier", OneSlotPerIcon)
@@ -89,13 +89,18 @@ def endpoint(serve, monkeypatch):
         relic("eq_2", "Harmonization: Big Game Hunter", "relics/relic_1195"),
         relic("eq_3", "Runic Hammer", "relics/relic_5084"),
     ]
-    return serve(
+    client = serve(
         relics,
         [
             ("relics/relic_1195", prints_digest(), [[1.0]]),
             ("relics/relic_5084", "older", [[1.0]]),
         ],
     )
+    # Stats come from Prydwen, which only base items have.
+    conn.execute(
+        """UPDATE equipment SET stats = '{"ATK": "25/41/56/67/74"}' WHERE name = 'Big Game Hunter'"""
+    )
+    return client
 
 
 def post(client, body: bytes, token: str | None = "good", kind: str = "image/jpeg"):
@@ -112,6 +117,22 @@ def test_identify_gear_names_every_item_drawn_with_the_matched_icon(endpoint):
     assert body["model"] == MODEL
     assert [(g["result"], g["row"], g["names"]) for g in body["gear"]] == [
         ("match", 1, ["Big Game Hunter", "Harmonization: Big Game Hunter"])
+    ]
+    # Each named item comes with what comparing gear needs; stats only where the data has them.
+    assert body["gear"][0]["items"] == [
+        {
+            "name": "Big Game Hunter",
+            "rarity": "Rare",
+            "slot": "Weapon",
+            "text": "Big Game Hunter effect",
+            "stats": {"ATK": "25/41/56/67/74"},
+        },
+        {
+            "name": "Harmonization: Big Game Hunter",
+            "rarity": "Rare",
+            "slot": "Weapon",
+            "text": "Harmonization: Big Game Hunter effect",
+        },
     ]
 
 

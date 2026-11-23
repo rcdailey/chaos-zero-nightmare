@@ -447,9 +447,16 @@ first and left to right within a row, with `row` counting rows from 1:
 {"model": "dinov2-small", "gear": [
   {"box": [2224, 561, 2393, 730], "row": 1, "result": "match", "icons": ["relics/relic_5084"],
    "names": ["Runic Hammer"], "candidates": ["relics/relic_5084", "relics/relic_5041",
-   "relics/relic_5029"], "scores": [0.94, 0.59, 0.59]}
+   "relics/relic_5029"], "scores": [0.94, 0.59, 0.59],
+   "items": [{"name": "Runic Hammer", "rarity": "Legendary", "slot": "Weapon",
+     "text": "+20% Critical Damage to ally Unique Attack Cards (cannot stack)",
+     "stats": {"ATK": "28/45/62/74/82"}}]}
 ]}
 ```
+
+`items` holds each named item's rarity, slot, effect text, and stats per upgrade level (only
+where the data has them; Harmonization and other forms have none), so gear can be compared
+without another lookup.
 
 - `match`: one icon is at least 0.7 similar and leads every other by 0.1 or more.
 - `close`: the best two are within 0.1; `icons` and `names` hold both.

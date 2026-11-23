@@ -14,7 +14,18 @@ data class ScreenSlot(
     val row: Int,
     /** `match` (the items drawn with one icon) or `close` (with either of two icons). */
     val result: String,
-    val names: List<String> = emptyList(),
+    val items: List<ScreenItem> = emptyList(),
+)
+
+/** An item a slot's icon may show, with what comparing gear needs. */
+@Serializable
+data class ScreenItem(
+    val name: String,
+    val rarity: String,
+    val slot: String,
+    val text: String,
+    /** Stat name to its values per upgrade level, such as "ATK" to "28/45/62/74/82". */
+    val stats: Map<String, String> = emptyMap(),
 )
 
 @Serializable
@@ -53,21 +64,28 @@ class ScreenGear(
         val IDENTIFY_GEAR_URL = CznDataAuth.MCP_URL.removeSuffix("/mcp") + "/identify-gear"
 
         /**
-         * The line Claude reads, such as "Gear in slots, by row from the top, left to right: row
-         * 1: Runic Hammer; Crown of Corruption or Fairy King's Crown. row 2: Big Game Hunter /
-         * Harmonization: Big Game Hunter"; null when the server named no slot.
+         * The text Claude reads: a heading, then one line per named slot, such as "row 1: Runic
+         * Hammer (Legendary Weapon, ATK 28/45/62/74/82): +20% Critical Damage ..."; null when
+         * the server named no slot. Slots are not numbered: left-out slots (empty ones) would
+         * shift the numbers.
          */
         fun describe(slots: List<ScreenSlot>): String? {
             if (slots.isEmpty()) return null
-            val rows =
-                slots.groupBy(ScreenSlot::row).toSortedMap().map { (row, inRow) ->
-                    "row $row: " +
-                        inRow.joinToString("; ") { slot ->
-                            slot.names.joinToString(if (slot.result == "close") " or " else " / ")
-                        }
+            val lines =
+                slots.sortedBy(ScreenSlot::row).map { slot ->
+                    "row ${slot.row}: " +
+                        slot.items.joinToString(
+                            if (slot.result == "close") " or " else " / ",
+                            transform = ::describe,
+                        )
                 }
-            return "Gear in slots, by row from the top, left to right: " +
-                rows.joinToString(". ")
+            return "Gear in slots, by row from the top, left to right:\n" + lines.joinToString("\n")
+        }
+
+        private fun describe(item: ScreenItem): String {
+            val stats = item.stats.entries.joinToString("") { (stat, values) -> ", $stat $values" }
+            val text = item.text.replace(Regex("\\s*\n\\s*"), " ")
+            return "${item.name} (${item.rarity} ${item.slot}$stats): $text"
         }
     }
 }

@@ -400,11 +400,14 @@ object MessagesRequest {
             """
             Names the equipment drawn as icons in square slots on this request's screenshot, such
             as what each character wears on the Equipment screen, by comparing each slot with
-            every equipment icon. Returns a line "Gear in slots, by row from the top, left to
-            right: row 1: ...; ...": "A / B" means items drawn with the same icon, which the
-            screen cannot tell apart; "A or B" means one of two icons, too close to choose. Slots
-            left out showed no known icon, such as empty ones. Gear outside square slots (shop
-            items, reward cards) is not named; those screens print the name.
+            every equipment icon. Returns one line per named slot, by row from the top and left
+            to right ("row 1: ..."; a left-out slot shifts the rest of its row left), each item as "Name (rarity slot, stat values per
+            upgrade level): effect", so worn gear needs no further lookup; stats are left out
+            where the data has none. "A / B" means items drawn with the same icon, such as a base
+            item and its Harmonization form: which one is worn is unknown unless the screen
+            shows it. "A or B" means one of two icons, too close to choose. Slots left out
+            showed no known icon, such as empty ones. Gear outside square slots (shop items,
+            reward cards) is not named; those screens print the name.
             """,
             emptyMap(),
             emptyList(),

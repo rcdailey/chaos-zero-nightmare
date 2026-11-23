@@ -811,7 +811,11 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
             """
             SELECT p.icon_name, p.prints,
                    array_agg(DISTINCT e.name ORDER BY e.name)
-                       FILTER (WHERE e.name IS NOT NULL) AS names
+                       FILTER (WHERE e.name IS NOT NULL) AS names,
+                   jsonb_agg(jsonb_strip_nulls(jsonb_build_object(
+                       'name', e.name, 'rarity', e.rarity, 'slot', e.slot, 'text', e.text,
+                       'stats', nullif(e.stats, '{}'::jsonb))))
+                       FILTER (WHERE e.name IS NOT NULL) AS items
             FROM e7bot.gear_print p
             LEFT JOIN equipment e ON e.icon_name = p.icon_name
             WHERE p.digest = %(code)s
@@ -838,7 +842,17 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
                 "bytes": len(image),
             },
         )
-        return JSONResponse({"model": GEAR_MODEL, "gear": [asdict(slot) for slot in gear]})
+        # Each slot carries its items' details, so Claude can compare worn gear without
+        # looking every name up.
+        items = {item["name"]: item for row in rows for item in row.get("items", [])}
+        return JSONResponse(
+            {
+                "model": GEAR_MODEL,
+                "gear": [
+                    asdict(slot) | {"items": [items[name] for name in slot.names]} for slot in gear
+                ],
+            }
+        )
 
     @tool
     async def lookup(name: str, kind: LookupKind | None = None, limit: int = 10) -> list[dict]:

@@ -58,9 +58,19 @@ topics the companion could not answer during a Chaos run:
   Refinement string is about equipment or town research. Only one Stove post mentions the
   Atelier. No source states crafting costs, refinement odds, or what Processing does.
 - Pacts: the strings hold only the pact picker's prompts ("Select a pact according to the
-  Revelation.", "All 2 types of pacts are engraved."), not what each pact does.
+  Revelation.", "All 2 types of pacts are engraved."), not what each pact does. Web sources
+  checked 2026-11-22 (Game8's Celestial Bulwark guide and Fate list, namu.wiki's Celestial
+  Bulwark page, arca.live, Stove notice snippets) describe no pact. GameWith's Fate list
+  (`https://gamewith.net/chaoszeronightmare/72954`, updated 2026-04-05) has a Season fate named
+  Diligence ("Each time upon defeating an monster for the first time in a turn, gain 1 Action
+  Point and Draw 1 card"), but calls it a fate and lists no Temerity, so the link to pacts is
+  unconfirmed. The Korean picker string would settle the name.
 - Overload: a status card and a monster gimmick title; no explanation in a tip page, keyword
-  tooltip, or Help topic.
+  tooltip, or Help topic. Game8 (`https://game8.co/games/Chaos-Zero-Nightmare/archives/568796`,
+  updated 2026-01-13) lists it as a 1-cost Status Ailment with only Exhaust. The Neutral card
+  Overwhelm creates 2 Overload in the Draw Pile (card data). No source checked names the
+  enemies or gimmick that add it, or a counter. The Game8 page is not scraped: its cost and
+  Exhaust tag do not answer what Overload does, where it comes from, or how to deal with it.
 - Planned Revelation: the event's name and season skills that add Etched Memory searches; its
   choices and rewards are only in Stove posts and Game8, which `search_posts` and
   `search_game_systems` serve.

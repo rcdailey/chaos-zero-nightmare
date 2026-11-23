@@ -1,8 +1,8 @@
 """Measure the search ranking (``czn_data.search``) on questions with known answers.
 
 ``search_eval.toml`` lists questions and the passages that answer them. For each, the search
-runs against the database's real passages; a case is found when an expected passage is among
-the first TOP. Recall is the share of cases found; MRR (mean reciprocal rank) averages 1/rank
+runs against the database's real passages, each kind ranked on its own as the search tool shows
+them; a case is found when an expected passage is among its kind's first TOP. Recall is the share of cases found; MRR (mean reciprocal rank) averages 1/rank
 of the first expected passage, 0 when it is past MAX_RANK. The daily run exports both, so a
 change in the data that buries answers shows on the dashboard.
 """
@@ -16,7 +16,7 @@ import psycopg
 from opentelemetry.metrics import Meter
 
 from . import digest, metrics
-from .search import TOOL_SOURCES, search
+from .search import ALL_SOURCES, KIND_SOURCES, kind_of, rank_by_kind, search
 
 TOP = 5
 MAX_RANK = 20
@@ -24,7 +24,7 @@ MAX_RANK = 20
 
 @dataclass
 class CaseResult:
-    tool: str
+    kind: str  # the search kind of the case's first expected passage
     query: str
     rank: int | None  # of the first expected passage, from 1; None when past MAX_RANK
     top: list[str]  # the first TOP passages, as "source: title > heading"
@@ -81,37 +81,40 @@ async def evaluate(database_url: str) -> EvalResult:
     results = []
     async with await psycopg.AsyncConnection.connect(database_url) as conn:
         for case in cases():
-            ranked = await search(conn, TOOL_SOURCES[case["tool"]], case["query"])
-            rank = next(
-                (
-                    n
-                    for n, passage in enumerate(ranked[:MAX_RANK], 1)
-                    if any(_matches(passage, e) for e in case["expect"])
-                ),
-                None,
-            )
+            # Searched as the search tool does by default: every kind, each ranked on its own
+            # (rank 1 is the full text it shows, 2 to TOP its one-line matches).
+            by_kind = rank_by_kind(await search(conn, ALL_SOURCES, case["query"]))
+            ranks = [
+                n
+                for rows in by_kind.values()
+                for n, passage in enumerate(rows[:MAX_RANK], 1)
+                if any(_matches(passage, e) for e in case["expect"])
+            ]
+            rank = min(ranks, default=None)
             top = [
                 f"{p['source']}: {p['title']}" + (f" > {p['heading']}" if p["heading"] else "")
-                for p in ranked[:TOP]
+                for rows in by_kind.values()
+                for p in rows[:TOP]
             ]
-            results.append(CaseResult(case["tool"], case["query"], rank, top))
+            kind = kind_of(case["expect"][0]["source"])
+            results.append(CaseResult(kind, case["query"], rank, top))
     return EvalResult(results)
 
 
 def export_metrics(result: EvalResult) -> bool:
-    """Send recall and MRR, overall and per tool (see ``czn_data.metrics``); False if the
-    export failed."""
+    """Send recall and MRR, overall and per search kind (see ``czn_data.metrics``); False if
+    the export failed."""
 
     def record(meter: Meter) -> None:
         recall = meter.create_gauge("czn.search.recall", description=f"Share found in top {TOP}")
         mrr = meter.create_gauge("czn.search.mrr", description="Mean reciprocal rank")
         recall.set(result.recall)
         mrr.set(result.mrr)
-        for tool in TOOL_SOURCES:
-            part = EvalResult([c for c in result.cases if c.tool == tool])
+        for kind in KIND_SOURCES:
+            part = EvalResult([c for c in result.cases if c.kind == kind])
             if part.cases:
-                recall.set(part.recall, {"tool": tool})
-                mrr.set(part.mrr, {"tool": tool})
+                recall.set(part.recall, {"kind": kind})
+                mrr.set(part.mrr, {"kind": kind})
         meter.create_gauge("czn.search.last_run.timestamp", unit="s").set(time.time())
 
     return metrics.export("czn_data.search", record)

@@ -72,8 +72,8 @@ topics the companion could not answer during a Chaos run:
   enemies or gimmick that add it, or a counter. The Game8 page is not scraped: its cost and
   Exhaust tag do not answer what Overload does, where it comes from, or how to deal with it.
 - Planned Revelation: the event's name and season skills that add Etched Memory searches; its
-  choices and rewards are only in Stove posts and Game8, which `search_posts` and
-  `search_game_systems` serve.
+  choices and rewards are only in Stove posts and Game8, which the `search` tool
+  serves.
 
 ## How the game gets its data
 

@@ -8,7 +8,6 @@
 # player question went unanswered.
 
 [[case]]
-tool = "search_game_systems"
 query = "Save Data start a Chaos run with saved data"
 expect = [
     { source = "help", title = "Save Rules for Faint Memories" },
@@ -16,7 +15,6 @@ expect = [
 ]
 
 [[case]]
-tool = "search_game_systems"
 query = "When I start a Chaos run, can I start from an existing Save Data and edit it, or do I start fresh every time?"
 expect = [
     { source = "help", title = "Save Rules for Faint Memories" },
@@ -24,22 +22,18 @@ expect = [
 ]
 
 [[case]]
-tool = "search_game_systems"
 query = "what is the Save Data Storage Limit?"
 expect = [{ source = "help", title = "Save Data Storage Limit" }]
 
 [[case]]
-tool = "search_game_systems"
 query = "what does Distortion Adaptation do?"
 expect = [{ source = "game8", title = "Distortion Adaptation Explained" }]
 
 [[case]]
-tool = "search_game_systems"
 query = "how many points does removing a starting card cost in save data"
 expect = [{ source = "help", title = "Save Rules for Faint Memories" }]
 
 [[case]]
-tool = "search_game_systems"
 query = "how do I remove a card from my deck"
 expect = [
     { source = "game8", title = "Beginner's Guide", heading = "Removing Cards" },
@@ -48,17 +42,14 @@ expect = [
 ]
 
 [[case]]
-tool = "search_game_systems"
 query = "waypoint area"
 expect = [{ source = "help", title = "Waypoint Area" }]
 
 [[case]]
-tool = "search_game_systems"
 query = "how many Corrupted Data can I keep"
 expect = [{ source = "help", title = "Corrupted Data" }]
 
 [[case]]
-tool = "search_game_systems"
 query = "Spiral Tower of Screams"
 expect = [
     { source = "help", title = "Spiral Tower of Screams" },
@@ -66,7 +57,6 @@ expect = [
 ]
 
 [[case]]
-tool = "search_game_systems"
 query = "spiral towr"
 expect = [
     { source = "help", title = "Spiral Tower of Screams" },
@@ -74,7 +64,6 @@ expect = [
 ]
 
 [[case]]
-tool = "search_game_systems"
 query = "Full-Scale Offensive"
 expect = [
     { source = "help", title = "Full-Scale Offensive" },
@@ -82,12 +71,10 @@ expect = [
 ]
 
 [[case]]
-tool = "search_game_systems"
 query = "card synergy"
 expect = [{ source = "help", title = "Card Synergy" }]
 
 [[case]]
-tool = "search_game_systems"
 query = "how does stress work"
 expect = [
     { source = "help", title = "Stress" },
@@ -95,7 +82,6 @@ expect = [
 ]
 
 [[case]]
-tool = "search_game_systems"
 query = "link crash"
 expect = [
     { source = "help", title = "Link Crash" },
@@ -103,7 +89,6 @@ expect = [
 ]
 
 [[case]]
-tool = "search_game_systems"
 query = "what happens on a mental breakdown"
 expect = [
     { source = "help", title = "Mental Breakdown" },
@@ -111,12 +96,10 @@ expect = [
 ]
 
 [[case]]
-tool = "search_game_systems"
 query = "what does nightmare mode change"
 expect = [{ source = "help", title = "Nightmare Mode" }]
 
 [[case]]
-tool = "search_game_systems"
 query = "what is an epiphany"
 expect = [
     { source = "help", title = "Card Epiphany" },
@@ -125,7 +108,6 @@ expect = [
 ]
 
 [[case]]
-tool = "search_game_systems"
 query = "how to get divine epiphany"
 expect = [
     { source = "help", title = "Divine Epiphany" },
@@ -133,32 +115,26 @@ expect = [
 ]
 
 [[case]]
-tool = "search_game_systems"
 query = "gacha pity"
 expect = [{ source = "game8", title = "Pity Guide" }]
 
 [[case]]
-tool = "search_game_systems"
 query = "how do Ego points work"
 expect = [{ source = "help", title = "Ego Points" }]
 
 [[case]]
-tool = "search_game_systems"
 query = "tenacity"
 expect = [{ source = "help", title = "Tenacity" }]
 
 [[case]]
-tool = "search_game_systems"
 query = "what happens when my draw pile runs out"
 expect = [{ source = "help", title = "Shuffling" }]
 
 [[case]]
-tool = "search_game_systems"
 query = "codex"
 expect = [{ source = "help", title = "Codex" }]
 
 [[case]]
-tool = "search_game_systems"
 query = "how do I upgrade potentials"
 expect = [
     { source = "help", title = "Potential" },
@@ -166,17 +142,14 @@ expect = [
 ]
 
 [[case]]
-tool = "search_game_systems"
 query = "dellang shop"
 expect = [{ source = "help", title = "Dellang Shop" }]
 
 [[case]]
-tool = "search_game_systems"
 query = "dismantle save data"
 expect = [{ source = "help", title = "Save Data Dismantling" }]
 
 [[case]]
-tool = "search_game_systems"
 query = "nebula distortion which save data can I use"
 expect = [
     { source = "game8", title = "Nebula Distortion Guide" },
@@ -184,7 +157,6 @@ expect = [
 ]
 
 [[case]]
-tool = "search_game_systems"
 query = "auto battle"
 expect = [
     { source = "help", title = "Command Delegation" },
@@ -193,27 +165,22 @@ expect = [
 ]
 
 [[case]]
-tool = "search_game_systems"
 query = "how to recharge aether stamina"
 expect = [{ source = "game8", title = "Stamina Guide" }]
 
 [[case]]
-tool = "search_game_systems"
 query = "core of potential"
 expect = [{ source = "game8", title = "How to Get Core of Potential" }]
 
 [[case]]
-tool = "search_game_systems"
 query = "max hand size"
 expect = [{ source = "game8", title = "Hand Size" }]
 
 [[case]]
-tool = "search_game_systems"
 query = "what is initiative"
 expect = [{ source = "game8", title = "What is Initiative?" }]
 
 [[case]]
-tool = "search_game_systems"
 query = "zero system"
 expect = [
     { source = "help", title = "Zero System" },
@@ -221,7 +188,6 @@ expect = [
 ]
 
 [[case]]
-tool = "search_game_systems"
 query = "are farmed decks all or nothing or can I mix and match"
 expect = [
     { source = "help", title = "Build Preset" },
@@ -229,60 +195,54 @@ expect = [
 ]
 
 [[case]]
-tool = "search_game_systems"
 query = "team preset save data"
 expect = [
     { source = "help", title = "Build Preset" },
     { source = "game_text", title = "Messages: team" },
     { source = "game_text", title = "Messages: preset" },
+    { source = "post", heading = "[Team Preset] Save Data Formation" },
 ]
 
 [[case]]
-tool = "search_posts"
 query = "season restrictions"
 expect = [{ source = "post", heading = "Restriction" }]
 
 [[case]]
-tool = "search_posts"
 query = "supply store shop"
 expect = [{ source = "post", heading = "Supply Store" }]
 
 [[case]]
-tool = "search_posts"
 query = "environment variables"
-expect = [{ source = "post", heading = "Environment Variable" }]
+expect = [
+    { source = "post", heading = "Environment Variable" },
+    { source = "help", title = "Environment Variables" },
+    { source = "game8", title = "Environment Variables Guide" },
+]
 
 [[case]]
-tool = "search_posts"
 query = "Blazebell rate up"
 expect = [{ source = "post", title = "Blazebell / Vivian Rate-Up" }]
 
 [[case]]
-tool = "search_posts"
 query = "twitch drops"
 expect = [{ source = "post", title = "Twitch/CHZZK Drops" }]
 
 [[case]]
-tool = "search_guides"
 query = "Rossweisse best partners"
 expect = [{ source = "guide", title = "Rossweisse", heading = "Best Partners" }]
 
 [[case]]
-tool = "search_guides"
 query = "best memory fragments for Mika"
 expect = [{ source = "guide", title = "Mika", heading = "Fragment" }]
 
 [[case]]
-tool = "search_guides"
 query = "should I reroll"
 expect = [{ source = "guide", title = "Reroll Guide" }]
 
 [[case]]
-tool = "search_guides"
 query = "damage formula"
 expect = [{ source = "guide", title = "Damage, Shielding & Healing Formula" }]
 
 [[case]]
-tool = "search_guides"
 query = "free characters"
 expect = [{ source = "guide", title = "Free Characters" }]

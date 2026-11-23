@@ -162,22 +162,20 @@ def add_e7bot(conn, path: str, body):
     )
 
 
-def test_get_character_lists_sections_and_returns_one_at_a_time(call, conn):
+def test_character_guide_gives_the_profile_by_default_and_several_parts_in_one_call(call, conn):
     tag_female(conn)
-    summary = call("get_character", name="mei lin")
-    assert {"name: Mei Lin", "gender: female"} <= set(summary.splitlines())
-    (sections,) = lines_with(summary, "sections: ")
-    for name in ("cards", "potentials", "teams", "decks", "equipment", "Pros", "Stats"):
-        assert name in sections.removeprefix("sections: ").split(", ")
+    profile = call("character_guide", name="mei lin")
+    assert "gender: female" in lines_with(profile, "gender: ")
+    (parts,) = lines_with(profile, "parts: ")
+    for part in ("plan", "teams", "synergies", "cards", "potentials", "equipment", "Pros", "Stats"):
+        assert part in parts.removeprefix("parts: ").split(", ")
 
-    teams = call("get_character", name="mei lin", section="teams")
-    assert lines_with(teams, "Spire Fire") == [
-        "- Spire Fire; tier: T1; members: Mei Lin, Veronica, Tiphera"
-    ]
-    assert "gender" not in teams  # a section reply repeats no profile
-
-    stats = call("get_character", name="mei lin", section="stats")
-    assert lines_with(stats, "Stats") == ["- Stats; text: CRIT Rate > CRIT DMG"]
+    reply = call("character_guide", name="mei lin", parts=["teams", "stats", "nonsense"])
+    (team,) = lines_with(reply, "- Spire Fire")
+    assert team.startswith("- Spire Fire; guide_tier: T1; members: Mei Lin, Veronica, Tiphera")
+    assert lines_with(reply, "- Stats") == ["- Stats; text: CRIT Rate > CRIT DMG"]
+    assert "gender" not in reply  # only the parts asked for
+    assert "No part 'nonsense'. Parts: profile, plan" in top_field(reply, "note")
 
 
 def test_guide_decks_carry_deck_code_and_farming_zone(call, conn):
@@ -189,13 +187,10 @@ def test_guide_decks_carry_deck_code_and_farming_zone(call, conn):
     parsed = parse_page(CHARACTER_URL, html)
     store.save_page(conn, CHARACTER_URL, "character", html, datetime.now(UTC), parsed, None)
 
-    for reply in (
-        call("get_character", name="mei lin", section="decks"),
-        call("plan_deck", character="mei lin"),
-    ):
-        (deck,) = lines_with(reply, "Standard Dragon Spire")
-        assert "code: v6l8cOji" in deck
-        assert "farming_zone: Celestial Bulwark (Season-5)" in deck
+    reply = call("character_guide", name="mei lin", parts=["plan"])
+    (deck,) = lines_with(reply, "Standard Dragon Spire")
+    assert "code: v6l8cOji" in deck
+    assert "farming_zone: Celestial Bulwark (Season-5)" in deck
 
 
 def test_deck_notes_leave_out_the_disclaimer_every_deck_repeats(call, conn):
@@ -207,13 +202,13 @@ def test_deck_notes_leave_out_the_disclaimer_every_deck_repeats(call, conn):
     parsed = parse_page(CHARACTER_URL, html)
     store.save_page(conn, CHARACTER_URL, "character", html, datetime.now(UTC), parsed, None)
 
-    reply = call("get_character", name="mei lin", section="decks")
+    reply = call("character_guide", name="mei lin", parts=["plan"])
 
     assert "notes: Buff Spire." in reply
     assert "exhaustive" not in reply and "Teams Database" not in reply
 
 
-def test_list_banners_shows_live_then_upcoming_and_hides_ended(call, conn):
+def test_listing_banners_shows_live_then_upcoming_and_hides_ended(call, conn):
     now = datetime.now(UTC)
 
     def save(url, name, start, end):
@@ -225,21 +220,15 @@ def test_list_banners_shows_live_then_upcoming_and_hides_ended(call, conn):
     save(f"{BANNERS_URL}?live", "Blazebell", now - day, now + 2 * day)
     save(f"{BANNERS_URL}?ended", "Tiphera", now - 9 * day, now - day)
 
-    banners = lines_with(call("list_banners"), "kind: character")
+    banners = lines_with(call("list", kind="banners"), "kind: character")
 
     assert [line.split("; status: ")[1].split(";")[0] for line in banners] == ["live", "upcoming"]
     assert [line.split(";")[0] for line in banners] == ["- Blazebell", "- Dahlia"]
 
 
-def test_search_guides_finds_pages_missing_some_query_words(call):
-    reply = call("search_guides", query="Mei Lin Policy Office")
-    assert [line.split("; data_fetched_at")[0] for line in lines_with(reply, "url: ")] == [
-        f"- Mei Lin; url: {CHARACTER_URL}"
-    ]
-
-
-def guide_urls(reply: str) -> list[str]:
-    return [line.split("url: ")[1].split(";")[0] for line in lines_with(reply, "url: ")]
+def test_search_finds_guide_pages_missing_some_query_words(call):
+    reply = call("search", query="Mei Lin Policy Office", kinds=["guides"])
+    assert lines_with(reply, "kind: guide")[0].startswith("- Mei Lin; kind: guide")
 
 
 def add_guide(conn, url: str, title: str, sections: dict[str, str]) -> None:
@@ -249,21 +238,7 @@ def add_guide(conn, url: str, title: str, sections: dict[str, str]) -> None:
     store.save_page(conn, url, "document", html, datetime.now(UTC), parse_page(url, html), None)
 
 
-def test_get_page_pages_long_text_by_character_offset(call, conn):
-    url = "https://www.prydwen.gg/chaos-zero-nightmare/guides/long"
-    body = "a" * 15_000 + "b" * 5_000
-    store.save_page(conn, url, "guide", body, datetime.now(UTC), ParsedPage("Long", body), None)
-
-    first = call("get_page", url=url)
-    rest = call("get_page", url=url, offset=15_000)
-
-    assert (top_field(first, "length"), top_field(first, "body")) == ("20000", "a" * 15_000)
-    assert "offset=15000" in top_field(first, "note")
-    assert top_field(rest, "body") == "b" * 5_000
-    assert top_field(rest, "note") is None
-
-
-def test_search_guides_returns_the_matching_section_without_the_site_menu(call, conn):
+def test_search_returns_the_matching_guide_section_without_the_site_menu(call, conn):
     url = "https://www.prydwen.gg/chaos-zero-nightmare/guides/partners"
     add_guide(
         conn,
@@ -272,14 +247,35 @@ def test_search_guides_returns_the_matching_section_without_the_site_menu(call, 
         {"Overview": "Partners join a team.", "Best Partner for Zorblax": "Use Quuxite E4."},
     )
 
-    reply = call("search_guides", query="best partner for zorblax", limit=1)
+    reply = call("search", query="best partner for zorblax", kinds=["guides"])
 
-    (section,) = lines_with(reply, "offset: ")
-    assert section.startswith("- Best Partner for Zorblax; text: Use Quuxite E4.;")
-    (offset,) = [int(f.split(": ")[1]) for f in section.split("; ") if f.startswith("offset: ")]
-    page = call("get_page", url=url, offset=offset, length=len("Use Quuxite E4."))
-    assert top_field(page, "body") == "Use Quuxite E4."
-    assert "Home Guides" not in call("get_page", url=url)
+    shown = reply.split("\nmore:")[0]
+    assert lines_with(shown, "Best Partner") == [
+        "- Best Partner for Zorblax; text: Use Quuxite E4."
+    ]
+    assert "Home Guides" not in reply
+
+
+def test_search_lists_later_matches_in_one_line_and_reads_them_by_ref(call, conn):
+    add_guide(
+        conn,
+        "https://www.prydwen.gg/chaos-zero-nightmare/guides/partners",
+        "Partners Guide",
+        {"Best Partner for Zorblax": "Use Quuxite E4.", "Zorblax Partner Tips": "Pair E2."},
+    )
+
+    reply = call("search", query="zorblax partner", kinds=["guides"])
+    refs = more_refs(reply)
+    read = call("search", read=[*refs, "nonesuch"])
+
+    # Each kind's best match comes in full; its later matches come as one line, without text.
+    assert len(full_sections(reply)) == 1 and refs
+    assert all("text:" not in line for line in reply.split("\nmore:")[1].splitlines())
+    shown = full_sections(reply)[0]["text"]
+    (other,) = {"Use Quuxite E4.", "Pair E2."} - {shown}
+    assert other in [s["text"] for s in full_sections(read)]
+    assert len(full_sections(read)) == len(refs)
+    assert "No passage nonesuch" in top_field(read, "note")
 
 
 def add_post(conn, article_id: str, title: str, content: str):
@@ -289,7 +285,7 @@ def add_post(conn, article_id: str, title: str, content: str):
     )
 
 
-def test_search_posts_by_words_typo_title_and_active_date(call, conn):
+def test_search_finds_announcements_by_words_typo_title_and_active_date(call, conn):
     add_post(
         conn,
         "1",
@@ -300,28 +296,32 @@ def test_search_posts_by_words_typo_title_and_active_date(call, conn):
     )
     add_post(conn, "2", "Teatime Event", "<p>◆ Event Period: 11/01/2026 – 11/05/2026</p>")
 
-    restrictions = call("search_posts", query="season restrictions")
-    (post,) = lines_with(restrictions, "- 11/11(Wed) Update Notice;")
-    assert "/view/1" in post and "board: Update Notice" in restrictions
+    restrictions = call("search", query="season restrictions", kinds=["announcements"])
+    assert len(lines_with(restrictions, "- 11/11(Wed) Update Notice;")) == 1
+    assert "kind: announcement" in restrictions and "board: Update Notice" in restrictions
     assert "      - ■ Season Restrictions; text: Cards: Acid Gas" in restrictions.splitlines()
 
-    typo = call("search_posts", query="Teatme Evnt")
-    assert lines_with(typo, "- ")[0].startswith("- Teatime Event;")
+    typo = call("search", query="Teatme Evnt", kinds=["announcements"])
+    assert lines_with(typo, "- ")[0].startswith("- Teatime Event")
 
-    active = call("search_posts", active_on="2026-11-20")
-    (post,) = lines_with(active, "- 11/11(Wed) Update Notice;")
+    active = call("search", active_on="2026-11-20")
     assert "every item: starts_on: 2026-11-11; ends_on: 2026-12-02" in active
-    assert section_headings(active) == [
-        "■ New Combatant [Blazebell] Rescue Rate-Up",
+    assert active_matches(active) == [
+        "11/11(Wed) Update Notice > ■ New Combatant [Blazebell] Rescue Rate-Up",
         (
-            "■ New Combatant [Blazebell] Rescue Rate-Up > ◆ Rate-Up Period: 11/11/2026 after"
-            " the maintenance – 12/02/2026 before the maintenance"
+            "11/11(Wed) Update Notice > ■ New Combatant [Blazebell] Rescue Rate-Up > ◆ Rate-Up"
+            " Period: 11/11/2026 after the maintenance – 12/02/2026 before the maintenance"
         ),
     ]
 
 
+def active_matches(reply: str) -> list[str]:
+    """The title > heading of each one-line match in a search reply listing active sections."""
+    return [line.split("; match: ")[1].split(";")[0] for line in lines_with(reply, "; match: ")]
+
+
 def section_headings(reply: str) -> list[str]:
-    """The heading of each section in a search_posts reply, under its post."""
+    """The heading of each section in a search reply, under its page."""
     return [
         line.removeprefix("      - ").split(";")[0]
         for line in reply.splitlines()
@@ -329,47 +329,55 @@ def section_headings(reply: str) -> list[str]:
     ]
 
 
-def test_search_posts_pages_through_every_match(call, conn):
-    sections = "".join(f"<p>◆ Event {n} Period: 11/01/2026 – 11/30/2026</p>" for n in range(3))
+def test_search_lists_every_active_announcement_in_one_line_to_read_by_ref(call, conn):
+    sections = "".join(f"<p>◆ Event {n} Period: 11/01/2026 – 11/30/2026</p>" for n in range(30))
     add_post(conn, "1", "Events", sections)
 
-    first = call("search_posts", active_on="2026-11-20", limit=2)
-    rest = call("search_posts", active_on="2026-11-20", limit=2, offset=2)
+    active = call("search", active_on="2026-11-20")
+    refs = [line.removeprefix("- ").split(";")[0] for line in lines_with(active, "; match: ")]
+    read = call("search", read=refs[:2])
 
-    assert top_field(first, "total") == "3"
-    assert "offset=2" in top_field(first, "note")
-    assert top_field(rest, "note") is None
-    assert sorted(section_headings(first) + section_headings(rest)) == [
-        f"◆ Event {n} Period: 11/01/2026 – 11/30/2026" for n in range(3)
+    assert len(active_matches(active)) == 30 and "text:" not in active
+    assert section_headings(read) == [
+        f"◆ Event {n} Period: 11/01/2026 – 11/30/2026" for n in range(2)
     ]
+    assert all(f"ref: {ref}" in read for ref in refs[:2])  # Claude can tell which text is which
 
 
-def test_search_posts_with_query_and_date_keeps_every_active_match(call, conn):
+def test_search_with_query_and_date_keeps_every_active_announcement(call, conn):
     stale = "".join(
         f"<p>◆ Zorblax Zorblax Contest {n} Period: 10/01/2026 – 10/05/2026</p>" for n in range(40)
     )
     add_post(conn, "1", "Old Events", stale)
     add_post(conn, "2", "Market", "<p>◆ Zorblax Market Period: 11/01/2026 – 11/30/2026</p>")
 
-    reply = call("search_posts", query="zorblax", active_on="2026-11-20")
+    reply = call("search", query="zorblax", active_on="2026-11-20")
 
     assert section_headings(reply) == ["◆ Zorblax Market Period: 11/01/2026 – 11/30/2026"]
 
 
-def test_search_posts_needs_query_or_valid_date(call):
+def test_search_needs_query_or_valid_date(call):
     with pytest.raises(Exception, match="Give query"):
-        call("search_posts")
+        call("search")
     with pytest.raises(Exception, match="YYYY-MM-DD"):
-        call("search_posts", active_on="next week")
+        call("search", active_on="next week")
 
 
-def test_list_characters_filters_by_gender(call, conn):
-    assert call("list_characters", gender="female") == "No results."
+def test_listing_characters_filters_by_gender(call, conn):
+    def female_names(gender: str) -> list[str]:
+        return lines_with(call("list", kind="characters", gender=gender), "- ")
+
+    assert female_names("female") == []
     tag_female(conn)
-    assert call("list_characters", gender="Female") == (
+    assert female_names("Female") == [
         "- Mei Lin; rarity: 5; element: Passion; class: Striker; gender: female"
-    )
-    assert call("list_characters", gender="male") == "No results."
+    ]
+    assert female_names("male") == []
+
+
+def test_list_refuses_a_filter_its_kind_does_not_take(call):
+    with pytest.raises(Exception, match="cards takes no slot; its filters: base_only"):
+        call("list", kind="cards", slot="Weapon")
 
 
 def test_characters_route_gives_programs_names_and_card_art_as_json(
@@ -389,11 +397,12 @@ def test_characters_route_gives_programs_names_and_card_art_as_json(
 
 
 def test_synergies_combine_synergy_lists_and_teams(call):
-    reply = call("synergies", character="mei lin")
-    assert reply.splitlines() == [
-        "every item: for: Mei Lin; teams: Spire Fire (T1)",
-        "- Veronica; sources: own synergy list, team; reasons: Doubles as a draw unit.",
-        "- Tiphera; sources: team",
+    reply = call("character_guide", name="mei lin", parts=["synergies"])
+    assert reply.splitlines()[1:] == [
+        "synergies:",
+        "  every item: for: Mei Lin; teams: Spire Fire (T1)",
+        "  - Veronica; sources: own synergy list, team; reasons: Doubles as a draw unit.",
+        "  - Tiphera; sources: team",
     ]
 
 
@@ -417,8 +426,8 @@ def test_match_card_text_finds_the_variant_of_each_screen_text(call):
 
 
 def test_lookup_finds_a_version_by_the_name_the_game_shows(call):
-    reply = call("lookup", name="Rising Dragon Spire (Ascended)", kind="card")
-    assert lines_with(reply, "- ")[0].startswith("- Rising Dragon Spire V (Ascended);")
+    reply = call("lookup", names=["Rising Dragon Spire (Ascended)"], kind="card")
+    assert best_names(reply)[0] == "Rising Dragon Spire V (Ascended)"
 
 
 GAME8_URL = "https://game8.co/games/Chaos-Zero-Nightmare/archives/578215"
@@ -443,29 +452,51 @@ def add_game8(conn, html: str = GAME8_HTML, url: str = GAME8_URL):
     )
 
 
+def more_refs(reply: str) -> list[str]:
+    """The refs of a search reply's one-line matches, in order."""
+    lines = reply.splitlines()
+    if "more:" not in lines:
+        return []
+    listed = lines[lines.index("more:") + 1 :]
+    return [line.removeprefix("  - ").split(";")[0] for line in listed if line.startswith("  - ")]
+
+
 def game8_sections(call, query: str) -> list[dict]:
-    """Each section search_game_systems found: its fields, with its page's fields."""
-    reply = call("search_game_systems", query=query, limit=20)
+    """Each guide section search found, best first: the one shown in full, then those it
+    listed in one line, read in full by their refs. Each has its fields and its page's."""
+    reply = call("search", query=query, kinds=["guides"])
+    sections = full_sections(reply)
+    if refs := more_refs(reply):
+        sections += full_sections(call("search", read=refs))
+    return sections
+
+
+def full_sections(reply: str) -> list[dict]:
+    """The sections a search reply gives in full: their fields, with their page's fields."""
     pages_shared, page, sections_shared, sections = {}, {}, {}, []
     for line in reply.splitlines():
+        if line == "more:":
+            break
         if line.startswith("  every item: "):
             pages_shared = fields(line.removeprefix("  every item: "))
         elif line.startswith("  - "):
             title, _, rest = line.removeprefix("  - ").partition("; ")
-            page, sections_shared = pages_shared | {"page_title": title} | fields(rest), {}
+            page, sections_shared = pages_shared | {"title": title} | fields(rest), {}
         elif line.startswith("      every item: "):
             sections_shared = fields(line.removeprefix("      every item: "))
+        elif line == "      -":  # a section whose long text follows on its own lines
+            sections.append(page | sections_shared | {"text": ""})
         elif line.startswith("      - "):
-            # The heading comes first and unlabeled, or on the every item line when shared.
+            # The heading comes first and unlabeled; when shared, it is on the every item line
+            # and the text leads instead.
             item = line.removeprefix("      - ")
-            heading, _, rest = item.partition("; ")
-            named = {"heading": heading} | fields(rest) if ": " not in heading else fields(item)
+            lead, _, rest = item.partition("; ")
+            key = "text" if "heading" in sections_shared else "heading"
+            named = {key: lead} | fields(rest) if ": " not in lead else fields(item)
             sections.append(page | sections_shared | named)
         elif line.startswith("          ") and sections:  # lines of a long section text
             text = sections[-1].get("text")
             sections[-1]["text"] = f"{text}\n{line.strip()}" if text else line.strip()
-        elif line.startswith("      "):
-            page["page_summary"] = line.strip()  # a long page summary, below its page
     return sections
 
 
@@ -501,16 +532,14 @@ def test_game8_sections_carry_parent_headings_and_table_rows_without_navigation(
 
     sections = game8_sections(call, "full-scale offensive aavarck")
 
-    assert sorted((s["heading"], s["text"]) for s in sections) == [
+    found = [s for s in sections if s["title"] == "Full-Scale Offensive Guide"]
+    assert sorted((s["heading"], s["text"]) for s in found) == [
         ("Best Teams > Aavarck Best Teams > Arabella Fracture Team", "Arabella, Mika, Khalipe."),
         ("Bosses > Aavarck", "Effect | Value / DoT Amount | +50%"),
     ]
-    assert {s["page_summary"] for s in sections} == {"A three-team boss mode."}
-    body = top_field(call("get_page", url=GAME8_URL), "body")
-    assert "List of Contents" not in body and "Link list" not in body and "TBD" not in body
 
 
-def test_long_game8_section_is_served_as_overlapping_pieces_located_in_the_page(call, conn):
+def test_long_game8_section_is_served_as_overlapping_pieces(call, conn):
     lines = "".join(f"<p>Line {n} {'x' * 90}</p>" for n in range(60))
     add_game8(
         conn,
@@ -518,41 +547,24 @@ def test_long_game8_section_is_served_as_overlapping_pieces_located_in_the_page(
         f'<h2 class="a-header--2">Long Rules</h2>{lines}</div></body></html>',
     )
 
-    pieces = game8_sections(call, "long rules")
-    for piece in pieces:
-        piece["offset"], piece["length"] = int(piece["offset"]), int(piece["length"])
-    pieces.sort(key=lambda s: s["offset"])
+    pieces = [s for s in game8_sections(call, "long rules") if s.get("heading") == "Long Rules"]
 
     assert len(pieces) > 2
-    assert all(s["heading"] == "Long Rules" and s["length"] <= 2000 for s in pieces)
-    assert pieces[1]["offset"] < pieces[0]["offset"] + pieces[0]["length"]  # pieces overlap
-    for piece in pieces:
-        page = call("get_page", url=GAME8_URL, offset=piece["offset"], length=piece["length"])
-        assert top_field(page, "body") == piece["text"]
+    assert all(s["heading"] == "Long Rules" and len(s["text"]) <= 2000 for s in pieces)
+    served = [f"Line {n} " for n in range(60) if any(f"Line {n} " in s["text"] for s in pieces)]
+    assert len(served) == 60
+    assert sum(text.count("Line ") for text in (s["text"] for s in pieces)) > 60  # overlap
 
 
-def test_search_game_systems_returns_matching_sections_with_their_page(call, conn):
+def test_search_returns_game8_sections_with_their_page_title_and_date(call, conn):
     add_game8(conn)
 
     best = game8_sections(call, "does distortion adaptation keep save data")[0]
 
     assert best["heading"] == "Distortion Adaptation Effects > Keep The Save Data From Runs"
     assert best["text"] == "You keep the Save Data you obtain while it is on."
-    assert best["page_title"] == "Distortion Adaptation Explained"
-    assert best["page_summary"].startswith("Distortion Adaptation adjusts")
-    assert (best["url"], best["updated_at"]) == (GAME8_URL, "2026-08-05 06:52 UTC")
-
-
-def test_get_page_reads_the_text_around_a_game8_section(call, conn):
-    add_game8(conn)
-    section = game8_sections(call, "Chapter 1 Episode 10")[0]
-    offset, length = int(section["offset"]), int(section["length"])
-
-    page = call("get_page", url=GAME8_URL, offset=offset, length=length)
-
-    assert top_field(page, "body") == "Available after Chapter 1 Episode 10."
-    before = call("get_page", url=GAME8_URL, offset=offset - 11, length=11)
-    assert top_field(before, "body") == "How to Get"
+    assert best["title"] == "Distortion Adaptation Explained"
+    assert (best["kind"], best["updated_at"]) == ("guide", "2026-08-05 06:52 UTC")
 
 
 def add_game_files(conn, tables: dict[str, list[dict]]):
@@ -564,7 +576,7 @@ def add_game_files(conn, tables: dict[str, list[dict]]):
         )
 
 
-def test_search_game_systems_serves_game_help_topics_first_as_plain_text(call, conn):
+def test_search_serves_game_help_topics_first_as_plain_text(call, conn):
     from czn_data.gamefiles import HELP_MENUS, HELP_PAGES, TEXT
 
     def page(id_, group, sort, title, desc):
@@ -598,11 +610,12 @@ def test_search_game_systems_serves_game_help_topics_first_as_plain_text(call, c
 
     add_game8(conn)
 
-    reply = call("search_game_systems", query="save data storage limit nightmare")
+    reply = call("search", query="save data storage limit nightmare")
 
-    pages = lines_with(reply, "; origin: ")
-    assert pages[0].startswith("- Save Data Storage Limit; origin: Game Help, Chaos Help menu;")
-    assert "url:" not in pages[0]
+    pages = lines_with(reply, "; kind: ")
+    assert pages[0].startswith(
+        "- Save Data Storage Limit; kind: game rules (Help, Chaos Help menu)"
+    )
     # The whole topic, one section per page in order under its title, the best page marked.
     lines = reply.splitlines()
     start = lines.index("    sections:") + 1
@@ -611,13 +624,13 @@ def test_search_game_systems_serves_game_help_topics_first_as_plain_text(call, c
         "      - Nightmare Mode; text: Nightmare Mode adds 10 points. / Always.; best_match: yes",
         "      - Quuxite; text: Zorblax wibble.",
     ]
-    assert any("origin: Game8" in page for page in pages)  # Game8 adds detail
-    tutorial = call("search_game_systems", query="card synergy").splitlines()
-    assert tutorial[2].startswith("  - Card Synergy; origin: Game Help, Tutorial menu;")
-    assert tutorial[3:5] == ["    sections:", "      - Card order matters."]
+    assert any("kind: guide" in page for page in pages)  # guides add detail
+    tutorial = call("search", query="card synergy", kinds=["rules"]).splitlines()
+    assert tutorial[1].startswith("  - Card Synergy; kind: game rules (Help, Tutorial menu)")
+    assert tutorial[2:4] == ["    sections:", "      - Card order matters."]
 
 
-def test_search_game_systems_serves_tutorial_event_and_message_text(call, conn):
+def test_search_serves_tutorial_event_and_message_text(call, conn):
     from czn_data.gamefiles import TEXT
 
     add_game_files(
@@ -637,27 +650,27 @@ def test_search_game_systems_serves_tutorial_event_and_message_text(call, conn):
         },
     )
 
-    tutorial = call("search_game_systems", query="seasonal zorblax")
-    festival = call("search_game_systems", query="quuxite festival")
-    preset = call("search_game_systems", query="wibble preset")
+    tutorial = call("search", query="seasonal zorblax", kinds=["rules"])
+    festival = call("search", query="quuxite festival", kinds=["rules"])
+    preset = call("search", query="wibble preset", kinds=["rules"])
 
     def first_page(reply: str) -> str:
-        return lines_with(reply, "; origin: ")[0]
+        return lines_with(reply, "kind: ")[0]
 
-    assert first_page(tutorial).startswith("- Tutorial; origin: Game text, tutorial dialogue")
+    assert first_page(tutorial).startswith("- Tutorial; kind: game rules (tutorial dialogue)")
     # Headed by its opening line, in script order
     assert (
         "- Welcome to Nebula.; text: Welcome to Nebula. / Only Seasonal Zorblax works." in tutorial
     )
     assert first_page(festival).startswith(
-        "- Quuxite Festival; origin: Game text, event description"
+        "- Quuxite Festival; kind: game rules (event description)"
     )
     assert "Log in daily for Quuxite." in festival
-    assert first_page(preset).startswith("- Messages: preset; origin: Game text, game messages")
+    assert first_page(preset).startswith("- Messages: preset; kind: game rules (game messages)")
     assert "Wibble OK" not in preset  # a label, not an explanation
 
 
-def test_search_game_systems_serves_tip_pages_and_keyword_tooltips(call, conn):
+def test_search_serves_tip_pages_and_keyword_tooltips(call, conn):
     from czn_data.gamefiles import TEXT
 
     add_game_files(
@@ -677,21 +690,21 @@ def test_search_game_systems_serves_tip_pages_and_keyword_tooltips(call, conn):
         },
     )
 
-    waypoint = call("search_game_systems", query="waypoint area")
-    refinement = call("search_game_systems", query="equipment refinement points")
-    retain = call("search_game_systems", query="retain")
+    waypoint = call("search", query="waypoint area", kinds=["rules"])
+    refinement = call("search", query="equipment refinement points", kinds=["rules"])
+    retain = call("search", query="retain", kinds=["rules"])
 
     def first_page(reply: str) -> str:
-        return lines_with(reply, "; origin: ")[0]
+        return lines_with(reply, "kind: ")[0]
 
-    assert first_page(waypoint).startswith("- Waypoint Area; origin: Game text, tip page")
+    assert first_page(waypoint).startswith("- Waypoint Area; kind: game rules (tip page)")
     assert "After the Waypoint, Save Data is saved." in waypoint
     # A Save Data tip page takes its title from the matching reference title.
-    assert first_page(refinement).startswith("- Equipment Refinement; origin: Game text, tip page")
-    assert first_page(retain).startswith("- Retain; origin: Game text, keyword tooltip")
+    assert first_page(refinement).startswith("- Equipment Refinement; kind: game rules (tip page)")
+    assert first_page(retain).startswith("- Retain; kind: game rules (keyword tooltip)")
     assert "This card is not discarded." in retain
     # A title without a description, or a description without its own title, explains nothing.
-    everything = call("search_game_systems", query="quuxite zorblax ark city")
+    everything = call("search", query="quuxite zorblax ark city", kinds=["rules"])
     assert "Quuxite" not in everything and "Zorblax" not in everything
 
 
@@ -720,18 +733,22 @@ def test_game_help_wins_a_tie_with_game8(call, conn):
     # Game8 updated its page after the game files were downloaded.
     conn.execute("UPDATE gamefiles.file SET fetched_at = '2026-01-01'")
 
-    reply = call("search_game_systems", query="link crash")
+    reply = call("search", query="link crash", kinds=["rules", "guides"])
 
-    # Both pages share the title, so it moves to the every item line and origin leads.
-    pages = [line for line in reply.splitlines() if line.startswith("  - ")]
-    assert [page.split(";")[0] for page in pages] == ["  - Game Help, Help menu", "  - Game8"]
+    # Both pages share the title, so it moves to the every item line and kind leads.
+    shown = reply.split("\nmore:")[0]
+    pages = [line for line in shown.splitlines() if line.startswith("  - ")]
+    assert [page.split(";")[0] for page in pages] == [
+        "  - game rules (Help, Help menu)",
+        "  - guide",
+    ]
 
 
-def test_find_teams_by_member(call):
-    reply = call("find_teams", character="veronika")
-    assert reply.splitlines()[0] == "prydwen_teams:"
+def test_teams_list_every_guide_team_with_the_member(call):
+    reply = call("character_guide", name="mei lin", parts=["teams"])
+    assert reply.splitlines()[1:3] == ["teams:", "  guide_teams:"]
     (team,) = lines_with(reply, "- ")
-    assert team.startswith("- Spire Fire;") and "listed_for: Mei Lin;" in team
+    assert team.startswith("- Spire Fire;") and "listed_for: Mei Lin" in team
 
 
 EFFECTS_URL = "https://www.prydwen.gg/chaos-zero-nightmare/guides/effects-dictionary"
@@ -750,24 +767,38 @@ def effects(conn):
     store.save_page(conn, EFFECTS_URL, "effects", "", datetime.now(UTC), page, None)
 
 
+def best_names(reply: str) -> list[str]:
+    """The name of each name's best match in a lookup reply, in order."""
+    return [line.removeprefix("name: ") for line in lines_with(reply, "name: ")]
+
+
 def test_lookup_accepts_keyword_as_effect_and_rejects_unknown_kinds(call, effects):
-    (found,) = lines_with(call("lookup", name="exhaust", kind="keyword"), "- ")
-    assert found.startswith("- Exhaust; kind: effect;")
+    reply = call("lookup", names=["exhaust"], kind="keyword")
+    assert best_names(reply) == ["Exhaust"] and "kind: effect" in lines_with(reply, "kind: ")
     with pytest.raises(Exception, match="kind"):
-        call("lookup", name="exhaust", kind="spell")
+        call("lookup", names=["exhaust"], kind="spell")
 
 
 def test_lookup_finds_terms_defined_inside_other_effects(call, effects):
-    found = lines_with(call("lookup", name="Polarization", kind="effect"), "- ")
-    assert [line.split(";")[0] for line in found] == ["- Equilux"]
+    reply = call("lookup", names=["Polarization"], kind="effect")
+    assert best_names(reply) == ["Equilux"] and "other_matches" not in reply
 
 
 def test_lookup_falls_back_to_similar_spellings_only_when_nothing_else_matches(call, effects):
-    (found,) = lines_with(call("lookup", name="Ionizaton", kind="effect"), "- ")
-    assert found.startswith("- Ionization;")
+    assert best_names(call("lookup", names=["Ionizaton"], kind="effect")) == ["Ionization"]
 
 
-def test_get_partner_returns_ego_skill(call, conn):
+def test_lookup_answers_every_name_in_one_call(call, effects):
+    reply = call("lookup", names=["exhaust", "zzzzzz qqq", "Equilux"], kind="effect")
+    assert best_names(reply) == ["Exhaust", "Equilux"]
+    assert lines_with(reply, "best: No match.") == ["- zzzzzz qqq; best: No match."]
+    many = call("lookup", names=[*["exhaust"] * 10, "Equilux"], kind="effect")
+    assert lines_with(many, "- Equilux") == [
+        "- Equilux; best: Not looked up: at most 10 names per call."
+    ]
+
+
+def test_lookup_gives_a_partners_ego_skill(call, conn):
     sig = {
         "name": "Sig",
         "rarity": 5,
@@ -779,21 +810,19 @@ def test_get_partner_returns_ego_skill(call, conn):
     }
     page = ParsedPage("Partners", "", {"partner": [sig]})
     store.save_page(conn, PARTNERS_URL, "partners", "", datetime.now(UTC), page, None)
-    found = call("get_partner", name="sig")
-    assert (top_field(found, "ego_name"), top_field(found, "ego_cost")) == (
-        "Frail Dominion of Kyrken",
-        "3",
-    )
+    found = call("lookup", names=["sig"])
+    assert "ego_name: Frail Dominion of Kyrken" in lines_with(found, "ego_name")
+    assert "ego_cost: 3" in lines_with(found, "ego_cost")
 
 
-def test_list_cards_filters_by_color(call):
-    listing = call("list_cards", character="meilin", color="white")
+def test_listing_cards_filters_by_color(call):
+    listing = call("list", kind="cards", character="meilin", color="white")
     (white,) = lines_with(listing, "- ")
     assert top_field(listing, "total") == "1"
     assert white.startswith("- Strike;") and "color: White" in white
 
 
-def test_recommended_by_lists_every_place_an_item_is_recommended(call, conn):
+def test_lookup_detail_lists_every_place_guides_recommend_an_item(call, conn):
     fragments = ParsedPage(
         "Memory Fragments",
         "Executioner's Tool",
@@ -801,8 +830,11 @@ def test_recommended_by_lists_every_place_an_item_is_recommended(call, conn):
     )
     store.save_page(conn, FRAGMENTS_URL, "memory_fragments", "", datetime.now(UTC), fragments, None)
 
-    (row,) = lines_with(call("recommended_by", name="executioners tool"), "- ")
-    assert row.startswith("- Executioner's Tool; character: Mei Lin;")
+    brief = call("lookup", names=["executioners tool"], kind="fragment_set")
+    reply = call("lookup", names=["executioners tool"], kind="fragment_set", detail=True)
+
+    assert "recommended_by" not in brief
+    (row,) = lines_with(reply, "- Mei Lin")
     places = row.split("places: ")[1].split(";")[0].split(", ")
     assert sorted(places) == ["deck: Standard Dragon Spire", "fragment ranking: Default #1 100.00%"]
 
@@ -902,102 +934,103 @@ def test_game_facts_come_from_e7bot_with_prydwen_ratings_attached(call, conn, ga
         "SELECT rating FROM prydwen.card WHERE name = 'Rising Dragon Spire V'"
     ).fetchone()
 
-    reply = call("get_card", name="Rising Dragon Spire")
+    reply = call("lookup", names=["Rising Dragon Spire"], kind="card")
 
-    assert f"prydwen_url: {CHARACTER_URL}" in reply
     (base,) = lines_with(reply, "- Rising Dragon Spire;")
     (best,) = lines_with(reply, "- Rising Dragon Spire V;")
     assert "cost: 3" in base and "text: Game text / line two" in base
     assert "variant" not in base  # empty fields are left out
-    assert "text: 9 Hits" in best and f"rating: {rating}" in best
+    assert "text: 9 Hits" in best and f"guide_rating: {rating}" in best
     for internal in ("source", "game_id", "character_slug", "image_url"):
         assert f"{internal}:" not in reply
 
 
 def test_character_e7bot_lacks_is_served_from_prydwen(call):
-    character = call("get_character", name="mei lin")
-    assert top_field(character, "url") == CHARACTER_URL
+    character = call("character_guide", name="mei lin")
+    assert "class: Striker" in lines_with(character, "class: ")
     assert "source:" not in character and "slug:" not in character
 
 
-def test_data_status_reports_both_sources(call, conn, game_data):
+def test_no_tool_reply_names_a_url_source_site_or_fetch_time(call, conn, game_data, effects):
+    add_game8(conn)
+    add_post(conn, "1", "Prydwen Notice", "<p>■ Rate-Up https://example.com/x on Game8</p>")
+    replies = [
+        call("lookup", names=["mei lin", "Rising Dragon Spire", "exhaust", "mirror hall"]),
+        call("lookup", names=["Rising Dragon Spire"], detail=True),
+        call("character_guide", name="mei lin", parts=["profile", "plan", "teams", "synergies"]),
+        call("search", query="rate-up distortion adaptation mei lin"),
+        call("get_encounter", name="mirror hall"),
+        call("match_card_text", texts=["9 Hits"]),
+        call("save_data_cost", character="mei lin", cards=[{"card": "Rising Dragon Spire"}]),
+        call("search", active_on="2026-11-20"),
+        *(call("list", kind=kind) for kind in ("cards", "equipment", "events", "banners")),
+    ]
+    for reply in replies:
+        lowered = reply.lower()
+        for leak in ("http", "prydwen", "game8", "e7bot", "gamewith", "data_fetched_at", "url:"):
+            assert leak not in lowered, (leak, reply)
+
+
+def test_data_status_route_reports_every_source(conn, database_url, monkeypatch, game_data):
+    monkeypatch.setenv("DATABASE_URL", database_url)
     conn.execute(
         "INSERT INTO e7bot.run (started_at, finished_at, ok, error)"
         " VALUES (now(), now(), false, 'czn/cards/list: HTTP 500')"
     )
-    status = call("data_status")
-    assert top_field(status, "prydwen").startswith("pages: 1\n")
-    e7bot = top_field(status, "e7bot").splitlines()
-    assert "error: czn/cards/list: HTTP 500" in e7bot
-    assert any(line.startswith("data_fetched_at: ") for line in e7bot)
-    assert top_field(status, "stove") == "posts: 0"
+    build(conn)
+    app = build_server(None, None).streamable_http_app()
+
+    status = TestClient(app).get("/data-status").json()
+
+    assert status["prydwen"]["pages"] == 0
+    assert status["e7bot"]["error"] == "czn/cards/list: HTTP 500"
+    assert status["e7bot"]["data_fetched_at"]
+    assert status["stove"]["posts"] == 0
 
 
-def test_plan_deck_ranks_epiphanies_and_caps_removals(call, game_data):
-    plan = call("plan_deck", character="mei lin")
+def plan_of(call) -> str:
+    """Mei Lin's plan part, unindented, so its fields read as top-level ones."""
+    lines = call("character_guide", name="mei lin", parts=["plan"]).splitlines()
+    start = lines.index("plan:") + 1
+    return "\n".join(line.removeprefix("  ") for line in lines[start:])
+
+
+def test_plan_ranks_epiphanies_and_caps_removals(call, game_data):
+    plan = plan_of(call)
 
     assert (top_field(plan, "season"), top_field(plan, "leaderboard_decks")) == ("s1", "1")
     cards = top_field(plan, "cards").splitlines()
     spire = cards.index(next(line for line in cards if line.startswith("- Rising Dragon Spire;")))
     assert cards[spire + 1 : spire + 3] == [
         "versions:",
-        "- V; rating: 5; leaderboard_share: 1.0",
+        "- V; guide_rating: 5; leaderboard_share: 1.0",
     ]
     removals = lines_with(top_field(plan, "removals"), "- ")
     assert [line.split(";")[0] for line in removals] == ["- Strike"]
     assert lines_with(top_field(plan, "equipment"), "- ")[0] == "- eq_1; leaderboard_share: 1.0"
 
 
-def test_game_data_urls_open_the_item_where_e7bot_has_a_page_for_it(call, conn, game_data):
-    partner = {"rarity": 5, "job": "striker", "partner_card": {}, "partner_passives": []}
-    add_e7bot(
-        conn,
-        "czn/characters/partner/list/detail",
-        # The site's partner page opens only partners in its characters list.
-        [partner | {"id": "1027", "name": "Listed"}, partner | {"id": "20023", "name": "Unlisted"}],
-    )
-    site = "https://wiki.e7bot.top/#/czn"
-
-    def url(tool: str, name: str) -> str | None:
-        return top_field(call(tool, name=name), "url")
-
-    assert url("get_character", "mei lin") == f"{site}/combatant/1027"
-    versions = lines_with(call("get_encounter", name="mirror hall"), "/encounters/")
-    assert versions[0].startswith(f"- {site}/encounters/e1a;")
-    assert url("get_partner", "Listed") == f"{site}/partner/1027"
-    assert url("get_partner", "Unlisted") == f"{site}/partner"
-
-
-def test_list_divine_epiphanies_pages_through_every_match(call, conn):
+def test_listing_divine_epiphanies_pages_through_every_match(call, conn):
     sparks = [
         {"id": f"s{n:02}", "description": f"Effect {n:02}", "god_type": "vitor", "rarity": "R"}
         for n in range(35)
     ]
     add_e7bot(conn, "czn/r-sparks/list", sparks)
 
-    first = call("list_divine_epiphanies")
-    rest = call("list_divine_epiphanies", offset=30)
-    past = call("list_divine_epiphanies", offset=500)
+    first = call("list", kind="divine_epiphanies")
+    rest = call("list", kind="divine_epiphanies", offset=30)
+    past = call("list", kind="divine_epiphanies", offset=500)
 
     assert (top_field(first, "total"), "offset=30" in top_field(first, "note")) == ("35", True)
     assert top_field(rest, "note") is None
     texts = lines_with(first, "- Effect") + lines_with(rest, "- Effect")
     assert sorted(texts) == [f"- Effect {n:02}" for n in range(35)]
-    # Fields every row shares, such as the source, are stated once.
-    assert len(lines_with(first, "url: ")) == 1
     assert (top_field(past, "total"), top_field(past, "results")) == ("35", "none")
 
 
-def test_get_character_unknown_section_lists_the_real_ones(call):
-    reply = call("get_character", name="mei lin", section="ratings")
-    assert top_field(reply, "sections") is None
-    assert "No section 'ratings'" in top_field(reply, "note")
-    assert "Pros" in top_field(reply, "note")
-
-
-def test_plan_deck_names_where_each_decks_duplicates_go(call, conn):
+def test_plan_names_where_each_decks_duplicates_go(call, conn):
     # The fixture deck holds three Strikes, a starting card, which a deck can begin with.
-    starting = top_field(call("plan_deck", character="mei lin"), "prydwen_decks")
+    starting = top_field(plan_of(call), "guide_decks")
     assert "duplicates: Strike x3: base x3 (starting card)" in starting
 
     # The same deck holding two copies of a unique card instead: one is a Duplicate.
@@ -1018,18 +1051,18 @@ def test_plan_deck_names_where_each_decks_duplicates_go(call, conn):
         parse_page(CHARACTER_URL, two_spires),
         None,
     )
-    unique = top_field(call("plan_deck", character="mei lin"), "prydwen_decks")
+    unique = top_field(plan_of(call), "guide_decks")
     assert "Rising Dragon Spire x2: IV x2 (1 Duplicates)" in unique
 
 
 def test_every_tool_call_logs_its_tool_arguments_time_and_reply_size(call, caplog):
     caplog.set_level("INFO", logger="czn_data.server")
-    reply = call("plan_deck", character="mei lin")
+    reply = call("list", kind="banners")
     with pytest.raises(Exception, match="Unknown tool"):
         call("no_such_tool")
 
     (record,) = [r for r in caplog.records if r.getMessage() == "tool call"]
-    assert (record.tool, json.loads(record.arguments)) == ("plan_deck", {"character": "mei lin"})
+    assert (record.tool, json.loads(record.arguments)) == ("list", {"kind": "banners"})
     assert record.reply_chars == len(reply) and record.seconds >= 0
 
 
@@ -1090,20 +1123,40 @@ def test_save_data_cost_lists_unknown_cards_without_points(call, cost_cards):
     assert (top_field(reply, "total"), top_field(reply, "unknown")) == ("0", "Zzyzx Qwv")
 
 
-def test_plan_deck_gives_each_prydwen_decks_faint_memory_points(call, cost_cards):
-    decks = top_field(call("plan_deck", character="mei lin"), "prydwen_decks")
+def test_save_data_cost_route_gives_programs_the_points_as_json(
+    conn, database_url, monkeypatch, cost_cards
+):
+    monkeypatch.setenv("DATABASE_URL", database_url)
+    build(conn)
+    client = TestClient(build_server(None, None).streamable_http_app())
+
+    found = client.post(
+        "/save-data-cost",
+        json={"character": "mei lin", "cards": [{"card": "Spark"}], "removed": ["Strike"]},
+    )
+    unknown = client.post("/save-data-cost", json={"character": "zzzz", "cards": []})
+    unreadable = client.post("/save-data-cost", content=b"not json")
+
+    assert found.status_code == 200
+    assert (found.json()["character"], found.json()["total"]) == ("Mei Lin", 40)
+    assert unknown.status_code == 404
+    assert unreadable.status_code == 400
+
+
+def test_plan_gives_each_guide_decks_faint_memory_points(call, cost_cards):
+    decks = top_field(plan_of(call), "guide_decks")
     # Three Strikes, one with a Divine: the third is a free Duplicate, the Divine costs 20.
     faint_memory = decks.split("faint_memory:\n")[1].splitlines()
     assert faint_memory[0] == "total: 20"
     assert faint_memory[3].startswith("- Strike; copies: 1; points: 20;")
 
 
-def test_plan_deck_for_unknown_character_says_no_match(call):
-    assert call("plan_deck", character="zzzz") == "No match."
+def test_character_guide_for_unknown_character_says_no_match(call):
+    assert call("character_guide", name="zzzz", parts=["plan"]) == "No match."
 
 
-def test_list_encounters_filters_by_chaos_and_names_copy_answers(call, game_data):
-    listing = call("list_encounters", chaos="The Blu Pot", reward="copy")
+def test_listing_events_filters_by_chaos_and_names_copy_answers(call, game_data):
+    listing = call("list", kind="events", chaos="The Blu Pot", reward="copy")
     assert top_field(listing, "total") == "1"
     assert lines_with(listing, "- ")[0].startswith("- Mirror Hall;")
     assert lines_with(listing, "Look into the mirror") == [
@@ -1113,10 +1166,11 @@ def test_list_encounters_filters_by_chaos_and_names_copy_answers(call, game_data
 
 def overview_versions(found: str) -> list[str]:
     """Each version block of a get_encounter overview."""
-    # A version leads with its URL, or with its screen name when the names differ.
-    return re.split(r"^- (?=https|Mirror Hall)", top_field(found, "versions"), flags=re.MULTILINE)[
-        1:
-    ]
+    # A version leads with its screen name, or with its version numbers when every name is
+    # the same.
+    return re.split(
+        r"^- (?=version|Mirror Hall)", top_field(found, "versions"), flags=re.MULTILINE
+    )[1:]
 
 
 def test_get_encounter_without_choices_gives_each_versions_first_screen(call, game_data):
@@ -1129,8 +1183,8 @@ def test_get_encounter_without_choices_gives_each_versions_first_screen(call, ga
     # The other version stays apart, and the first one's follow-up screen is not listed.
     assert "Leave quietly" in second and "Leave quietly" not in first
     assert "Look into the mirror" not in found
-    # Versions with the same first screen are listed once, with both URLs.
-    assert "encounters/e1b" in second and "encounters/e1c" in second
+    # Versions with the same first screen are listed once, numbering both.
+    assert "version: 2, 3" in second
 
 
 def test_get_encounter_counts_what_the_screen_shows(call, conn, game_data):
@@ -1233,9 +1287,9 @@ def test_get_encounter_names_versions_that_lead_to_a_version(call, conn, game_da
     found = call("get_encounter", name="mirror hall")
 
     second, third = overview_versions(found)[1:]
-    assert "opened_from: https://wiki.e7bot.top/#/czn/encounters/e1b" in third
+    assert "opened_from: 2" in third
     # e1c's screen names e1b in replace_link_encounter_id.
-    assert "replace_link_from: https://wiki.e7bot.top/#/czn/encounters/e1c" in second
+    assert "replace_link_from: 3" in second
     # Openers name two titles for the screen, so it keeps the event's name.
     pray = call("get_encounter", name="mirror hall", choices=["Pray"])
     assert "Altar" not in pray.replace("[Altar]", "")
@@ -1257,7 +1311,7 @@ def test_build_rejects_a_link_to_a_missing_step_and_keeps_the_previous_events(
     assert conn.execute("SELECT count(*) FROM encounter").fetchone()[0] == 3
 
 
-def test_list_equipment_by_chaos_matches_listed_and_shortened_zone_names(call, conn, game_data):
+def test_listing_equipment_by_chaos_matches_listed_and_shortened_zone_names(call, conn, game_data):
     url = "https://www.prydwen.gg/chaos-zero-nightmare/equipment"
     item = {"rarity": "Rare", "slot": "Weapon", "text": "Hit.", "stats": {}}
     places = {"Pot Blade": "Blue Pot", "Mist Blade": "City of Mist, The Blue Pot", "Shop": "Shop"}
@@ -1265,7 +1319,7 @@ def test_list_equipment_by_chaos_matches_listed_and_shortened_zone_names(call, c
     parsed = ParsedPage("Equipment", "Equipment", {"equipment": rows})
     store.save_page(conn, url, "equipment", "", datetime.now(UTC), parsed, None)
 
-    listing = call("list_equipment", chaos="blue pot")
+    listing = call("list", kind="equipment", chaos="blue pot")
 
     assert [line.split(";")[0] for line in lines_with(listing, "- ")] == [
         "- Mist Blade",
@@ -1273,7 +1327,7 @@ def test_list_equipment_by_chaos_matches_listed_and_shortened_zone_names(call, c
     ]
 
 
-def test_list_equipment_leaves_out_tutorial_copies(call, conn):
+def test_listing_equipment_leaves_out_tutorial_copies(call, conn):
     def relic(relic_id: str, text: str) -> dict:
         return {
             "id": relic_id,
@@ -1290,7 +1344,7 @@ def test_list_equipment_leaves_out_tutorial_copies(call, conn):
         [relic("eq_pub_008", "Hit hard."), relic("eq_tut_002", "Hit hard sometimes.")],
     )
 
-    listing = call("list_equipment", name="Crimson Sword")
+    listing = call("list", kind="equipment", name="Crimson Sword")
 
     (sword,) = lines_with(listing, "Crimson Sword")
     assert "text: Hit hard." in sword
@@ -1298,4 +1352,4 @@ def test_list_equipment_leaves_out_tutorial_copies(call, conn):
 
 def test_unknown_chaos_is_an_error_naming_the_known_ones(call, game_data):
     with pytest.raises(Exception, match=r"Known: The Blue Pot$"):
-        call("list_encounters", chaos="Nowhere At All")
+        call("list", kind="events", chaos="Nowhere At All")

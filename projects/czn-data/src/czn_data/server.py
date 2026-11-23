@@ -1,13 +1,12 @@
 """MCP server that answers Chaos Zero Nightmare questions from the scraped database.
 
 It only reads; give it a database role with SELECT rights. Tools read the merged tables that
-``czn_data.build`` derives (plus Prydwen's stored pages for guide search), never a source schema
-directly. Results read from a stored record carry its URL and the time that data was fetched,
-so answers can be cited and checked for staleness.
+``czn_data.build`` derives, never a source schema directly.
 
-MCP tools serve Claude only: they reply in plain text (``czn_data.render``) without the fields
-only programs use (INTERNAL_FIELDS). Programs, such as the companion app, use the REST routes,
-which reply in JSON.
+MCP tools serve Claude only: they reply in plain text (``czn_data.render``) with facts only,
+leaving out the fields only programs use and anything naming where data was scraped
+(INTERNAL_FIELDS); guide opinions are labeled (OPINION_FIELDS). No tool takes or returns a URL.
+Programs, such as the companion app, use the REST routes, which reply in JSON.
 
 Auth: the server is an OAuth 2.1 resource server. It validates JWT access tokens issued by an
 OIDC provider (``OIDC_ISSUER``) and advertises that provider to MCP clients such as claude.ai,
@@ -54,56 +53,75 @@ log = logging.getLogger(__name__)
 IDENTIFY_MAX_BYTES = 10 * 1024 * 1024
 LOG_ARGUMENT_CHARS = 500
 # Fields tools leave out of their replies: build bookkeeping (source: which scraper a merged row
-# came from), ids and slugs that only join tables, art URLs, and Prydwen's spelling of a name.
+# came from), ids and slugs that only join tables, and anything naming where data was scraped:
+# page and art URLs, fetch times, and a site's spelling of a name. Where data comes from is the
+# scrapers' business; Claude gets facts, with guide opinions labeled (OPINION_FIELDS).
 INTERNAL_FIELDS = frozenset(
-    {"source", "game_id", "slug", "character_slug", "image_url", "prydwen_name"}
+    {
+        "source",
+        "game_id",
+        "slug",
+        "character_slug",
+        "image_url",
+        "prydwen_name",
+        "url",
+        "prydwen_url",
+        "data_fetched_at",
+    }
 )
+# Fields holding a guide's opinion rather than game data, renamed so every reply labels them.
+OPINION_FIELDS = {
+    "rating": "guide_rating",
+    "review": "guide_review",
+    "epiphany_review": "guide_review",
+    "neutral_review": "guide_neutral_review",
+    "divine_review": "guide_divine_review",
+    "target_neutral": "guide_neutral_pick",
+    "tier": "guide_tier",
+    "performance": "guide_performance",
+}
+# A card's long guide text, which lookup adds only with detail.
+GUIDE_ADVICE = frozenset({"epiphany_review", "neutral_review", "divine_review", "target_neutral"})
 # Deck notes end with a disclaimer and the Team Database links that every deck repeats.
 DECK_NOTES = r"regexp_replace(notes, '\s*Note: This is not an exhaustive list.*$', '', 's')"
 
 LOOKUP_SQL = """
-SELECT kind, name, summary, url, data_fetched_at FROM (
+SELECT kind, name, summary, ref FROM (
 SELECT entity.*, d.holds, d.described,
        bool_or(d.holds OR d.described) OVER () AS any_close,
        row_number() OVER (ORDER BY {match} DESC, {order}, name) AS rank
 FROM (
+    -- ref: the row's own name in its table, for reading its details.
     SELECT 'character' AS kind, name, concat_ws(' ', rarity || '*', element, class) AS summary,
-           url, data_fetched_at FROM character
+           name AS ref FROM character
     UNION ALL
     -- A version's game name joins its card name, so "Flicker Blade (Unbound)" finds V first.
     SELECT 'card', concat_ws(' ', name, '(' || nullif(alias, '') || ')'),
-           concat_ws(' | ', color, type, 'cost ' || cost, text), url, data_fetched_at FROM card
+           concat_ws(' | ', color, type, 'cost ' || cost, text), name FROM card
     UNION ALL
-    SELECT 'equipment', name, concat_ws(' | ', rarity, slot, text), url, data_fetched_at
-    FROM equipment
+    SELECT 'equipment', name, concat_ws(' | ', rarity, slot, text), name FROM equipment
     UNION ALL
     SELECT 'fragment_set', name,
            (SELECT string_agg((b->>'pieces') || '-piece: ' || (b->>'text'), ' | ')
-            FROM jsonb_array_elements(bonuses) b), url, data_fetched_at
+            FROM jsonb_array_elements(bonuses) b), name
     FROM fragment_set
     UNION ALL
     SELECT 'partner', name, concat_ws(' | ', rarity || '*', class, passive_text,
-           'EGO ' || ego_name || ' (' || ego_cost || ' EP): ' || ego_text), url,
-           data_fetched_at FROM partner
+           'EGO ' || ego_name || ' (' || ego_cost || ' EP): ' || ego_text), name FROM partner
     UNION ALL
-    SELECT 'effect', name, concat_ws(' | ', type, description), url, data_fetched_at
-    FROM effect
+    SELECT 'effect', name, concat_ws(' | ', type, description), name FROM effect
     UNION ALL
-    SELECT 'encounter', name, concat_ws(' | ', pack, array_to_string(chaos, ', '),
+    SELECT 'encounter', name, concat_ws(' | ', pack, nullif(array_to_string(chaos, ', '), ''),
            CASE WHEN any_chaos THEN 'any Chaos' END,
-           'gives ' || nullif(array_to_string(reward_classes, ', '), '')), url,
-           data_fetched_at
+           'gives ' || nullif(array_to_string(reward_classes, ', '), '')), name
     FROM encounter
     UNION ALL
     SELECT 'divine_epiphany', text,
-           concat_ws(' | ', {divine_applies}, nullif(array_to_string(gods, ', '), '')), url,
-           data_fetched_at
+           concat_ws(' | ', {divine_applies}, nullif(array_to_string(gods, ', '), '')), text
     FROM divine_epiphany
     UNION ALL
-    SELECT 'chaos', name,
-           'Chaos (run map); list_encounters, get_encounter, and list_equipment take this'
-           ' name as chaos',
-           NULL, NULL FROM chaos
+    SELECT 'chaos', name, 'Chaos (run map); list and get_encounter take this name as chaos',
+           name FROM chaos
 ) entity
 , LATERAL (
     SELECT entity.kind = 'effect'
@@ -144,6 +162,31 @@ LookupKind = Literal[
     "divine_epiphany",
     "chaos",
 ]
+SearchKind = Literal["rules", "announcements", "guides"]
+SEARCH_KINDS: tuple[SearchKind, ...] = ("rules", "announcements", "guides")
+# Matches search lists one line each per kind after the best, and refs one read call takes;
+# search's description states both.
+SEARCH_MORE = 4
+SEARCH_READ = 10
+# Passage sources whose published_at is a date worth showing: when the post or page last
+# changed. The game's own text carries its fetch time, and guide pages carry none.
+DATED_SOURCES = ("post", "game8")
+# What search shows of an announcement section.
+POST_FIELDS = (
+    "post_title AS title, 'announcement' AS kind, board, posted_at, heading, text, starts_on,"
+    " ends_on"
+)
+ListKind = Literal["cards", "equipment", "characters", "events", "divine_epiphanies", "banners"]
+Reward = Literal["copy", "removal", "epiphany", "divine_epiphany", "equipment", "card"]
+# The filters list takes for each kind.
+LIST_FILTERS: dict[str, set[str]] = {
+    "cards": {"character", "category", "type", "tag", "color", "base_only"},
+    "equipment": {"slot", "rarity", "name", "chaos", "offset"},
+    "characters": {"gender", "element", "character_class", "rarity"},
+    "events": {"chaos", "reward", "offset"},
+    "divine_epiphanies": {"type", "cost", "god", "offset"},
+    "banners": set(),
+}
 
 
 # Fuzzy name match: substring, pg_trgm word similarity ("flicker blad" finds "Flicker Blade
@@ -165,17 +208,15 @@ NAME_ORDER = (
 )
 LOOKUP_SQL = LOOKUP_SQL.format(match=NAME_MATCH, order=NAME_ORDER, divine_applies=DIVINE_APPLIES)
 
-# get_character section name -> query for that part of one character's data (%(slug)s).
+# character_guide part name -> query for that part of one character's data (%(slug)s). The
+# plan, teams, and synergies parts have their own queries: they span every guide page.
 CHARACTER_SECTIONS = {
-    # Reviews are left out to keep this small; get_card returns them for one card.
+    # Reviews are left out to keep this small; lookup with detail returns them for one card.
     "cards": "SELECT category, name, variant, alias, color, cost, type, tags, text, rating,"
     " target_neutral FROM card WHERE character_slug = %(slug)s ORDER BY category, base_name, variant",
     "potentials": "SELECT position, name, text FROM potential WHERE character_slug = %(slug)s",
     "manifest_egos": "SELECT level, name, text, performance, review FROM manifest_ego"
     " WHERE character_slug = %(slug)s ORDER BY level",
-    "teams": "SELECT name, tier, members FROM team WHERE character_slug = %(slug)s",
-    "decks": "SELECT name, code, farming_zone, partner, equipment, fragments, cards,"
-    f" {DECK_NOTES} AS notes FROM deck WHERE character_slug = %(slug)s",
     "equipment": "SELECT tab, best, slots, notes FROM character_equipment"
     " WHERE character_slug = %(slug)s",
     "seasonal_powers": "SELECT season, best, text FROM seasonal_power"
@@ -184,7 +225,6 @@ CHARACTER_SECTIONS = {
     " WHERE character_slug = %(slug)s ORDER BY build, position",
     "partners": "SELECT position, partner, dupes, performance, notes FROM partner_rank"
     " WHERE character_slug = %(slug)s ORDER BY position",
-    "synergies": "SELECT name, points FROM synergy WHERE character_slug = %(slug)s",
 }
 _SECTION_COUNTS_SQL = "SELECT " + ", ".join(
     f"(SELECT count(*) FROM ({sql}) s) AS {name}" for name, sql in CHARACTER_SECTIONS.items()
@@ -204,32 +244,32 @@ WITH item AS (
     ORDER BY {order}
     LIMIT 1
 )
-SELECT item.name AS item, c.name AS character,
-       array_agg(DISTINCT concat_ws(': ', r.place, r.detail)) AS places, r.url
+SELECT c.name AS character, array_agg(DISTINCT concat_ws(': ', r.place, r.detail)) AS places
 FROM item, LATERAL (
-    SELECT character_slug, 'deck' AS place, name AS detail, url FROM deck
+    SELECT character_slug, 'deck' AS place, name AS detail FROM deck
     WHERE item.guide_name = ANY (equipment) OR item.guide_name = ANY (fragments)
        OR partner = item.guide_name
     UNION ALL
-    SELECT character_slug, 'equipment tab', tab, url FROM character_equipment
+    -- One entry for any number of season tabs, so "who uses this" stays short.
+    SELECT character_slug, 'equipment tab', NULL FROM character_equipment
     WHERE EXISTS (
         SELECT FROM jsonb_each(slots) slot, jsonb_array_elements_text(slot.value) listed
         WHERE listed = item.guide_name
     )
     UNION ALL
     SELECT character_slug, 'fragment ranking',
-           concat_ws(' ', build, '#' || position, performance), url FROM fragment_rank
+           concat_ws(' ', build, '#' || position, performance) FROM fragment_rank
     WHERE item.guide_name = ANY (sets)
     UNION ALL
     SELECT character_slug, 'partner ranking',
-           concat_ws(' ', '#' || position, dupes, performance), url FROM partner_rank
+           concat_ws(' ', '#' || position, dupes, performance) FROM partner_rank
     WHERE partner = item.guide_name
 ) r
 JOIN character c ON c.slug = r.character_slug
-GROUP BY item.name, c.name, r.url
+GROUP BY c.name
 ORDER BY count(*) DESC, c.name
 """
-RECOMMENDED_BY_SQL = RECOMMENDED_BY_SQL.format(match=NAME_MATCH, order=NAME_ORDER)
+RECOMMENDED_BY_SQL = RECOMMENDED_BY_SQL.format(match="name = %(name)s", order="name")
 
 LIST_CHARACTERS_SQL = """
 SELECT c.name, c.rarity, c.element, c.class, c.gender, c.image_url
@@ -276,7 +316,7 @@ ORDER BY count(DISTINCT source) DESC, count(DISTINCT team) DESC, partner
 """
 SYNERGIES_SQL = SYNERGIES_SQL.format(match=NAME_MATCH, order=NAME_ORDER)
 
-# plan_deck: one character's decks are its Save Data decks in the newest leaderboard season
+# The plan part: one character's decks are its Save Data decks in the newest leaderboard season
 # (%(season)s) plus Prydwen's guide decks. Prydwen lists deck cards by name with the Epiphany
 # numeral ("Anchor Shot IV"), and lists complete decks: they are the size of saved decks.
 # Prydwen names some cards differently from the game (card.prydwen_name), so Prydwen deck
@@ -299,7 +339,9 @@ pd_cards AS (
     LEFT JOIN LATERAL (
         SELECT base_name FROM card
         WHERE (character_slug = %(slug)s OR character_slug IS NULL)
-          AND listed.base IN (base_name, prydwen_name)
+          -- Guide decks spell some apostrophes straight where the game's names curl them.
+          AND translate(listed.base, '’‘', '''''')
+              IN (translate(base_name, '’‘', ''''''), translate(prydwen_name, '’‘', ''''''))
         ORDER BY character_slug NULLS LAST LIMIT 1
     ) game ON true
 )
@@ -326,7 +368,7 @@ SELECT picks.base AS card, base.category, base.cost, base.color,
            'variant', coalesce(nullif(picks.variant, ''), 'base'),
            'rating', r.rating,
            'leaderboard_share', round(picks.lb_decks::numeric / nullif(total.n, 0), 2),
-           'prydwen_decks', picks.pd_decks,
+           'guide_decks', picks.pd_decks,
            'divine_epiphanies', nullif(picks.divine, '{{}}')
        )) ORDER BY coalesce(picks.lb_decks, 0) DESC, coalesce(picks.pd_decks, 0) DESC,
                    picks.variant) AS versions
@@ -387,10 +429,10 @@ worn AS (
 SELECT worn.item, max(e.slot) AS slot,
        round(count(DISTINCT deck) FILTER (WHERE worn.source = 'leaderboard')::numeric
              / nullif((SELECT count(*) FROM lb), 0), 2)::float8 AS leaderboard_share,
-       nullif(count(DISTINCT deck) FILTER (WHERE worn.source = 'prydwen'), 0) AS prydwen_decks
+       nullif(count(DISTINCT deck) FILTER (WHERE worn.source = 'prydwen'), 0) AS guide_decks
 FROM worn LEFT JOIN equipment e ON e.name = worn.item
 GROUP BY worn.item
-ORDER BY leaderboard_share DESC NULLS LAST, prydwen_decks DESC NULLS LAST, worn.item
+ORDER BY leaderboard_share DESC NULLS LAST, guide_decks DESC NULLS LAST, worn.item
 LIMIT 20
 """
 
@@ -448,14 +490,15 @@ WHERE s.id = ANY (%(steps)s)
 """
 # Rows past LIST_LIMIT are cut; total says how many matched.
 LIST_LIMIT = 60
-# Characters of page text per get_page call; get_page's description states the number.
-PAGE_CHARS = 15_000
-# Rows per call of the list tools that page (a page of Divine Epiphanies is about 10,000
-# characters); their descriptions state the number.
+# Rows per call of the list kinds that page (a page of Divine Epiphanies is about 10,000
+# characters); list's description states the number.
 LIST_PAGE = 30
+# Names per lookup call, and matches listed per name; lookup's description states both.
+LOOKUP_NAMES = 10
+LOOKUP_MATCHES = 5
 
 # Words players use that the official posts never do, mapped to the words the posts use
-# instead, which search_posts adds to the query. The meaning search catches most rewording;
+# instead, which search adds to the query when it covers announcements. The meaning search catches most rewording;
 # these are words it ranked too low (audit, 2026-11-20). Add one when an audit finds another
 # miss.
 POST_SYNONYMS = {
@@ -662,10 +705,13 @@ def _short_choice(choice: dict, draw: str | None) -> dict:
 
 
 def _for_model(value: object) -> object:
-    """value without INTERNAL_FIELDS and null fields, at any depth."""
+    """value without INTERNAL_FIELDS and null fields, with OPINION_FIELDS renamed, at any
+    depth."""
     if isinstance(value, dict):
         return {
-            k: _for_model(v) for k, v in value.items() if k not in INTERNAL_FIELDS and v is not None
+            OPINION_FIELDS.get(k, k): _for_model(v)
+            for k, v in value.items()
+            if k not in INTERNAL_FIELDS and v is not None
         }
     if isinstance(value, list):
         return [_for_model(item) for item in value]
@@ -805,15 +851,18 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
         token_verifier=verifier,
     )
 
-    def tool(function):
-        """Register function as an MCP tool whose reply is the plain text of its result. Every
-        call logs one ``tool call`` line: the tool, its arguments, seconds, and reply size, or
-        the error it failed with."""
+    def tool(function=None, *, name: str | None = None):
+        """Register function as an MCP tool, named name or the function's name, whose reply is
+        the plain text of its result. Every call logs one ``tool call`` line: the tool, its
+        arguments, seconds, and reply size, or the error it failed with."""
+        if function is None:
+            return functools.partial(tool, name=name)
+        tool_name = name or function.__name__
 
         @functools.wraps(function)
         async def text_reply(*args, **kwargs) -> str:
             started = time.monotonic()
-            fields = {"tool": function.__name__, "arguments": _log_arguments(kwargs)}
+            fields = {"tool": tool_name, "arguments": _log_arguments(kwargs)}
             try:
                 reply = render(_for_model(await function(*args, **kwargs)))
             except Exception as error:
@@ -825,7 +874,7 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
             log.info("tool call", extra=fields)
             return reply
 
-        mcp.tool(structured_output=False)(text_reply)
+        mcp.tool(name=tool_name, structured_output=False)(text_reply)
         return function
 
     @mcp.custom_route("/healthz", methods=["GET"])
@@ -956,97 +1005,147 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
         )
 
     @tool
-    async def lookup(name: str, kind: LookupKind | None = None, limit: int = 10) -> list[dict]:
-        """Fuzzy-find any named game entity, tolerant of typos and partial names. Use it first
-        for any name read from the screen, then the specific tools for details.
+    async def lookup(
+        names: list[str], kind: LookupKind | None = None, detail: bool = False
+    ) -> list[dict]:
+        """Find any named game entity, for each name read from the screen; send every name a
+        screen shows in one call (at most 10). Per name: best, the best match with its facts,
+        and other_matches (up to 4 more, one line each) when the name is unclear.
 
         kind narrows the search: character, card, equipment, fragment_set, partner, effect
         (keywords, statuses and card tags such as Exhaust; keyword, status and tag are other
-        names for it), encounter (Chaos event), divine_epiphany, or chaos (the Chaos maps).
-        A term without its own entry, such as Polarization, finds the effects whose
-        description uses it. Card summaries start with the card's color. limit is at most 50.
+        names for it), encounter (Chaos event; get_encounter reads its screens),
+        divine_epiphany, or chaos (the Chaos maps). A term without its own entry, such as
+        Polarization, finds the effects whose description uses it.
+
+        A card's best match lists every version of it (base, Epiphany I-V, and others such as
+        mutations, some under their own name like Shard:Light) with cost, tags, text, and the
+        guide's rating (1 to 5); alias is the version's name in the game (Unbound in "Flicker
+        Blade (Unbound)"); starting_copies is how many copies a starting deck holds. With
+        detail, cards add the guides' reviews and their Neutral and Divine advice, and
+        equipment, fragment sets, and partners add which characters' guides recommend them
+        and where. Characters list the parts character_guide gives.
+
         Season content is not in this data: season events and Interaction Events (such as
         Elaborate Illusion), Chaos difficulty modifiers (such as Gangrene), and Environment
-        Variables nodes; search_posts has those.
-        """
+        Variables nodes; search has those."""
         kind = LOOKUP_KIND_ALIASES.get(kind, kind) if kind else None
-        return await _query(LOOKUP_SQL, {"name": name, "kind": kind, "limit": min(limit, 50)})
+        found = [await _lookup_one(name, kind, detail) for name in names[:LOOKUP_NAMES]]
+        skipped = [
+            {"name": name, "best": f"Not looked up: at most {LOOKUP_NAMES} names per call."}
+            for name in names[LOOKUP_NAMES:]
+        ]
+        return found + skipped
 
-    @tool
-    async def get_partner(name: str) -> dict | None:
-        """The best-matching partner: rarity, class, passive, EGO skill (name, EP cost, text)
-        and base stats. Use recommended_by for which characters' guides rank it. The
-        Epiphanies a partner unlocks are in neither source."""
-        found = await _query(
-            f"SELECT * FROM partner WHERE {NAME_MATCH} ORDER BY {NAME_ORDER} LIMIT 1",
-            {"name": name},
-        )
-        return found[0] if found else None
+    async def _lookup_one(name: str, kind: str | None, detail: bool) -> dict:
+        found = await _query(LOOKUP_SQL, {"name": name, "kind": kind, "limit": LOOKUP_MATCHES})
+        if not found:
+            return {"name": name, "best": "No match."}
+        details = await _entity_details(found[0]["kind"], found[0]["ref"], detail)
+        # A card's other versions are already listed under its best match.
+        versions = {v["name"] for v in details.get("versions", [])}
+        others = [
+            {k: v for k, v in row.items() if k != "ref"}
+            for row in found[1:]
+            if not (row["kind"] == "card" and row["ref"] in versions)
+        ]
+        best = {k: v for k, v in found[0].items() if k != "ref"} | details
+        return {"name": name, "best": best, "other_matches": others or None}
 
-    @tool
-    async def get_card(name: str) -> list[dict]:
-        """Every version of the best-matching card: the base card, its Epiphany variants (I-V),
-        and other versions such as mutations (some under their own name, like Shard:Light),
-        each with full text, cost, tags, Prydwen's star rating (1 to 5) and its own
-        review; alias is the version's name in the game, when it has one (Unbound in
-        "Flicker Blade (Unbound)"). The base card also carries the overall review, the
-        recommended Neutral Epiphany (target_neutral) and Prydwen's Neutral and Divine advice,
-        and for a starting card, starting_copies: how many copies the starting deck holds."""
-        return await _query(
-            f"""
-            WITH best AS (
-                SELECT base_name, character_slug FROM card
-                WHERE {NAME_MATCH} OR prydwen_name ILIKE %(name)s
-                ORDER BY coalesce(prydwen_name ILIKE %(name)s, false) DESC, {NAME_ORDER}
-                LIMIT 1
+    async def _entity_details(kind: str, ref: str, detail: bool) -> dict:
+        """The facts lookup adds to its best match, by kind; ref is the row's own name."""
+        params = {"name": ref}
+        if kind == "card":
+            rows = await _query(
+                """
+                WITH best AS (SELECT base_name, character_slug FROM card WHERE name = %(name)s
+                              LIMIT 1)
+                SELECT card.*, character.name AS character
+                FROM card JOIN best USING (base_name)
+                LEFT JOIN character ON character.slug = card.character_slug
+                WHERE card.character_slug IS NOT DISTINCT FROM best.character_slug
+                ORDER BY variant
+                """,
+                params,
             )
-            SELECT card.* FROM card JOIN best USING (base_name)
-            WHERE card.character_slug IS NOT DISTINCT FROM best.character_slug
-            ORDER BY variant
-            """,
-            {"name": name},
+            dropped = {"base_name"} | (set() if detail else GUIDE_ADVICE)
+            return {"versions": [{k: v for k, v in r.items() if k not in dropped} for r in rows]}
+        if kind == "character":
+            character = await _find_character(ref)
+            return {"gender": character.get("gender"), "parts": await _guide_parts(character)}
+        if kind == "partner":
+            rows = await _query("SELECT * FROM partner WHERE name = %(name)s", params)
+        elif kind == "equipment":
+            rows = await _query(
+                "SELECT obtained_from, stats FROM equipment WHERE name = %(name)s", params
+            )
+        else:
+            rows = [{}]
+        facts = rows[0] if rows else {}
+        if detail and kind in ("equipment", "fragment_set", "partner"):
+            facts["recommended_by"] = await _query(RECOMMENDED_BY_SQL, params) or None
+        return facts
+
+    async def _guide_parts(character: dict) -> list[str]:
+        """The parts character_guide has for character: fixed ones with data, then the
+        guide's prose sections by title."""
+        counts = (await _query(_SECTION_COUNTS_SQL, {"slug": character["slug"]}))[0]
+        prose = [s["title"] for s in character.get("sections") or []]
+        return (
+            ["profile", "plan", "teams", "synergies"] + [s for s, n in counts.items() if n] + prose
         )
 
     @tool
-    async def get_character(name: str, section: str | None = None) -> dict | None:
-        """Profile of the best-matching character. Without section: rarity, element, class,
-        gender (from the game data; for characters only Prydwen has, judged from the art by an
-        image tagger), and the list of available sections. With section, that part of
-        Prydwen's guide: cards (without reviews, use get_card; alias as in get_card),
-        potentials, manifest_egos, teams, decks (with the deck code players paste into the
-        game's deck import, when Prydwen gives one, and the Chaos it farms), equipment (per
-        season tab), seasonal_powers, fragments, partners, synergies, or a prose section by
-        title (Pros, Cons, Introduction, Key Mechanics, Stats, Potential Priority, ...). The
-        teams and synergies sections come from this character's own guide page only; for
-        more, use find_teams or synergies. note explains missing data."""
+    async def character_guide(name: str, parts: list[str] | None = None) -> dict | None:
+        """Parts of the best-matching character's guide, as many as needed in one call
+        (default profile). profile: rarity, element, class, gender, and every part available.
+        plan: everything to plan a Chaos run's deck: the newest leaderboard season's Save Data
+        decks and the guides' decks. Its cards are each card the decks use, best first, with
+        category, cost and color, and per version (base or Epiphany I-V) the guide's rating,
+        the share of leaderboard decks taking it, how many guide decks list it, and common
+        Divine Epiphanies; removals are up to 5 starting cards the decks drop (a deck can
+        remove at most 5), with the share dropping each; equipment is each item with its slot,
+        leaderboard share, and guide deck count; guide_decks are the guides' decks, each with
+        its deck code (to paste into the game's deck import) when given, the Chaos it farms,
+        duplicates (the cards it holds more than one of, where its Duplicates go), and
+        faint_memory: its points as save_data_cost gives them, without removals.
+        teams: up to 30 teams with the character: guide_teams (name, tier, members, and
+        listed_for, the characters whose guides list it) and leaderboard (the newest season's
+        lineups: teams using it and best_rank). synergies: characters the guides pair with
+        it, best supported first, with where each is named and why. Also cards (every card
+        and version, without reviews), potentials, manifest_egos, equipment (per season tab),
+        seasonal_powers, fragments, partners, and prose sections by title (Pros, Cons,
+        Introduction, Key Mechanics, Stats, Potential Priority, ...). note explains missing
+        data."""
         character = await _find_character(name)
         if character is None:
             return None
+        available = await _guide_parts(character)
         prose = character.pop("sections", [])
         slug = {"slug": character["slug"]}
-        counts = (await _query(_SECTION_COUNTS_SQL, slug))[0]
-        if not counts.get("cards"):
-            character["note"] = (
-                "No cards in either source yet: the game data (e7bot) does not have this"
-                " character, and Prydwen's page has no card data."
-            )
-        if section is None:
-            available = [s for s, n in counts.items() if n]
-            return character | {"sections": available + [s["title"] for s in prose]}
-        header = {
-            k: character[k]
-            for k in ("name", "slug", "prydwen_url", "data_fetched_at", "note")
-            if k in character
-        }
-        key = section.strip().lower()
-        if key in CHARACTER_SECTIONS:
-            return header | {key: await _query(CHARACTER_SECTIONS[key], slug)}
-        found = [s for s in prose if key in s["title"].lower()]
-        if found:
-            return header | {"sections": found}
-        available = [s for s, n in counts.items() if n] + [s["title"] for s in prose]
-        missing = f"No section {section!r}. Sections: {', '.join(available)}."
-        return header | {"note": " ".join(filter(None, [header.get("note"), missing]))}
+        reply: dict = {"name": character["name"]}
+        notes = []
+        if "cards" not in available:
+            notes.append("No card data for this character yet.")
+        for part in parts or ["profile"]:
+            key = part.strip().lower()
+            if key == "profile":
+                reply["profile"] = {
+                    k: character.get(k) for k in ("rarity", "element", "class", "gender")
+                } | {"parts": available}
+            elif key == "plan":
+                reply["plan"] = await _plan(character)
+            elif key == "teams":
+                reply["teams"] = await _teams(character["name"])
+            elif key == "synergies":
+                reply["synergies"] = await _query(SYNERGIES_SQL, {"name": character["slug"]})
+            elif key in CHARACTER_SECTIONS:
+                reply[key] = await _query(CHARACTER_SECTIONS[key], slug)
+            elif found := [s for s in prose if key in s["title"].lower()]:
+                reply.setdefault("sections", []).extend(found)
+            else:
+                notes.append(f"No part {part!r}. Parts: {', '.join(available)}.")
+        return reply | {"note": " ".join(notes) or None}
 
     @tool
     async def match_card_text(
@@ -1094,13 +1193,8 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
         rows.sort(key=lambda row: -row["match"])
         return rows[:limit]
 
-    @tool
-    async def find_teams(character: str) -> dict | None:
-        """Up to 30 teams that include the best-matching character, in two lists:
-        prydwen_teams, the teams in Prydwen's guides (name, tier, members, listed_for: the
-        characters whose pages list it), and leaderboard, the lineups of the newest
-        leaderboard season (season, members, teams: how many ranked teams used the lineup,
-        best_rank), most used first. Use it for "which team should X be in"."""
+    async def _teams(character: str) -> dict | None:
+        """character_guide's teams part: guide teams and leaderboard lineups with character."""
         found = await _query(
             f"""
             WITH member AS (
@@ -1121,7 +1215,7 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
                 GROUP BY d.season, d.rank, d.team
             )
             SELECT * FROM (
-                SELECT 'prydwen' AS source, team.name, team.tier, team.members,
+                SELECT 'guide' AS source, team.name, team.tier, team.members,
                        array_agg(owner.name ORDER BY owner.name) AS listed_for,
                        NULL::text AS season, NULL::bigint AS teams, NULL::int AS best_rank,
                        min(team.url) AS url, min(team.data_fetched_at) AS data_fetched_at
@@ -1139,44 +1233,12 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
             """,
             {"name": character},
         )
-        # Two lists, so each states once what all its rows share (season, source page).
+        # Two lists, so each states once what all its rows share (season).
         return {
             group: [{k: v for k, v in row.items() if k != "source"} for row in rows]
-            for group, source in (("prydwen_teams", "prydwen"), ("leaderboard", "leaderboard"))
+            for group, source in (("guide_teams", "guide"), ("leaderboard", "leaderboard"))
             if (rows := [row for row in found if row["source"] == source])
         } or None
-
-    @tool
-    async def list_characters(
-        gender: str | None = None,
-        element: str | None = None,
-        character_class: str | None = None,
-        rarity: int | None = None,
-    ) -> list[dict]:
-        """Every character, one short line each (name, rarity, element, class, gender),
-        optionally filtered: gender female or male, element (Passion, Justice,
-        Order, Void, Instinct), character_class (Striker, Vanguard, Ranger, Hunter, Controller,
-        Psionic), rarity 4 or 5."""
-        return await _query(
-            LIST_CHARACTERS_SQL,
-            {"gender": gender, "element": element, "class": character_class, "rarity": rarity},
-        )
-
-    @tool
-    async def synergies(character: str) -> list[dict]:
-        """Characters Prydwen's guides recommend using with the best-matching character, best
-        supported first. sources says where each is named: the character's own synergy list
-        (reasons gives Prydwen's explanation), the other character's synergy list
-        (their_reasons), or recommended teams (teams, with tier). Use it for "who should I
-        use with X"; find_teams gives whole lineups."""
-        return await _query(SYNERGIES_SQL, {"name": character})
-
-    @tool
-    async def recommended_by(name: str) -> list[dict]:
-        """Which characters' guides recommend the best-matching equipment item, memory
-        fragment set, or partner, and where: deck, equipment tab, fragment or partner
-        ranking. Use it for "who uses X" questions."""
-        return await _query(RECOMMENDED_BY_SQL, {"name": name})
 
     async def _find_character(name: str) -> dict | None:
         found = await _query(
@@ -1199,14 +1261,6 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
             )
             group["sections"].append({k: v for k, v in row.items() if k not in source_fields})
         return listing | {"results": list(groups.values())}
-
-    async def _ranked(
-        tool_name: str, query: str, within: list[tuple[str, int]] | None = None
-    ) -> list[dict]:
-        """The passages tool_name searches that answer query, best first
-        (``czn_data.search``); within limits them to those (key, position)."""
-        async with await psycopg.AsyncConnection.connect(_database_url()) as conn:
-            return await search.search(conn, search.TOOL_SOURCES[tool_name], query, within)
 
     async def _details(sql: str, ranked: list[dict]) -> dict[tuple, dict]:
         """(key, position) -> the fields sql (given %(keys)s and %(positions)s, returning key
@@ -1254,22 +1308,14 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
             )
         return reply
 
-    @tool
-    async def list_cards(
-        character: str | None = None,
-        category: str | None = None,
-        type: str | None = None,
-        tag: str | None = None,
-        color: str | None = None,
-        base_only: bool = True,
+    async def _list_cards(
+        character: str | None,
+        category: str | None,
+        type: str | None,
+        tag: str | None,
+        color: str | None,
+        base_only: bool,
     ) -> dict:
-        """List cards with optional filters. category is starting (in the starting deck),
-        unique (gained in a run), ego (the Ego skill, cast with EP, not in the deck), collapse
-        (replaces a card when the character's Collapse triggers), generated (created by other
-        cards), neutral, monster or forbidden; type is Attack, Skill, Upgrade and so on; tag
-        is a card tag such as Exhaust; color is the card's rarity color (White, Blue, Purple,
-        Gold, Orange), which players use to name cards ("her purple card"). base_only skips
-        Epiphany and other versions; alias as in get_card."""
         slug = None
         if character:
             found = await _find_character(character)
@@ -1302,22 +1348,12 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
             },
         )
         if slug and not listing["total"]:
-            listing["note"] = f"No cards for {found['name']} in either source yet."
+            listing["note"] = f"No card data for {found['name']} yet."
         return listing
 
-    @tool
-    async def list_equipment(
-        slot: str | None = None,
-        rarity: str | None = None,
-        name: str | None = None,
-        chaos: str | None = None,
-        offset: int = 0,
+    async def _list_equipment(
+        slot: str | None, rarity: str | None, name: str | None, chaos: str | None, offset: int
     ) -> dict:
-        """List equipment, optionally by slot (Weapon, Armor, Trinket), rarity (Rare,
-        Legendary, ...), name, or chaos (only equipment that drops in that Chaos), with effect
-        text and where it drops (obtained_from). Stats per level are included when name is
-        given."""
-        offset = max(offset, 0)
         return await _listing(
             f"""
             SELECT name, rarity, slot, text, obtained_from,
@@ -1347,71 +1383,58 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
             offset=offset,
         )
 
-    @tool
-    async def search_guides(query: str, limit: int = 3, offset: int = 0) -> dict:
-        """Search every scraped Prydwen page (guides, tier list, team database, character
-        reviews and builds), split into sections. Use it for strategy and opinions the other
-        tools do not cover. query: a question or words; results come best answer first,
-        grouped by page (page_title, url); each section has its heading ("A > B"), text, and
-        offset and length (where text sits in get_page's body; read around it when a section
-        refers to another one). total counts the candidates found (at most about 90), not how
-        many are relevant; limit is at most 20."""
-        ranked = await _ranked("search_guides", query)
-        details = await _details(
-            """
-            SELECT s.url AS key, s.position, s."offset", s.length, p.data_fetched_at
-            FROM guide_section s JOIN prydwen.page p USING (url)
-            WHERE (s.url, s.position) IN (SELECT * FROM unnest(%(keys)s::text[], %(positions)s::int[]))
-            """,
-            ranked,
-        )
-        rows = [
-            {
-                "page_title": r["title"],
-                "heading": r["heading"],
-                "text": r["text"],
-                "url": r["key"],
-                **details[r["key"], r["position"]],
-            }
-            for r in ranked
-        ]
-        return _by_source(_page(rows, limit, offset), ("page_title", "url", "data_fetched_at"))
-
-    @tool
-    async def list_banners() -> list[dict]:
-        """Gacha banners that are live or upcoming, from Prydwen's banner schedule (Global
-        server): name, kind (character or partner), rarity, rerun, season phase, start and end
-        times (UTC), featured rate-up characters, the 4-star secondary rate-ups, and status
-        (live or upcoming). Live banners first, each group ending soonest first."""
-        return await _query(
+    async def _list_banners() -> dict:
+        rows = await _query(
             """
             SELECT CASE WHEN starts_at <= now() THEN 'live' ELSE 'upcoming' END AS status,
-                   name, kind, rarity, rerun, phase, starts_at, ends_at, featured, secondary,
-                   url, data_fetched_at
+                   name, kind, rarity, rerun, phase, starts_at, ends_at, featured, secondary
             FROM banner WHERE ends_at > now()
             ORDER BY starts_at > now(), ends_at, starts_at, kind, name
             """
         )
+        return _reply(rows, len(rows), None)
 
-    @tool
-    async def search_posts(
-        query: str | None = None, active_on: str | None = None, limit: int = 5, offset: int = 0
+    # Named search for Claude; the function name keeps the search module in reach here.
+    @tool(name="search")
+    async def search_text(
+        query: str | None = None,
+        kinds: list[SearchKind] | None = None,
+        active_on: str | None = None,
+        read: list[str] | None = None,
     ) -> dict:
-        """Search the game's official Stove posts (update notices, news, patch notes and event
-        overviews), split into sections. Use it for events, season content (Season
-        Restrictions, Supply Store, Environment Variables), shops, rate-up periods and
-        rewards; it is the newest source, so it wins over search_game_systems and
-        search_guides on these. Values change between seasons, so when posts disagree, the
-        newest posted_at wins. list_banners gives the banner schedule itself. query: a
-        question or words; results come best answer first, newer posts winning close calls.
-        active_on: a date (YYYY-MM-DD, or today) to get only sections whose period covers it,
-        which answers "what events are on now". Give either or both. results groups the
-        sections by post (post_title, board, posted_at, url); each section has its heading,
-        its full text, and its period (starts_on, ends_on) when the post gives one. Images in
-        posts (some calendars) are not included. With a query, total counts the candidates
-        found (at most about 90), not how many are relevant; limit is at most 20."""
+        """Search text about the game, split into sections: how the game works, what is on
+        now, and strategy. Use it for "how does X work", "what is X", events, season content
+        (Season Restrictions, Supply Store, Environment Variables), shops, rate-up periods,
+        rewards, and strategy questions the other tools do not cover. Each kind is ranked on
+        its own: results holds the full text of each kind's best match, and more lists each
+        kind's next 4 matches, one line each (ref, kind, title > heading, date). When results
+        miss the answer, pass the refs of the lines that look right as read (up to 10) to get
+        their full text, instead of searching again. kinds narrows it (default all):
+        - rules: the game's own Help topics and other rule text from its files (tip pages,
+          keyword tooltips, tutorial dialogue, event descriptions, popup messages). Exact but
+          short; it wins over guides when they disagree.
+        - announcements: the official update notices, news, patch notes and event overviews,
+          with posted dates and each section's period (starts_on, ends_on) when it has one.
+          The newest source: it wins over guides on season content, events, and values that
+          change between seasons; between announcements, the newest wins.
+        - guides: player guides (game systems, tier lists, team building, character reviews
+          and builds), with updated dates when known. More detail and opinion; can be out of
+          date.
+        query: a question or words, using the game's own words when known. active_on: a date
+        (YYYY-MM-DD, or today) to get only announcement sections whose period covers it,
+        which answers "what events are on now"; give query, active_on, or both, or read
+        alone. active_on without query lists every active section in one line each (ref,
+        title > heading, period), soonest ending first. Full text is grouped by page (title,
+        kind), each read passage with its ref; a Help topic comes whole, best_match marking
+        its page that answers best."""
+        if read:
+            reply = await _read_passages(read[:SEARCH_READ])
+            if skipped := read[SEARCH_READ:]:
+                note = f"Not read: {', '.join(skipped)}; at most {SEARCH_READ} refs per call."
+                reply["note"] = " ".join(filter(None, [reply.get("note"), note]))
+            return reply
         if query is None and active_on is None:
-            raise ToolError("Give query, active_on, or both.")
+            raise ToolError("Give query, active_on, or both, or read.")
         day = None
         if active_on is not None:
             text = active_on.strip().lower()
@@ -1421,159 +1444,149 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
                 raise ToolError(
                     f"active_on must be YYYY-MM-DD or today, not {active_on!r}"
                 ) from error
-        source_fields = ("post_title", "board", "posted_at", "url", "data_fetched_at")
-        shown = (
-            "post_title, board, posted_at, heading, text, starts_on, ends_on, url, data_fetched_at"
-        )
+        group_fields = ("title", "kind", "board", "posted_at", "updated_at")
         if query is None:
-            listing = await _listing(
-                f"""
-                SELECT {shown}, count(*) OVER () AS total FROM post_section
-                WHERE %(day)s::date BETWEEN starts_on AND ends_on
-                ORDER BY ends_on, posted_at DESC, position
-                LIMIT %(limit)s OFFSET %(offset)s
+            active = await _query(
+                """
+                SELECT p.ref, concat_ws(' > ', s.post_title, s.heading) AS match, s.starts_on,
+                       s.ends_on
+                FROM post_section s
+                JOIN passage p ON p.source = 'post' AND p.key = s.article_id::text
+                              AND p.position = s.position
+                WHERE %(day)s::date BETWEEN s.starts_on AND s.ends_on
+                ORDER BY s.ends_on, s.posted_at DESC, s.position
                 """,
-                {"day": day, "limit": max(1, min(limit, 20)), "offset": max(offset, 0)},
-                offset=max(offset, 0),
+                {"day": day},
             )
-            return _by_source(listing, source_fields)
+            return {"active": active}
+        sources = tuple(s for kind in kinds or SEARCH_KINDS for s in search.KIND_SOURCES[kind])
         within = None
         if day is not None:
+            sources = ("post",)
             active = await _query(
                 "SELECT article_id::text AS key, position FROM post_section"
                 " WHERE %(day)s::date BETWEEN starts_on AND ends_on",
                 {"day": day},
             )
             within = [(r["key"], r["position"]) for r in active]
-        ranked = await _ranked("search_posts", _with_synonyms(query), within)
-        details = await _details(
+        if "post" in sources:
+            query = _with_synonyms(query)
+        async with await psycopg.AsyncConnection.connect(_database_url()) as conn:
+            ranked = await search.search(conn, sources, query, within)
+        by_kind = search.rank_by_kind(ranked)
+        best = [rows[0] for rows in by_kind.values()]
+        more = []
+        for kind, rows in by_kind.items():
+            # A long section is stored as overlapping pieces that share its title > heading;
+            # a piece after the first one shown says so.
+            listed = {_match_line(rows[0])}
+            for r in rows[1 : 1 + SEARCH_MORE]:
+                match = _match_line(r)
+                if match in listed:
+                    match += " (another part of this section)"
+                listed.add(_match_line(r))
+                date_ = r["published_at"].date() if r["source"] in DATED_SOURCES else None
+                more.append({"ref": r["ref"], "kind": kind, "match": match, "date": date_})
+        reply = {"results": await _search_rows(best)}
+        return _by_source(reply, group_fields) | {"more": more or None}
+
+    def _match_line(row: dict) -> str:
+        """A passage's title > heading, as search's one-line matches name it."""
+        return " > ".join(filter(None, [row.get("title"), row.get("heading")]))
+
+    async def _read_passages(refs: list[str]) -> dict:
+        """search's reply for read: the full text of the passages with those refs, in order."""
+        rows = await _query(
+            "SELECT source, key, position, ref, title, heading, text, published_at FROM passage"
+            " WHERE ref = ANY(%(refs)s) ORDER BY array_position(%(refs)s, ref)",
+            {"refs": refs},
+        )
+        group_fields = ("title", "kind", "board", "posted_at", "updated_at")
+        reply = _by_source({"results": await _search_rows(rows, with_ref=True)}, group_fields)
+        found = await _query("SELECT ref FROM passage WHERE ref = ANY(%(refs)s)", {"refs": refs})
+        if missing := sorted(set(refs) - {row["ref"] for row in found}):
+            reply["note"] = f"No passage {', '.join(missing)}; search again for current refs."
+        return reply
+
+    async def _search_rows(ranked: list[dict], with_ref: bool = False) -> list[dict]:
+        """search's result rows for ranked passages: each section with its page's title and
+        kind, and per kind its dates; a Help topic as all its pages. with_ref adds each
+        passage's ref (on a Help topic's first page)."""
+
+        def of(source: str) -> list[dict]:
+            return [r for r in ranked if r["source"] == source]
+
+        posts = await _details(
             f"""
-            SELECT article_id::text AS key, position, {shown} FROM post_section
+            SELECT article_id::text AS key, position, {POST_FIELDS} FROM post_section
             WHERE (article_id::text, position)
                   IN (SELECT * FROM unnest(%(keys)s::text[], %(positions)s::int[]))
             """,
-            ranked,
+            of("post"),
         )
-        rows = [details[r["key"], r["position"]] for r in ranked]
-        return _by_source(_page(rows, limit, offset), source_fields)
-
-    @tool
-    async def search_game_systems(query: str, limit: int = 3, offset: int = 0) -> dict:
-        """Search how the game works: the game's own Help topics and other rule text from its
-        data files (tip pages such as the Chaos zone types, keyword tooltips such as Retain or
-        Weakness Attack, tutorial dialogue, event descriptions, popup messages), and Game8's
-        guides, split into sections. Covers game systems (Save Data and its scoring, Build
-        Presets, Distortion Adaptation, Epiphany, stress, Link Crash, potentials, gacha),
-        Chaos modes, areas and Waypoints, Simulation and boss modes (Full-Scale Offensive,
-        Spiral Tower), Ark City, events, seasons, missions, and a glossary. Use
-        it for "how does X work" and "what is X". query: a question or words; results come
-        best answer first, grouped by page: page_title, origin (Game Help with its menu, Game
-        text with its kind, or Game8), and for Game8 page_summary, updated_at and url. A Help
-        topic comes whole, each page a section; best_match marks the page that answers best.
-        Game8 sections also have heading ("A > B"), and offset and length (where text sits in
-        get_page's body; read around it when a section refers to another one). The game's
-        text is exact but short; Game8 has more detail but can be out of date, so the game's
-        text wins when they disagree. limit (at most 20) and total count results, a Help topic
-        being one; total counts the candidates found (at most about 90), not how many are
-        relevant."""
-        ranked = await _ranked("search_game_systems", query)
-        # A Help topic ranks by its best page (czn_data.search) and is shown with all its pages.
-        best_page = {r["key"]: r["position"] for r in ranked if r["source"] == "help"}
-        game8 = await _details(
+        updated = await _details(
             """
-            SELECT url AS key, position, summary AS page_summary, updated_at, "offset", length,
-                   data_fetched_at
-            FROM game8_section JOIN game8_page USING (url)
+            SELECT url AS key, position, updated_at FROM game8_section JOIN game8_page USING (url)
             WHERE (url, position) IN (SELECT * FROM unnest(%(keys)s::text[], %(positions)s::int[]))
             """,
-            [r for r in ranked if r["source"] == "game8"],
+            of("game8"),
         )
-        help_keys = list(best_page)
+        # A Help topic ranks by its best page (czn_data.search) and is shown with all its pages.
+        best_page = {r["key"]: r["position"] for r in of("help")}
         menus = {
             row["id"]: row["menu"]
             for row in await _query(
-                "SELECT id, menu FROM game_help WHERE id = ANY(%(keys)s)", {"keys": help_keys}
+                "SELECT id, menu FROM game_help WHERE id = ANY(%(keys)s)", {"keys": list(best_page)}
             )
         }
         help_pages: dict[str, list[dict]] = {}
         for page in await _query(
             "SELECT key, position, heading, text FROM passage"
             " WHERE source = 'help' AND key = ANY(%(keys)s) ORDER BY key, position",
-            {"keys": help_keys},
+            {"keys": list(best_page)},
         ):
             help_pages.setdefault(page["key"], []).append(page)
         rows = []
         for r in ranked:
-            row = {"page_title": r["title"], "heading": r["heading"], "text": r["text"]}
-            if r["source"] == "game8":
-                row |= {"origin": "Game8", "url": r["key"], **game8[r["key"], r["position"]]}
-            elif r["source"] == "help":
-                row |= {"origin": f"Game Help, {menus[r['key']]} menu", "help_key": r["key"]}
-            else:
-                kind = TEXT_KINDS[r["key"].split(":", 1)[0]]
-                row |= {"origin": f"Game text, {kind}"}
-            if r["source"] != "game8":
-                row["data_fetched_at"] = r["published_at"]
-            rows.append(row)
-        reply = _page(rows, limit, offset)
-        # Each shown Help topic becomes its pages, in order; with several, the page that ranked
-        # the topic is marked.
-        shown = []
-        for row in reply["results"]:
-            key = row.pop("help_key", None)
-            if key is None:
-                shown.append(row)
-                continue
-            pages = help_pages[key]
-            shown.extend(
-                row
-                | {"heading": page.get("heading"), "text": page["text"]}
-                | (
-                    {"best_match": True}
-                    if len(pages) > 1 and page["position"] == best_page[key]
-                    else {}
-                )
-                for page in pages
-            )
-        return _by_source(
-            reply | {"results": shown},
-            ("page_title", "origin", "page_summary", "updated_at", "url", "data_fetched_at"),
-        )
+            start = len(rows)
+            # Read rows come through _query, which drops empty fields such as a missing title
+            # or the text of a section that is only a heading.
+            section = {k: r.get(k) for k in ("title", "heading", "text")}
+            match r["source"]:
+                case "post":
+                    rows.append(posts[r["key"], r["position"]] | {"kind": "announcement"})
+                case "guide":
+                    rows.append(section | {"kind": "guide"})
+                case "game8":
+                    rows.append(section | {"kind": "guide"} | updated[r["key"], r["position"]])
+                case "game_text":
+                    text_kind = TEXT_KINDS[r["key"].split(":", 1)[0]]
+                    rows.append(section | {"kind": f"game rules ({text_kind})"})
+                case "help":
+                    pages = help_pages[r["key"]]
+                    kind = f"game rules (Help, {menus[r['key']]} menu)"
+                    rows.extend(
+                        {"title": r.get("title"), "kind": kind}
+                        | {"heading": page.get("heading"), "text": page["text"]}
+                        | (
+                            {"best_match": True}
+                            if len(pages) > 1 and page["position"] == r["position"]
+                            else {}
+                        )
+                        for page in pages
+                    )
+            if with_ref:
+                rows[start]["ref"] = r["ref"]
+        return rows
 
-    @tool
-    async def get_page(url: str, offset: int = 0, length: int = PAGE_CHARS) -> dict | None:
-        """Text of one scraped page, by URL: a prydwen.gg URL from search_guides or another
-        tool (url or prydwen_url), or a game8.co URL from search_game_systems. Other URLs
-        return nothing. body holds at most length characters (up to 15,000) from offset (a
-        character position); the reply's length is the whole page's. To read around a search
-        section, start about 1,500 before its offset with a length of a few thousand."""
-        rows = await _query(
-            """
-            SELECT url, title, body, page.data_fetched_at
-            FROM prydwen.document JOIN prydwen.page USING (url) WHERE url = %(url)s
-            UNION ALL
-            SELECT url, title, body, data_fetched_at FROM game8_page WHERE url = %(url)s
-            """,
-            {"url": url},
-        )
-        if not rows:
-            return None
-        page = rows[0]
-        body = page.pop("body", "")
-        start = max(offset, 0)
-        end = start + max(1, min(length, PAGE_CHARS))
-        page |= {"length": len(body), "body": body[start:end]}
-        if end < len(body):
-            page["note"] = (
-                f"Showing characters {start}-{end} of {len(body)}; offset={end} reads on."
-            )
-        return page
-
-    @tool
-    async def data_status() -> dict:
-        """Freshness of each source (prydwen, e7bot game data, stove posts, game8, gamefiles):
-        items stored, newest fetch, and the last attempt with its error; for gamefiles, the
-        game build its text comes from. Failed fetches never replace served data."""
+    @mcp.custom_route("/data-status", methods=["GET"])
+    async def data_status(request: Request) -> JSONResponse:
+        """REST endpoint for maintainers: freshness of each source (prydwen, e7bot game data,
+        stove posts, game8, gamefiles): items stored, newest fetch, and the last attempt with
+        its error; for gamefiles, the game build its text comes from. Failed fetches never
+        replace served data."""
+        if not await authorized(request):
+            return JSONResponse({"error": "invalid or missing Bearer token"}, 401)
         summary = await _query(
             """
             SELECT count(*) AS pages, min(data_fetched_at) AS oldest_data,
@@ -1634,32 +1647,17 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
             ) latest ON true
             """
         )
-        return {
+        status = {
             "prydwen": summary[0] | {"errors": errors},
             "e7bot": e7bot[0],
             "stove": stove[0],
             "game8": game8[0],
             "gamefiles": gamefiles[0],
         }
+        return JSONResponse(json.loads(json.dumps(status, default=str)))
 
-    @tool
-    async def plan_deck(character: str) -> dict | None:
-        """Plan the character's deck for a Chaos run. Uses the newest leaderboard season's Save
-        Data decks
-        and Prydwen's guide decks and ratings. cards: each card the decks use, best first, with
-        category, cost and color, and per version (base or Epiphany I-V) Prydwen's rating, the
-        share of leaderboard decks taking it, how many Prydwen decks list it, and common Divine
-        Epiphanies. removals: up to 5 starting cards the decks drop (a deck can remove at most
-        5), with the share of decks that drop each; the Ego skill is never one. equipment: each
-        item with its slot, the share of leaderboard decks wearing it, and how many Prydwen
-        decks list it. prydwen_decks are Prydwen's decks, each with its deck code (to paste
-        into the game's deck import) when Prydwen gives one, and duplicates: the cards the deck
-        holds more than one of, which are where its Duplicates go, and faint_memory: its points
-        as save_data_cost gives them, without removals (Prydwen lists none). Names are the game's; use
-        get_card for card text."""
-        found = await _find_character(character)
-        if found is None:
-            return None
+    async def _plan(found: dict) -> dict:
+        """character_guide's plan part for the character row found."""
         slug = {"slug": found["slug"]}
         season_rows = await _query(
             "SELECT max(season) AS season, count(*) AS decks FROM leaderboard_deck"
@@ -1692,17 +1690,16 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
             ]
             deck["faint_memory"] = await _cost(found["slug"], held, [])
         plan = {
-            "character": found["name"],
             "season": season,
             "leaderboard_decks": season_rows[0].get("decks", 0) if season_rows else 0,
-            "prydwen_decks": decks,
+            "guide_decks": decks,
             "cards": cards,
             "removals": removals,
             "equipment": equipment,
         }
         if not cards:
             plan["note"] = (
-                "No leaderboard or Prydwen deck uses this character yet, so there is nothing"
+                "No leaderboard or guide deck uses this character yet, so there is nothing"
                 " to plan from."
             )
         return plan
@@ -1784,10 +1781,11 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
         screen, including follow-up screens whose title is not an event name, and the result
         covers only those choices. Look up each new screen the same way.
         Without choices: each version of the event (the game picks one per run) with its
-        first screen in short form, versions with the same first screen sharing one entry.
-        opened_from names versions whose choices lead to this one; replace_link_from names
-        versions with a screen whose replace_link_encounter_id names it. follow_up: the name
-        matched a later screen's title, not the event's.
+        first screen in short form, versions with the same first screen sharing one entry;
+        version numbers the versions it covers. opened_from numbers versions whose choices
+        lead to this one; replace_link_from numbers versions with a screen whose
+        replace_link_encounter_id names it. follow_up: the name matched a later screen's
+        title, not the event's.
         With choices, screen is the screen's own title when it differs from the event's.
         A screen: step (its number within the event), shows (how many choices the screen
         offers; left out when conditions decide it), auto_choice (a choice the game takes
@@ -1812,16 +1810,18 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
             if not versions:
                 return None
             steps = await _encounter_step_rows([s for v in versions for s in v["steps"]])
-            # Versions with the same first screen are listed once, with every URL.
+            # Versions with the same first screen are listed once, numbered by their order.
             overview: dict[str, dict] = {}
-            for v in versions:
+            for number, v in enumerate(versions, 1):
                 start = v["steps"][0]
                 preview = _screen_preview(steps[start])
                 links = {
-                    "opened_from": [o["url"] for o in versions if start in o["steps"][1:]],
+                    "opened_from": [
+                        n for n, o in enumerate(versions, 1) if start in o["steps"][1:]
+                    ],
                     "replace_link_from": [
-                        o["url"]
-                        for o in versions
+                        n
+                        for n, o in enumerate(versions, 1)
                         if o is not v
                         and any(
                             steps[s].get("extra", {}).get("replace_link_encounter_id") == start
@@ -1830,11 +1830,10 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
                     ],
                 }
                 shown = overview.setdefault(
-                    json.dumps(preview, sort_keys=True, default=str),
-                    {"url": None, "data_fetched_at": v.get("data_fetched_at")} | preview,
+                    json.dumps(preview, sort_keys=True, default=str), {"version": []} | preview
                 )
-                shown["url"] = f"{shown['url']}, {v['url']}" if shown["url"] else v["url"]
-                shown |= {key: urls for key, urls in links.items() if urls}
+                shown["version"].append(number)
+                shown |= {key: numbers for key, numbers in links.items() if numbers}
             title = versions[0]["title"]
             return _present(
                 {
@@ -1869,8 +1868,6 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
                 "name": match["name"],
                 "screen": screen.get("name") if screen.get("name") != match["name"] else None,
                 "step": match["step"],
-                "url": match["url"],
-                "data_fetched_at": match.get("data_fetched_at"),
                 "shows": _shows(screen),
                 "auto_choice": screen.get("auto_choice"),
                 "appears_when": screen.get("appears_when"),
@@ -1882,38 +1879,107 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
             }
         )
 
-    @tool
-    async def list_encounters(
+    @tool(name="list")
+    async def list_data(
+        kind: ListKind,
+        character: str | None = None,
+        category: str | None = None,
+        type: str | None = None,
+        tag: str | None = None,
+        color: str | None = None,
+        base_only: bool | None = None,
+        slot: str | None = None,
+        rarity: str | None = None,
+        name: str | None = None,
         chaos: str | None = None,
-        reward: Literal["copy", "removal", "epiphany", "divine_epiphany", "equipment", "card"]
-        | None = None,
-        offset: int = 0,
-    ) -> dict:
-        """Chaos events, optionally only those that can appear in one Chaos and those with an
-        answer giving one reward class. Events offering card copies come first, then
-        removals. Each row is one version of an event and names the answers that give the
-        requested class (or copies and removals), with step: the screen they are on, 1 being
-        the first."""
-        offset = max(offset, 0)
-        params = {"chaos": await _resolve_chaos(chaos), "reward": reward, "offset": offset}
-        return await _listing(LIST_ENCOUNTERS_SQL, params, offset=offset)
-
-    @tool
-    async def list_divine_epiphanies(
-        card_type: str | None = None,
+        reward: Reward | None = None,
         cost: int | None = None,
         god: str | None = None,
-        offset: int = 0,
+        gender: str | None = None,
+        element: str | None = None,
+        character_class: str | None = None,
+        offset: int | None = None,
     ) -> dict:
-        """Divine Epiphanies that can be added to a card: optionally only those that apply to a
-        card type (Attack, Skill, Upgrade) and a card cost, or that a god offers (Vitor,
-        Caligo, Circen, Diallos, Nihilum, Secred). Each has its effect text, the card types and
-        cost range it applies to (applies_to), and the gods that offer it."""
-        offset = max(offset, 0)
+        """Every item of one kind, optionally filtered; each kind takes only its own filters.
+        - cards (up to 120): character; category (starting: in the starting deck, unique:
+          gained in a run, ego: the Ego skill cast with EP and not in the deck, collapse:
+          replaces a card when the character's Collapse triggers, generated: created by other
+          cards, neutral, monster, forbidden); type (Attack, Skill, Upgrade, ...); tag (a card
+          tag such as Exhaust); color (the rarity color players name cards by: White, Blue,
+          Purple, Gold, Orange); base_only (default true) skips Epiphany and other versions.
+        - equipment (30 per offset): slot (Weapon, Armor, Trinket), rarity (Rare, Legendary,
+          ...), name, chaos (only what drops in that Chaos); with effect text and where it
+          drops (obtained_from), and stats per level when name is given.
+        - characters: gender (female, male), element (Passion, Justice, Order, Void,
+          Instinct), character_class (Striker, Vanguard, Ranger, Hunter, Controller,
+          Psionic), rarity (4 or 5).
+        - events (30 per offset): Chaos events, by chaos (those that can appear in it) and
+          reward (events with an answer giving that class); copies first, then removals. Each
+          row is one version of an event with the answers giving the class (or copies and
+          removals) and step, the screen they are on (1 is the first).
+        - divine_epiphanies (30 per offset): by type (Attack, Skill, Upgrade) and cost (the
+          card's), or god (Vitor, Caligo, Circen, Diallos, Nihilum, Secred); each with effect
+          text, the card types and costs it applies to (applies_to), and the gods offering it.
+        - banners: gacha banners live or upcoming (Global server), live first, each group
+          ending soonest first: kind (character or partner), rarity, rerun, season phase,
+          start and end (UTC), featured rate-ups, and the 4-star secondary rate-ups."""
+        filters = {
+            "character": character,
+            "category": category,
+            "type": type,
+            "tag": tag,
+            "color": color,
+            "base_only": base_only,
+            "slot": slot,
+            "rarity": rarity,
+            "name": name,
+            "chaos": chaos,
+            "reward": reward,
+            "cost": cost,
+            "god": god,
+            "gender": gender,
+            "element": element,
+            "character_class": character_class,
+            "offset": offset,
+        }
+        given = {filter_name for filter_name, value in filters.items() if value is not None}
+        if wrong := given - LIST_FILTERS[kind]:
+            valid = ", ".join(sorted(LIST_FILTERS[kind])) or "none"
+            raise ToolError(f"{kind} takes no {', '.join(sorted(wrong))}; its filters: {valid}.")
+        start = max(offset or 0, 0)
+        match kind:
+            case "cards":
+                return await _list_cards(
+                    character, category, type, tag, color, True if base_only is None else base_only
+                )
+            case "equipment":
+                return await _list_equipment(slot, rarity, name, chaos, start)
+            case "characters":
+                rows = await _query(
+                    LIST_CHARACTERS_SQL,
+                    {
+                        "gender": gender,
+                        "element": element,
+                        "class": character_class,
+                        "rarity": int(rarity) if rarity else None,
+                    },
+                )
+                return _reply(rows, len(rows), None)
+            case "events":
+                params = {"chaos": await _resolve_chaos(chaos), "reward": reward, "offset": start}
+                return await _listing(LIST_ENCOUNTERS_SQL, params, offset=start)
+            case "divine_epiphanies":
+                return await _list_divine_epiphanies(type, cost, god, start)
+            case "banners":
+                return await _list_banners()
+
+    async def _list_divine_epiphanies(
+        card_type: str | None, cost: int | None, god: str | None, offset: int
+    ) -> dict:
         return await _listing(
             f"""
-            SELECT text, {DIVINE_APPLIES} AS applies_to, gods, rarities, url,
-                   data_fetched_at, count(*) OVER () AS total
+            SELECT text, {DIVINE_APPLIES} AS applies_to, gods, rarities,
+                   count(*) OVER () AS total
             FROM divine_epiphany
             WHERE (%(type)s::text IS NULL OR card_types = '{{}}'
                    OR %(type)s ILIKE ANY (card_types))

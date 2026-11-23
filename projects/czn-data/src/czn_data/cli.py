@@ -211,7 +211,7 @@ def _eval_search(only_if_changed: bool = False) -> bool:
         if case.rank is None or case.rank > search_eval.TOP:
             log.info(
                 "search missed",
-                extra={"tool": case.tool, "query": case.query, "rank": case.rank, "top": case.top},
+                extra={"kind": case.kind, "query": case.query, "rank": case.rank, "top": case.top},
             )
     log.info("search evaluated", extra={"recall": result.recall, "mrr": result.mrr})
     if not _export(lambda: search_eval.export_metrics(result)):

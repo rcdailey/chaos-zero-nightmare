@@ -68,7 +68,7 @@ groups:
           description: >-
             The previous data is still served. Failed fields are in the
             czn_scrape_validation_failures series (labels kind, field), in VictoriaLogs
-            (`"parse failed"`), and in the MCP data_status tool. Fix the parser, then run
+            (`"parse failed"`), and in the server's GET /data-status route. Fix the parser, then run
             `czn-data reparse`. A `.count` field means a page lost many rows; if Prydwen
             really removed them, run `czn-data reparse --allow-shrink`.
 
@@ -116,7 +116,7 @@ groups:
           description: >-
             The previous e7bot data is still served. Failed fields are in the
             czn_e7bot_validation_failures series (label field), in VictoriaLogs
-            (`"e7bot run failed"`), and in the MCP data_status tool. A `decrypt` field means
+            (`"e7bot run failed"`), and in the server's GET /data-status route. A `decrypt` field means
             e7bot changed its key (see the site's JavaScript); a `.count` field means a list lost
             many items, which `czn-data scrape-e7bot --allow-shrink` accepts.
 
@@ -149,7 +149,7 @@ groups:
           description: >-
             Stored posts are kept. Failed fields are in the czn_stove_validation_failures series
             (label field), in VictoriaLogs (`"board failed"`, `"post fetch failed"`,
-            `"post invalid"`), and in the MCP data_status tool. A `list.count` field means a
+            `"post invalid"`), and in the server's GET /data-status route. A `list.count` field means a
             board lost many posts, which `czn-data scrape-stove --allow-shrink` accepts.
 
       - alert: CznGame8Stale
@@ -181,7 +181,7 @@ groups:
           description: >-
             Stored pages are kept. Failed fields are in the czn_game8_validation_failures series
             (label field), in VictoriaLogs (`"listing failed"`, `"page fetch failed"`, `"page
-            has no guide content"`), and in the MCP data_status tool. A `selection.count` field
+            has no guide content"`), and in the server's GET /data-status route. A `selection.count` field
             means Game8's game page lists many fewer kept pages, which `czn-data scrape-game8
             --allow-shrink` accepts; a `selection.pages` field means its headings changed (see
             INCLUDED_HEADINGS in czn_data.game8).
@@ -218,7 +218,7 @@ groups:
             refused"`) means the CDN dropped the build folder: set BUILD in czn_data.gamefiles
             from patch-meta.json on a device. Otherwise failed fields are in the
             czn_gamefiles_validation_failures series (label field), in VictoriaLogs (`"download
-            failed, keeping stored files"`), and in the MCP data_status tool. A `table.count`
+            failed, keeping stored files"`), and in the server's GET /data-status route. A `table.count`
             field means a table lost many rows, which `czn-data scrape-gamefiles
             --allow-shrink` accepts.
 
@@ -254,9 +254,9 @@ groups:
       - alert: CznSearchRecallLow
         expr: >-
           max(
-            last_over_time(czn_search_recall{tool=""}[26h])
-            and tlast_over_time(czn_search_recall{tool=""}[26h])
-              == scalar(max(tlast_over_time(czn_search_recall{tool=""}[26h])))
+            last_over_time(czn_search_recall{kind=""}[26h])
+            and tlast_over_time(czn_search_recall{kind=""}[26h])
+              == scalar(max(tlast_over_time(czn_search_recall{kind=""}[26h])))
           ) < 0.85
         labels:
           severity: warning
@@ -264,8 +264,7 @@ groups:
           summary: The search tools found answers to only {{ $value | humanizePercentage }} of
             their known questions
           description: >-
-            The daily run measures search_posts, search_game_systems and search_guides on the
-            questions in czn_data/search_eval.toml (recall in the top 5; 0.93 when this alert
+            The daily run measures the search tool, every kind together, on the questions in czn_data/search_eval.toml (recall in the top 5; 0.93 when this alert
             was written). VictoriaLogs (`"search missed"`) lists each missed question with the
             passages ranked above its answer; `czn-data eval-search` reruns it.
 

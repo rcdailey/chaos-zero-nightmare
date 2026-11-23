@@ -163,8 +163,8 @@ becomes start and end dates; a section without one takes the period of its "■"
 event's details carry the event's dates. A date without a year takes the post's year, and text
 that does not parse keeps no dates.
 
-Sections are searched as described in "How search ranks". `search_posts` adds the post words
-for a few player words the posts never use, such as "restriction" for "banned".
+Sections are searched as described in "How search ranks". A search covering announcements adds
+the post words for a few player words the posts never use, such as "restriction" for "banned".
 
 ## What gets stored from Game8
 
@@ -180,9 +180,8 @@ project uses Game8 by the owner's choice and keeps the load small.
 The build splits each page at its headings (h2 to h4) into sections whose heading names their
 parents ("Best Teams > Aavarck Best Teams"). Tables become one line per row, the table of
 contents and the related-guide link lists are dropped, images are lost, and long sections become
-overlapping pieces as the posts do. Each section records where its text sits in the page text, so
-`get_page` can read around it. Some pages are out of date; each result carries Game8's update
-date, and newer pages win close calls.
+overlapping pieces as the posts do. Some pages are out of date; each result carries Game8's
+update date, and newer pages win close calls.
 
 ## What gets stored from the game files
 
@@ -205,9 +204,8 @@ words (popups and confirmations, not labels and buttons) grouped by the feature 
 (`ui_savedata_...`) into pieces of about 1,200 characters. Story scenes, item names, and combat
 tooltips are left out.
 
-`search_game_systems` ranks the Help topics, these passages, and the Game8 sections together;
-each result names its origin. The game's own text counts as the newest source, so it wins close
-calls with Game8.
+The `search` tool serves the Help topics and these passages as the `rules` kind. The game's own
+text counts as the newest source, so it wins close calls with guides.
 
 The game asks a version service, whose address is unknown, for its current build folder on the
 CDN. So `BUILD` in `czn_data.gamefiles` names one folder and is updated by hand after a patch
@@ -222,7 +220,9 @@ heading, and first 300 characters from a local model (BAAI/bge-small-en-v1.5 thr
 67 MB, CPU). The build embeds only new or changed passages; embedding all of them (about 5,000)
 takes under a minute on a desktop CPU.
 
-A search tool ranks the passages of its sources in two stages (`czn_data.search`):
+The `search` tool takes kinds (`rules`: Help and game text; `announcements`: posts; `guides`:
+Prydwen and Game8 sections) and ranks the passages of every kind asked for together, in two
+stages (`czn_data.search`):
 
 1. Three searches each nominate up to 30 candidates: BM25 over the passages' words (the
    `pg_textsearch` extension, which weighs rare words above common ones), the passages closest
@@ -397,10 +397,19 @@ in the connector's advanced settings. Its access tokens must be JWTs whose `aud`
 MCP tools are for Claude, and REST routes are for programs. Tools reply in plain text: one
 `key: value` line per field, one `-` line per list item with its name first, and fields that every
 item shares stated once on an `every item:` line. Replies leave out fields that only programs use,
-such as ids, slugs, and image URLs. Programs MUST NOT call MCP tools; add a REST route that
-replies in JSON instead.
+such as ids and slugs, and anything naming where data was scraped: URLs, site names, and fetch
+times. No tool takes a URL. Guide opinions are labeled with a `guide_` prefix (`guide_rating`,
+`guide_review`, `guide_tier`). The build removes links and scraped site names from the text it
+stores for search. Programs MUST NOT call MCP tools; add a REST route that replies in JSON
+instead.
+
+The tools are `lookup` (several names at once), `match_card_text`, `character_guide` (several
+parts of one character at once), `get_encounter`, `search`, `list` (one kind of item with that
+kind's filters), and `save_data_cost`.
 
 REST routes take the same Bearer token the MCP endpoint takes and answer 401 without a valid one.
+`GET /data-status` gives each source's freshness for maintainers: items stored, newest fetch,
+and the last attempt with its error.
 `GET /characters` lists every character's name and card art URL, for the companion app's
 character picker:
 

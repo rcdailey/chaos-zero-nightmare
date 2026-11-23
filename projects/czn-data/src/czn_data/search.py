@@ -6,7 +6,10 @@ closest in meaning (embedding dot product), and titles or headings that match th
 loosely, which catches typos ("spiral towr"). Then a cross-encoder (``czn_data.rerank``) reads
 the query with each candidate and scores how well the candidate answers it; that score orders
 the results. Newer sources win close calls: a candidate gains up to FRESHNESS_WEIGHT by how
-recent its source is among the candidates, and the game's own text counts as current.
+recent its source is among the candidates, and the game's own text counts as current. The
+cross-encoder favors short prose over tables, so scores compare poorly across kinds (a guide's
+prose summary of an old shop beat the current announcement's price table); callers rank each
+kind on its own (``rank_by_kind``).
 
 ``czn-data eval-search`` measures this ranking against ``search_eval.toml``; change the
 constants here only with its numbers before and after.
@@ -18,12 +21,13 @@ from psycopg.rows import dict_row
 
 from . import embed, rerank
 
-# The passage sources each search tool ranks.
-TOOL_SOURCES = {
-    "search_posts": ("post",),
-    "search_game_systems": ("help", "game8", "game_text"),
-    "search_guides": ("guide",),
+# The passage sources of each kind the search tool takes; a search ranks them all together.
+KIND_SOURCES = {
+    "rules": ("help", "game_text"),
+    "announcements": ("post",),
+    "guides": ("guide", "game8"),
 }
+ALL_SOURCES = tuple(source for sources in KIND_SOURCES.values() for source in sources)
 # Candidates each first-stage search nominates; the cross-encoder scores at most three times
 # this many passages per query.
 CANDIDATES = 30
@@ -83,7 +87,8 @@ named AS (
     ORDER BY {_NAMED} DESC
     LIMIT {CANDIDATES}
 )
-SELECT source, key, position, title, heading, text, published_at, {_NAMED} AS named FROM pool
+SELECT source, key, position, ref, title, heading, text, published_at, {_NAMED} AS named
+FROM pool
 WHERE (source, key, position) IN (
     SELECT * FROM words UNION SELECT * FROM meaning UNION SELECT * FROM named
 )
@@ -136,3 +141,16 @@ async def search(
             topics.add(row["key"])
         best.append(row)
     return best
+
+
+def kind_of(source: str) -> str:
+    """The search kind a passage source belongs to."""
+    return next(kind for kind, sources in KIND_SOURCES.items() if source in sources)
+
+
+def rank_by_kind(ranked: list[dict]) -> dict[str, list[dict]]:
+    """search's rows split by kind, each kind's rows best first."""
+    kinds: dict[str, list[dict]] = {}
+    for row in ranked:
+        kinds.setdefault(kind_of(row["source"]), []).append(row)
+    return kinds

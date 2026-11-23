@@ -398,7 +398,7 @@ def _post_sections(sources: _Sources) -> list[dict]:
         post = {
             "article_id": article["article_id"],
             "board": BOARDS.get(article["board"], str(article["board"])),
-            "post_title": article["title"],
+            "post_title": _scrubbed(article["title"]),
             "posted_at": article["created_at"],
             "url": POST_URL.format(article["article_id"]),
             "data_fetched_at": article["fetched_at"],
@@ -411,8 +411,25 @@ def _post_sections(sources: _Sources) -> list[dict]:
             content,
             created_at,
         )
-        rows.extend(post | vars(section) for section in sections)
+        rows.extend(
+            post
+            | {k: _scrubbed(v) if k in ("heading", "text") else v for k, v in vars(section).items()}
+            for section in sections
+        )
     return rows
+
+
+# Links and the names of the sites data is scraped from, which text served to Claude leaves out:
+# where data comes from is the scrapers' concern, and Claude cannot open a link.
+_LINK = re.compile(r"\s*https?://\S+")
+_SITE = re.compile(r"\b(?:Prydwen(?:\.gg)?|Game8|GameWith|e7bot)\b", re.IGNORECASE)
+
+
+def _scrubbed(text: str | None) -> str | None:
+    """text without links, and with a scraped site's name read as "the guide site"."""
+    if not text:
+        return text
+    return _SITE.sub("the guide site", _LINK.sub("", text))
 
 
 def _game8(sources: _Sources) -> dict[str, list[dict]]:
@@ -547,6 +564,8 @@ def _passages(
             }
             for text in game_texts(tables)
         ]
+    for row in rows:
+        row |= {field: _scrubbed(row.get(field)) for field in ("title", "heading", "text")}
     texts = [embed.passage_text(r["title"], r.get("heading"), r["text"]) for r in rows]
     missing = [text for text in dict.fromkeys(texts) if text not in sources.embeddings]
     vectors = dict(sources.embeddings)

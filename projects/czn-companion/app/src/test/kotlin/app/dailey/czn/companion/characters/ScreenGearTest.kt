@@ -13,20 +13,36 @@ class ScreenGearTest {
         val crown = ScreenItem("Crown of Corruption", "Legendary", "Armor", "Corrupt\nfoes")
         val fairy = ScreenItem("Fairy King's Crown", "Unique", "Armor", "Fairy")
         val hunter = ScreenItem("Big Game Hunter", "Rare", "Weapon", "+100%", mapOf("ATK" to "25"))
-        val harmonized = ScreenItem("Harmonization: Big Game Hunter", "Rare", "Weapon", "+150%")
+        val harmonized =
+            ScreenItem(
+                "Harmonization: Big Game Hunter",
+                "Rare",
+                "Weapon",
+                "+150%",
+                transformed = true,
+            )
+        val key = ScreenItem("Key of Sleep", "Legendary", "Weapon", "Sleep")
+        val twisted = ScreenItem("Key to the Twisted Dream", "Unique", "Weapon", "Dream")
+        val eye = ScreenItem("Eye of Gluttony", "Legendary", "Trinket", "Eat", transformed = true)
         val slots =
             listOf(
                 ScreenSlot(1, "match", listOf(hammer)),
                 ScreenSlot(1, "close", listOf(crown, fairy)),
                 ScreenSlot(2, "match", listOf(hunter, harmonized)),
+                ScreenSlot(2, "match", listOf(key, twisted)),
+                ScreenSlot(3, "match", listOf(eye)),
             )
         assertEquals(
             "Gear in slots, by row from the top, left to right:\n" +
                 "row 1: Runic Hammer (Legendary Weapon, ATK 28/82): +20% Crit\n" +
                 "row 1: Crown of Corruption (Legendary Armor): Corrupt foes or " +
                 "Fairy King's Crown (Unique Armor): Fairy\n" +
-                "row 2: Big Game Hunter (Rare Weapon, ATK 25): +100% / " +
-                "Harmonization: Big Game Hunter (Rare Weapon): +150%",
+                "row 2: Big Game Hunter (Rare Weapon, ATK 25): +100%; " +
+                "if a Chaos event transformed it this run: " +
+                "Harmonization: Big Game Hunter (Rare Weapon): +150%\n" +
+                "row 2: Key of Sleep (Legendary Weapon): Sleep / " +
+                "Key to the Twisted Dream (Unique Weapon): Dream\n" +
+                "row 3: Eye of Gluttony (Legendary Trinket): Eat",
             ScreenGear.describe(slots),
         )
     }

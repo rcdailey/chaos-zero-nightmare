@@ -125,8 +125,8 @@ COLUMNS = {
         " attack defense image_url prydwen_name prydwen_url source url data_fetched_at"
     ),
     "equipment": (
-        "game_id name rarity slot text stats obtained_from image_url icon_name prydwen_name"
-        " prydwen_url source url data_fetched_at"
+        "game_id name rarity slot text stats obtained_from image_url icon_name transformed"
+        " prydwen_name prydwen_url source url data_fetched_at"
     ),
     "fragment_set": (
         "game_id name bonuses image_url prydwen_name prydwen_url source url data_fetched_at"
@@ -919,10 +919,30 @@ def _e7_partners(sources: _Sources) -> list[dict]:
     return rows
 
 
+# Reward tags of the forms Chaos events turn worn gear into: Harmonization and Attune (tuning),
+# Mutation (variation), Distortion, and Bloom (blooming).
+TRANSFORM_TAGS = {"tuning", "variation", "distortion", "blooming"}
+
+
+def _transformed(relic: dict, icon_names: dict[str, set[str]]) -> bool:
+    """Whether ``relic`` is a transformed form of other gear: tagged as one, or named "<form>:
+    <name of an item drawn with the same icon>", as the arena forms (tagged only ``etc``) are.
+    A colon alone is no rule: "Command: #108" is a base item."""
+    if not TRANSFORM_TAGS.isdisjoint(relic.get("reward_tag") or ()):
+        return True
+    name = relic["name"].replace("\u2019", "'")
+    siblings = icon_names.get(relic.get("icon_name"), set()) - {name}
+    return any(name.endswith(f": {sibling}") for sibling in siblings)
+
+
 def _e7_equipment(sources: _Sources) -> list[dict]:
     """Equipment by name; the game repeats some items under several ids (arena copies) with
     the same name and effect, which are one item to a player."""
     relics, fetched_at = sources.items("czn/relics/list")
+    icon_names = defaultdict(set)
+    for relic in relics:
+        if wearable(relic) and relic.get("icon_name"):
+            icon_names[relic["icon_name"]].add(relic["name"].replace("\u2019", "'"))
     rows = [
         {
             "game_id": relic["id"],
@@ -932,6 +952,7 @@ def _e7_equipment(sources: _Sources) -> list[dict]:
             "text": "\n".join(plain(skill["description"]) for skill in relic["skills"]),
             "stats": {},
             "icon_name": relic.get("icon_name"),
+            "transformed": _transformed(relic, icon_names),
             "source": "e7bot",
             "url": URLS["equipment"],
             "data_fetched_at": fetched_at,

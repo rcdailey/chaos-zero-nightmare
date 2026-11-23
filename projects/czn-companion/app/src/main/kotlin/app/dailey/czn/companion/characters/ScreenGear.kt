@@ -26,6 +26,8 @@ data class ScreenItem(
     val text: String,
     /** Stat name to its values per upgrade level, such as "ATK" to "28/45/62/74/82". */
     val stats: Map<String, String> = emptyMap(),
+    /** A form a Chaos event turns worn gear into, drawn with its base item's icon. */
+    val transformed: Boolean = false,
 )
 
 @Serializable
@@ -67,17 +69,25 @@ class ScreenGear(
          * The text Claude reads: a heading, then one line per named slot, such as "row 1: Runic
          * Hammer (Legendary Weapon, ATK 28/45/62/74/82): +20% Critical Damage ..."; null when
          * the server named no slot. Slots are not numbered: left-out slots (empty ones) would
-         * shift the numbers.
+         * shift the numbers. Transformed forms follow their base item as a conditional note, so
+         * Claude assumes the base item unless the run shows the transformation.
          */
         fun describe(slots: List<ScreenSlot>): String? {
             if (slots.isEmpty()) return null
             val lines =
                 slots.sortedBy(ScreenSlot::row).map { slot ->
-                    "row ${slot.row}: " +
-                        slot.items.joinToString(
-                            if (slot.result == "close") " or " else " / ",
-                            transform = ::describe,
-                        )
+                    val separator = if (slot.result == "close") " or " else " / "
+                    val (forms, bases) = slot.items.partition(ScreenItem::transformed)
+                    val worn = bases.ifEmpty { forms }
+                    val note =
+                        if (bases.isEmpty() || forms.isEmpty()) {
+                            ""
+                        } else {
+                            "; if a Chaos event transformed it this run: " +
+                                forms.joinToString(" / ", transform = ::describe)
+                        }
+                    "row ${slot.row}: " + worn.joinToString(separator, transform = ::describe) +
+                        note
                 }
             return "Gear in slots, by row from the top, left to right:\n" + lines.joinToString("\n")
         }

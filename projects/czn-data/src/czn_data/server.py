@@ -814,7 +814,8 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
                        FILTER (WHERE e.name IS NOT NULL) AS names,
                    jsonb_agg(jsonb_strip_nulls(jsonb_build_object(
                        'name', e.name, 'rarity', e.rarity, 'slot', e.slot, 'text', e.text,
-                       'stats', nullif(e.stats, '{}'::jsonb))))
+                       'stats', nullif(e.stats, '{}'::jsonb),
+                       'transformed', coalesce(e.transformed, false))))
                        FILTER (WHERE e.name IS NOT NULL) AS items
             FROM e7bot.gear_print p
             LEFT JOIN equipment e ON e.icon_name = p.icon_name

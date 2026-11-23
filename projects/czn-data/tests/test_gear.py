@@ -32,13 +32,14 @@ class OneSlotPerIcon:
         ]
 
 
-def relic(relic_id: str, name: str, icon: str) -> dict:
+def relic(relic_id: str, name: str, icon: str, tags: tuple[str, ...] = ("fgt",)) -> dict:
     return {
         "id": relic_id,
         "name": name,
         "rarity": "RARITY_RARE",
         "relic_category": "EQUIPMENT",
         "relic_type": "EQUIP_WEAPON",
+        "reward_tag": list(tags),
         "skills": [{"description": f"{name} effect"}],
         "icon_name": icon,
     }
@@ -86,7 +87,10 @@ def endpoint(serve, conn, monkeypatch):
     monkeypatch.setattr("czn_data.server.GearIdentifier", OneSlotPerIcon)
     relics = [
         relic("eq_1", "Big Game Hunter", "relics/relic_1195"),
-        relic("eq_2", "Harmonization: Big Game Hunter", "relics/relic_1195"),
+        relic("eq_2", "Harmonization: Big Game Hunter", "relics/relic_1195", ("ca", "tuning")),
+        # A form without a transform tag, as arena forms are, and a base item with a colon.
+        relic("eq_4", "Distortion: Big Game Hunter", "relics/relic_1195", ("etc",)),
+        relic("eq_5", "Command: #108", "relics/relic_1195"),
         relic("eq_3", "Runic Hammer", "relics/relic_5084"),
     ]
     client = serve(
@@ -115,23 +119,36 @@ def test_identify_gear_names_every_item_drawn_with_the_matched_icon(endpoint):
     assert response.status_code == 200
     body = response.json()
     assert body["model"] == MODEL
-    assert [(g["result"], g["row"], g["names"]) for g in body["gear"]] == [
-        ("match", 1, ["Big Game Hunter", "Harmonization: Big Game Hunter"])
+    names = [
+        "Big Game Hunter",
+        "Command: #108",
+        "Distortion: Big Game Hunter",
+        "Harmonization: Big Game Hunter",
     ]
+    assert [(g["result"], g["row"], g["names"]) for g in body["gear"]] == [("match", 1, names)]
+    items = body["gear"][0]["items"]
+    assert {item["name"]: item["transformed"] for item in items} == {
+        "Big Game Hunter": False,
+        "Command: #108": False,
+        "Distortion: Big Game Hunter": True,
+        "Harmonization: Big Game Hunter": True,
+    }
     # Each named item comes with what comparing gear needs; stats only where the data has them.
-    assert body["gear"][0]["items"] == [
+    assert [items[0], items[3]] == [
         {
             "name": "Big Game Hunter",
             "rarity": "Rare",
             "slot": "Weapon",
             "text": "Big Game Hunter effect",
             "stats": {"ATK": "25/41/56/67/74"},
+            "transformed": False,
         },
         {
             "name": "Harmonization: Big Game Hunter",
             "rarity": "Rare",
             "slot": "Weapon",
             "text": "Harmonization: Big Game Hunter effect",
+            "transformed": True,
         },
     ]
 

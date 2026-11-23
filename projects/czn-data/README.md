@@ -450,13 +450,15 @@ first and left to right within a row, with `row` counting rows from 1:
    "relics/relic_5029"], "scores": [0.94, 0.59, 0.59],
    "items": [{"name": "Runic Hammer", "rarity": "Legendary", "slot": "Weapon",
      "text": "+20% Critical Damage to ally Unique Attack Cards (cannot stack)",
-     "stats": {"ATK": "28/45/62/74/82"}}]}
+     "stats": {"ATK": "28/45/62/74/82"}, "transformed": false}]}
 ]}
 ```
 
 `items` holds each named item's rarity, slot, effect text, and stats per upgrade level (only
 where the data has them; Harmonization and other forms have none), so gear can be compared
-without another lookup.
+without another lookup. `transformed` marks a form a Chaos event turns worn gear into
+(Harmonization, Attune, Mutation, Distortion, Bloom): one with a transform reward tag, or named
+"Form: Item" after an item drawn with the same icon, since arena forms lack the tag.
 
 - `match`: one icon is at least 0.7 similar and leads every other by 0.1 or more.
 - `close`: the best two are within 0.1; `icons` and `names` hold both.

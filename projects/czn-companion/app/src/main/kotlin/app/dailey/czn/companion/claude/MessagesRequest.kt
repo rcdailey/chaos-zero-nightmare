@@ -401,11 +401,13 @@ object MessagesRequest {
             Names the equipment drawn as icons in square slots on this request's screenshot, such
             as what each character wears on the Equipment screen, by comparing each slot with
             every equipment icon. Returns one line per named slot, by row from the top and left
-            to right ("row 1: ..."; a left-out slot shifts the rest of its row left), each item as "Name (rarity slot, stat values per
-            upgrade level): effect", so worn gear needs no further lookup; stats are left out
-            where the data has none. "A / B" means items drawn with the same icon, such as a base
-            item and its Harmonization form: which one is worn is unknown unless the screen
-            shows it. "A or B" means one of two icons, too close to choose. Slots left out
+            to right ("row 1: ..."; a left-out slot shifts the rest of its row left), each item
+            as "Name (rarity slot, stat values per upgrade level): effect"; stats are left out
+            where the data has none. These details suffice to compare gear; do not look the
+            named items up again to compare them. "if a Chaos event transformed it this run: ..." lists
+            forms (Harmonization, Mutation, ...) drawn with the base item's icon: assume the base
+            item unless this run transformed it. "A / B" means different items drawn with the
+            same icon. "A or B" means one of two icons, too close to choose. Slots left out
             showed no known icon, such as empty ones. Gear outside square slots (shop items,
             reward cards) is not named; those screens print the name.
             """,

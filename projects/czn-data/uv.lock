@@ -365,6 +365,7 @@ dependencies = [
     { name = "psycopg", extra = ["binary"] },
     { name = "pyjwt", extra = ["crypto"] },
     { name = "python-dateutil" },
+    { name = "python-multipart" },
     { name = "sqlalchemy" },
 ]
 
@@ -393,6 +394,7 @@ requires-dist = [
     { name = "psycopg", extras = ["binary"], specifier = ">=3.3" },
     { name = "pyjwt", extras = ["crypto"], specifier = ">=2.15" },
     { name = "python-dateutil", specifier = ">=2.9" },
+    { name = "python-multipart", specifier = ">=0.0.33" },
     { name = "sqlalchemy", specifier = ">=2.1.8" },
 ]
 

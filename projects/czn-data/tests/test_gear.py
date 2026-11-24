@@ -1,12 +1,13 @@
-"""Contract: POST /identify-gear takes the MCP Bearer token and a JPEG or PNG screenshot, and
-names the equipment in its slots from the icon prints stored for the current print code, each
-icon naming every item drawn with it. Identification lists the slots that show a known icon by
-row, top row first and left to right; names two icons too close to choose; and leaves out empty
-slots and slots whose icon names no item. A slot whose outline an icon covers still counts.
+"""Contract: POST /identify-screenshots names, on each screenshot, the equipment in its slots
+from the icon prints stored for the current print code, each icon naming every item drawn with
+it. Identification lists the slots that show a known icon by row, top row first and left to
+right; names two icons too close to choose; and leaves out empty slots and slots whose icon names
+no item. A slot whose outline an icon covers still counts.
 
-Two route tests replace the identifier with a fake that names one slot per stored icon. The
+The route test replaces the identifier with a fake that names one slot per stored icon. The
 identification test, also through the route, replaces the model with a fake whose print of a
-picture is its middle's average color; how well the real model matches icons is checked by hand, not here.
+picture is its middle's average color; how well the real model matches icons is checked by hand,
+not here. Route errors are covered in test_identity.
 """
 
 import io
@@ -17,7 +18,7 @@ from mcp.server.auth.settings import AuthSettings
 from PIL import Image, ImageDraw
 from psycopg.types.json import Jsonb
 from starlette.testclient import TestClient
-from test_identity import OneTokenVerifier, screenshot
+from test_identity import OneFigurePerPrint, OneTokenVerifier, post, screenshot
 
 from czn_data.build import build
 from czn_data.gear import MODEL, Gear, prints_digest
@@ -50,6 +51,8 @@ def serve(conn, database_url, monkeypatch):
     """Starts the server's HTTP app over a database holding ``relics`` and gear prints
     (icon name, print code, prints)."""
     monkeypatch.setenv("DATABASE_URL", database_url)
+    # The same call names characters; their model is not under test here.
+    monkeypatch.setattr("czn_data.server.Identifier", OneFigurePerPrint)
     clients = []
 
     def start(relics: list[dict], prints: list[tuple[str, str, list[list[float]]]]):
@@ -107,26 +110,24 @@ def endpoint(serve, conn, monkeypatch):
     return client
 
 
-def post(client, body: bytes, token: str | None = "good", kind: str = "image/jpeg"):
-    headers = {"content-type": kind}
-    if token:
-        headers["authorization"] = f"Bearer {token}"
-    return client.post("/identify-gear", content=body, headers=headers)
+def gear_of(response) -> list[dict]:
+    """The slots named on the only screenshot sent."""
+    return response.json()["screenshots"][0]["gear"]
 
 
 def test_identify_gear_names_every_item_drawn_with_the_matched_icon(endpoint):
     response = post(endpoint, screenshot())
     assert response.status_code == 200
-    body = response.json()
-    assert body["model"] == MODEL
+    assert response.json()["gear_model"] == MODEL
+    gear = gear_of(response)
     names = [
         "Big Game Hunter",
         "Command: #108",
         "Distortion: Big Game Hunter",
         "Harmonization: Big Game Hunter",
     ]
-    assert [(g["result"], g["row"], g["names"]) for g in body["gear"]] == [("match", 1, names)]
-    items = body["gear"][0]["items"]
+    assert [(g["result"], g["row"], g["names"]) for g in gear] == [("match", 1, names)]
+    items = gear[0]["items"]
     assert {item["name"]: item["transformed"] for item in items} == {
         "Big Game Hunter": False,
         "Command: #108": False,
@@ -151,12 +152,6 @@ def test_identify_gear_names_every_item_drawn_with_the_matched_icon(endpoint):
             "transformed": True,
         },
     ]
-
-
-def test_identify_gear_rejects_missing_tokens_and_non_images(endpoint):
-    assert post(endpoint, screenshot(), token=None).status_code == 401
-    assert post(endpoint, b"text", kind="text/plain").status_code == 400
-    assert post(endpoint, b"not a jpeg").status_code == 400
 
 
 RED, BLUE, GREEN, PURPLE = (200, 30, 30), (30, 30, 200), (30, 200, 30), (115, 30, 115)
@@ -214,7 +209,7 @@ def test_identification_names_slots_by_row_and_leaves_out_empty_and_unnamed_ones
 
     assert response.status_code == 200
     hammer, sword = ["Runic Hammer"], ["Crimson Sword", "Distortion: Crimson Sword"]
-    assert [(g["row"], g["result"], g["names"]) for g in response.json()["gear"]] == [
+    assert [(g["row"], g["result"], g["names"]) for g in gear_of(response)] == [
         (1, "close", hammer),
         (1, "match", sword),
         (1, "close", sorted(sword + hammer)),

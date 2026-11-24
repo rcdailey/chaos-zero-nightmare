@@ -452,20 +452,29 @@ and 404 when no character matches:
    "background_url": "https://wiki.e7bot.top/api/assets/file/czn/data/rarity/bg_equipment_rarity_legend.webp"}]}
 ```
 
-## Naming characters on a screenshot
+## Naming characters and gear on screenshots
 
-`POST /identify` names the characters on a game screenshot, for the companion app. Send the
-screenshot as the body (`Content-Type: image/jpeg` or `image/png`, at most 10 MB) with the same
-Bearer token the MCP endpoint takes. It answers 401 without a valid token and 400 for a body that
-is not a JPEG or PNG image.
+`POST /identify-screenshots` names the characters and the gear on game screenshots, for the
+companion app, in one call for any number of them. Send `multipart/form-data` with one `image`
+part per screenshot (`image/jpeg` or `image/png`, at most 10 MB each) and the same Bearer token the
+MCP endpoint takes. It answers 401 without a valid token, 400 without an `image` part or for a part
+that is not a JPEG or PNG image, and 413 for a part over 10 MB.
 
-The answer lists each character figure found, top row first and left to right within a row:
+The answer holds one entry per screenshot, in the order sent, each with `characters` and `gear`
+as the next two sections describe:
 
 ```json
-{"model": "ccip-caformer-24-randaug-pruned", "characters": [
-  {"box": [42, 165, 278, 647], "result": "match", "names": ["Rossweisse"],
-   "candidates": ["Rossweisse", "Tressa", "Chizuru"], "differences": [0.012, 0.156, 0.194]}
-]}
+{"character_model": "ccip-caformer-24-randaug-pruned", "gear_model": "dinov2-small",
+ "screenshots": [{"characters": [...], "gear": [...]}]}
+```
+
+## Naming characters on a screenshot
+
+`characters` lists each character figure found, top row first and left to right within a row:
+
+```json
+[{"box": [42, 165, 278, 647], "result": "match", "names": ["Rossweisse"],
+  "candidates": ["Rossweisse", "Tressa", "Chizuru"], "differences": [0.012, 0.156, 0.194]}]
 ```
 
 - `match`: one character's card art matches; `names` holds it.
@@ -475,27 +484,25 @@ The answer lists each character figure found, top row first and left to right wi
 
 An anime person detector (`deepghs/anime_person_detection`) finds the figures; CCIP
 (`deepghs/ccip_onnx`), a model trained to tell anime characters apart, compares each figure with the
-prints `enrich` stored. Characters added since the last `enrich` cannot be named. The server handles
-one screenshot at a time: about 0.5 seconds per figure on 8 free cores, and about 400 MB of memory
+prints `enrich` stored. Characters added since the last `enrich` cannot be named. The server reads
+one screenshot at a time, one call after another: about 0.5 seconds per figure on 8 free cores, and
+about 400 MB of memory
 with the models loaded (about 700 MB while it reads a 6-figure screenshot). Art unlike the card art
 (battle screens) is untested.
 
 ## Naming gear on a screenshot
 
-`POST /identify-gear` names the equipment a game screenshot shows as icons in square slots, such
-as the gear each character wears on the Equipment screen, which shows no names. The request and
-its errors are those of `POST /identify`. The answer lists each slot showing a known icon, top row
-first and left to right within a row, with `row` counting rows from 1:
+`gear` names the equipment a screenshot shows as icons in square slots, such as the gear each
+character wears on the Equipment screen, which shows no names. It lists each slot showing a known
+icon, top row first and left to right within a row, with `row` counting rows from 1:
 
 ```json
-{"model": "dinov2-small", "gear": [
-  {"box": [2224, 561, 2393, 730], "row": 1, "result": "match", "icons": ["relics/relic_5084"],
-   "names": ["Runic Hammer"], "candidates": ["relics/relic_5084", "relics/relic_5041",
-   "relics/relic_5029"], "scores": [0.94, 0.59, 0.59],
-   "items": [{"name": "Runic Hammer", "rarity": "Legendary", "slot": "Weapon",
-     "text": "+20% Critical Damage to ally Unique Attack Cards (cannot stack)",
-     "stats": {"ATK": "28/45/62/74/82"}, "transformed": false}]}
-]}
+[{"box": [2224, 561, 2393, 730], "row": 1, "result": "match", "icons": ["relics/relic_5084"],
+  "names": ["Runic Hammer"], "candidates": ["relics/relic_5084", "relics/relic_5041",
+  "relics/relic_5029"], "scores": [0.94, 0.59, 0.59],
+  "items": [{"name": "Runic Hammer", "rarity": "Legendary", "slot": "Weapon",
+    "text": "+20% Critical Damage to ally Unique Attack Cards (cannot stack)",
+    "stats": {"ATK": "28/45/62/74/82"}, "transformed": false}]}]
 ```
 
 `items` holds each named item's rarity, slot, effect text, and stats per upgrade level (only

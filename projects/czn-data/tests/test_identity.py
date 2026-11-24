@@ -1,5 +1,6 @@
-"""Contract: POST /identify takes the MCP Bearer token and a JPEG or PNG screenshot, and names
-figures from the card art prints stored for the current print code.
+"""Contract: POST /identify-screenshots takes the MCP Bearer token and one or more JPEG or PNG
+screenshots, and names the figures on each, in the order sent, from the card art prints stored
+for the current print code.
 
 The models are replaced by a fake that names one figure per stored print; how well the real
 models name characters is checked by hand, not here.
@@ -23,9 +24,13 @@ from czn_data.server import build_server
 
 
 class OneFigurePerPrint:
+    """Names one figure per stored print, boxed as the whole screenshot."""
+
     def identify(self, image: bytes, prints: dict[str, list[float]]) -> list[Figure]:
-        Image.open(io.BytesIO(image)).load()
-        return [Figure((0, 0, 1, 1), "match", [name], [name], [0.0]) for name in prints]
+        picture = Image.open(io.BytesIO(image))
+        picture.load()
+        box = (0, 0, picture.width, picture.height)
+        return [Figure(box, "match", [name], [name], [0.0]) for name in prints]
 
 
 class OneTokenVerifier(TokenVerifier):
@@ -69,25 +74,39 @@ def endpoint(conn, database_url, monkeypatch):
         yield client
 
 
-def post(client, body: bytes, token: str | None = "good", kind: str = "image/jpeg"):
-    headers = {"content-type": kind}
-    if token:
-        headers["authorization"] = f"Bearer {token}"
-    return client.post("/identify", content=body, headers=headers)
+def post(client, *bodies: bytes, token: str | None = "good", kind: str = "image/jpeg"):
+    """Sends ``bodies`` as the screenshots, each an ``image`` part of type ``kind``."""
+    headers = {"authorization": f"Bearer {token}"} if token else {}
+    files = [("image", (f"{i}.jpg", body, kind)) for i, body in enumerate(bodies)]
+    return client.post("/identify-screenshots", files=files, headers=headers)
 
 
 def test_identify_endpoint_names_characters_from_the_current_models_prints(endpoint):
     response = post(endpoint, screenshot())
     assert response.status_code == 200
     body = response.json()
-    assert body["model"] == MODEL
-    assert [(c["result"], c["names"], c["box"]) for c in body["characters"]] == [
-        ("match", ["Mei Lin"], [0, 0, 1, 1])
+    assert body["character_model"] == MODEL
+    characters = body["screenshots"][0]["characters"]
+    assert [(c["result"], c["names"], c["box"]) for c in characters] == [
+        ("match", ["Mei Lin"], [0, 0, 8, 8])
     ]
+
+
+def test_identify_endpoint_answers_every_screenshot_in_the_order_sent(endpoint):
+    narrow, wide = io.BytesIO(), io.BytesIO()
+    Image.new("RGB", (4, 4)).save(narrow, "JPEG")
+    Image.new("RGB", (16, 4)).save(wide, "JPEG")
+
+    response = post(endpoint, wide.getvalue(), narrow.getvalue())
+
+    assert response.status_code == 200
+    boxes = [s["characters"][0]["box"] for s in response.json()["screenshots"]]
+    assert boxes == [[0, 0, 16, 4], [0, 0, 4, 4]]
 
 
 def test_identify_endpoint_rejects_missing_tokens_and_non_images(endpoint):
     assert post(endpoint, screenshot(), token=None).status_code == 401
     assert post(endpoint, screenshot(), token="bad").status_code == 401
+    assert post(endpoint).status_code == 400
     assert post(endpoint, b"text", kind="text/plain").status_code == 400
-    assert post(endpoint, b"not a jpeg").status_code == 400
+    assert post(endpoint, screenshot(), b"not a jpeg").status_code == 400

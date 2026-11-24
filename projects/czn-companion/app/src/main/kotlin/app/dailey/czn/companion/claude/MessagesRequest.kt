@@ -134,7 +134,7 @@ object MessagesRequest {
             .builder()
             .model(MODEL)
             .maxTokens(8192)
-            .outputConfig(BetaOutputConfig.builder().effort(BetaOutputConfig.Effort.HIGH).build())
+            .outputConfig(BetaOutputConfig.builder().effort(BetaOutputConfig.Effort.MEDIUM).build())
             // Thinking is on by default but returned empty; a summary lands in the saved exchange.
             .thinking(
                 BetaThinkingConfigAdaptive

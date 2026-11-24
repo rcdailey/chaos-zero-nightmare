@@ -431,7 +431,7 @@ body it cannot read and 404 when no character matches:
 ```
 
 Points follow the in-game Help topic "Save Rules for Faint Memories". Season 5's Memory cards
-count as Neutral cards, as Prydwen files them, and the game charged 20 points for one.
+are free: the Help names no rule for them, and the game's counter charged nothing for one.
 
 ## Naming characters on a screenshot
 

@@ -1069,12 +1069,14 @@ def test_every_tool_call_logs_its_tool_arguments_time_and_reply_size(call, caplo
 @pytest.fixture
 def cost_cards(conn, game_data):
     """Mei Lin starting with two Strikes, and cards of no character: a Neutral with an
-    Epiphany, and a Legendary and a Rare Monster card."""
+    Epiphany, a Season 5 Memory card, and a Legendary and a Rare Monster card."""
     add_e7bot(conn, "czn/characters/1027", {"combatant": {"start_cards": [{"name": "Strike"}] * 2}})
     (listed,) = conn.execute("SELECT body FROM e7bot.document WHERE path = 'czn/cards/list'")
     spark_i = card("card_n1_rsp1", "Spark", 1, "Spark I") | {"base_combatant": None}
     others = [
         card("card_n1", "Spark", 1, "Spark", [spark_i], sort="SORT_NEUTRAL"),
+        card("card_n2", "Memory: Loss", 0, "Loss", sort="SORT_NEUTRAL")
+        | {"talent": [{"title": "Memory"}]},
         card("card_mon_1", "Bloom: Slaughter", 2, "Shield", sort="SORT_MONSTER_UNIQUE")
         | {"rarity": "RARITY_LEGEND"},
         card("card_mon_2", "Triniel", 2, "Shield", sort="SORT_MONSTER_UNIQUE"),
@@ -1104,9 +1106,11 @@ def test_save_data_cost_follows_the_games_faint_memory_rules(call, cost_cards):
     assert total == "140"
     assert lines[1].startswith("- Rising Dragon Spire; copies: 1; points: 40;")
 
-    # A Neutral is paid with or without its Epiphany; Monster cards by rarity.
+    # A Neutral is paid with or without its Epiphany, a Memory card is free; Monster cards by
+    # rarity.
     for spark in ("Spark", "Spark I"):
         assert cost(call, [{"card": spark}])[0] == "20"
+    assert cost(call, [{"card": "Memory: Loss"}])[0] == "0"
     assert cost(call, [{"card": "Bloom: Slaughter"}])[0] == "80"
     assert cost(call, [{"card": "Triniel"}])[0] == "50"
 

@@ -759,8 +759,7 @@ MAX_DUPLICATES = 3
 MAX_REMOVALS = 5
 # Cards the character starts with or gains as her own (Epiphany cards): no points.
 OWN_CATEGORIES = frozenset({"starting", "unique", "ego", "desire"})
-# Prydwen files Season 5's Memory cards under Neutral, and the game charged 20 for one in run 30.
-NEUTRAL_CATEGORIES = frozenset({"neutral", "memory", "forbidden"})
+NEUTRAL_CATEGORIES = frozenset({"neutral", "forbidden"})
 
 
 def _card_points(row: dict) -> tuple[int, str]:
@@ -768,6 +767,10 @@ def _card_points(row: dict) -> tuple[int, str]:
     category = row["category"]
     if category in OWN_CATEGORIES:
         return 0, f"{category} card: free"
+    # Season 5's Memory cards, which Prydwen also files under Neutral: the game's counter showed
+    # 60 points for a deck holding Memory: Loss and three removed starting cards.
+    if "Memory" in row.get("tags", ()):
+        return 0, "Memory card: free"
     if category in NEUTRAL_CATEGORIES:
         return CARD_POINTS, f"{category} card"
     if category == "monster":
@@ -1709,7 +1712,7 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
         Forbidden), with its base card's starting deck copies."""
         found = await _query(
             f"""
-            SELECT name, base_name, category, color,
+            SELECT name, base_name, category, color, tags,
                    (SELECT b.starting_copies FROM card b
                     WHERE b.base_name = card.base_name AND b.variant = ''
                       AND b.character_slug IS NOT DISTINCT FROM card.character_slug

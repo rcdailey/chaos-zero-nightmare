@@ -624,6 +624,10 @@ object MessagesRequest {
           the czn tools matched, then how it differs from what the plan or the player wants. A
           version name on screen, often in parentheses after the card's name, decides the
           version: match it to alias.
+        - The icon under a card's cost decides whether it carries a Divine Epiphany: a tall
+          emblem with a star point below it, colored by its god (gold, orange, blue and green,
+          lavender, light blue, or purple), marks one; a round yellow star marks only an
+          Epiphany. You MUST NOT infer a Divine Epiphany from the card's text.
         - You MUST NOT advise a step the screen shows is already done, or call the player's
           state a match for a plan before you have checked each part of it; name the parts
           still unchecked.
@@ -679,8 +683,9 @@ object MessagesRequest {
         - On every pick screen (card reward, Epiphany, Divine Epiphany, Duplicate, removal,
           Memory, pact, shop), you MUST check each option against the saved plan, name the
           part of the plan the pick serves, and state the pick's cost from save_data_cost and
-          the points left after it. When a pick is outside the plan and costs points, you
-          SHOULD recommend Skip. Use a free reroll before settling for a card outside the plan.
+          the points left after it, counting from the screen's points counter when this run
+          has shown one; your own costed total is only for when it has not. When a pick is
+          outside the plan and costs points, you SHOULD recommend Skip. Use a free reroll before settling for a card outside the plan.
         - Before recommending an Epiphany version outside the plan, you MUST search whether a
           later Epiphany can still replace it with the plan's version.
         - After each pick, you MUST call update_run_state with what the pick changed. When the

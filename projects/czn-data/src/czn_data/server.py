@@ -41,6 +41,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from . import gear, identity, search
+from .e7bot import ASSETS, GEAR_BACKGROUND
 from .gamefiles import TEXT_KINDS
 from .gear import MODEL as GEAR_MODEL
 from .gear import GearIdentifier
@@ -207,6 +208,17 @@ NAME_ORDER = (
     " similarity(name, %(name)s) DESC"
 )
 LOOKUP_SQL = LOOKUP_SQL.format(match=NAME_MATCH, order=NAME_ORDER, divine_applies=DIVINE_APPLIES)
+# /deck-details: the best-matching card of one character or with no character, and the
+# best-matching equipment, with what a deck view draws.
+DECK_CARD_SQL = f"""
+SELECT game_id, name, base_name, variant, cost, image_url FROM card
+WHERE (character_slug = %(slug)s OR character_slug IS NULL) AND {NAME_MATCH}
+ORDER BY {NAME_ORDER} LIMIT 1
+"""
+DECK_GEAR_SQL = f"""
+SELECT game_id, name, slot, rarity, image_url FROM equipment
+WHERE {NAME_MATCH} ORDER BY {NAME_ORDER} LIMIT 1
+"""
 
 # character_guide part name -> query for that part of one character's data (%(slug)s). The
 # plan, teams, and synergies parts have their own queries: they span every guide page.
@@ -1770,6 +1782,39 @@ def build_server(auth: AuthSettings | None, verifier: TokenVerifier | None) -> M
             return JSONResponse({"error": f"no character matches {character}"}, 404)
         return JSONResponse(
             {"character": found["name"]} | await _cost(found["slug"], cards, removed)
+        )
+
+    @mcp.custom_route("/deck-details", methods=["POST"])
+    async def deck_details_route(request: Request) -> JSONResponse:
+        """REST endpoint for programs that draw a deck: matches card names (of the character's
+        cards or cards with no character, an Epiphany numeral naming the version) and equipment
+        names, in order, to the game's data and pictures; null where nothing matches."""
+        if not await authorized(request):
+            return JSONResponse({"error": "invalid or missing Bearer token"}, 401)
+        try:
+            body = await request.json()
+            character = str(body["character"])
+            cards = [str(name) for name in body.get("cards") or []]
+            equipment = [str(name) for name in body.get("equipment") or []]
+        except (ValueError, KeyError, TypeError) as error:
+            return JSONResponse({"error": f"invalid body: {error}"}, 400)
+        found = await _find_character(character)
+        if found is None:
+            return JSONResponse({"error": f"no character matches {character}"}, 404)
+        card_rows = [await _query(DECK_CARD_SQL, {"slug": found["slug"], "name": n}) for n in cards]
+        gear = []
+        for name in equipment:
+            rows = await _query(DECK_GEAR_SQL, {"name": name})
+            item = rows[0] if rows else None
+            if item and (background := GEAR_BACKGROUND.get(item["rarity"])):
+                item |= {"background_url": ASSETS + background}
+            gear.append(item)
+        return JSONResponse(
+            {
+                "character": found["name"],
+                "cards": [rows[0] if rows else None for rows in card_rows],
+                "equipment": gear,
+            }
         )
 
     @tool

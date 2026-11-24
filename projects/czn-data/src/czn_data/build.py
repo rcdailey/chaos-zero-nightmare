@@ -37,7 +37,15 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
 from . import digest, embed, metrics
-from .e7bot import GEAR_SLOTS, SITE, wearable
+from .e7bot import (
+    ASSETS,
+    CARD_ART,
+    EQUIPMENT_RARITIES,
+    GEAR_ICON,
+    GEAR_SLOTS,
+    SITE,
+    wearable,
+)
 from .game8 import split_page
 from .gamefiles import game_texts, help_topics
 from .posts import split_post
@@ -79,12 +87,6 @@ OTHER_CATEGORIES = {
     "SORT_NEUTRAL": "neutral",
     "SORT_MONSTER_UNIQUE": "monster",
     "SORT_TABOO": "forbidden",
-}
-EQUIPMENT_RARITIES = {
-    "RARITY_COMMON": "Common",
-    "RARITY_RARE": "Rare",
-    "RARITY_UNIQUE": "Unique",
-    "RARITY_LEGEND": "Legendary",
 }
 ROMAN = {"rsp1": "I", "rsp2": "II", "rsp3": "III", "rsp4": "IV", "rsp5": "V"}
 # Other game version codes (c_<id>_pot, _lbk, _mut2) -> readable labels; a trailing number
@@ -367,13 +369,17 @@ def _merge(sources: _Sources, result: BuildResult) -> dict[str, list[dict]]:
             ("hp", "attack", "defense", "image_url"),
             result,
         ),
-        "equipment": _named(
-            _e7_equipment(sources),
-            _prydwen_rows(sources, "equipment"),
-            "equipment",
-            ("stats", "obtained_from", "image_url"),
-            result,
-        ),
+        # Pictures come from e7bot only; an item e7bot lacks has none.
+        "equipment": [
+            row if row["source"] == "e7bot" else row | {"image_url": None}
+            for row in _named(
+                _e7_equipment(sources),
+                _prydwen_rows(sources, "equipment"),
+                "equipment",
+                ("stats", "obtained_from"),
+                result,
+            )
+        ],
         "fragment_set": _named(
             _e7_fragment_sets(sources),
             _prydwen_rows(sources, "fragment_set"),
@@ -658,7 +664,6 @@ _PRYDWEN_CARD_FIELDS = (
     "target_neutral",
     "neutral_review",
     "divine_review",
-    "image_url",
 )
 
 
@@ -760,6 +765,9 @@ def _cards(sources, slugs, characters, known, result) -> list[dict]:
                 "data_fetched_at": fetched_at,
             }
             row |= {key: (found or {}).get(key) for key in _PRYDWEN_CARD_FIELDS}
+            # Pictures come from e7bot only, so every card's art matches the game's data.
+            art = card.get("sct_name") or base.get("sct_name")
+            row["image_url"] = ASSETS + CARD_ART.format(art) if art else None
             rows.append(row)
 
     _match_by_text(rows, prydwen, known)
@@ -786,7 +794,12 @@ def _cards(sources, slugs, characters, known, result) -> list[dict]:
                 result.unmatched["card"] += 1
             rows.append(
                 {key: found.get(key) for key in COLUMNS["card"].split()}
-                | {"game_id": None, "prydwen_url": found["url"], "source": "prydwen"}
+                | {
+                    "game_id": None,
+                    "image_url": None,
+                    "prydwen_url": found["url"],
+                    "source": "prydwen",
+                }
             )
     return rows
 
@@ -979,6 +992,9 @@ def _e7_equipment(sources: _Sources) -> list[dict]:
             "text": "\n".join(plain(skill["description"]) for skill in relic["skills"]),
             "stats": {},
             "icon_name": relic.get("icon_name"),
+            "image_url": ASSETS + GEAR_ICON.format(relic["icon_name"])
+            if relic.get("icon_name")
+            else None,
             "transformed": _transformed(relic, icon_names),
             "source": "e7bot",
             "url": URLS["equipment"],

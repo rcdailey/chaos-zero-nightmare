@@ -1147,6 +1147,56 @@ def test_save_data_cost_route_gives_programs_the_points_as_json(
     assert unreadable.status_code == 400
 
 
+def test_deck_details_route_gives_programs_each_names_card_or_item_with_pictures(
+    conn, database_url, monkeypatch, game_data
+):
+    def with_art(card: dict) -> dict:
+        versions = [with_art(v) for v in card.get("r_spark_cards") or []]
+        return card | {"sct_name": f"art_{card['id']}", "r_spark_cards": versions}
+
+    (listed,) = conn.execute("SELECT body FROM e7bot.document WHERE path = 'czn/cards/list'")
+    conn.execute(
+        "UPDATE e7bot.document SET body = %s WHERE path = 'czn/cards/list'",
+        (Jsonb([with_art(c) for c in listed[0]]),),
+    )
+    hammer = {
+        "id": "eq_5084",
+        "name": "Runic Hammer",
+        "rarity": "RARITY_LEGEND",
+        "relic_category": "EQUIPMENT",
+        "relic_type": "EQUIP_WEAPON",
+        "icon_name": "relics/relic_5084",
+        "skills": [{"description": "Hit hard."}],
+    }
+    add_e7bot(conn, "czn/relics/list", [hammer])
+    monkeypatch.setenv("DATABASE_URL", database_url)
+    build(conn)
+    client = TestClient(build_server(None, None).streamable_http_app())
+
+    found = client.post(
+        "/deck-details",
+        json={
+            "character": "mei lin",
+            "cards": ["Rising Dragon Spire V", "Zzyzx Qwv"],
+            "equipment": ["Runic Hammer"],
+        },
+    )
+    unknown = client.post("/deck-details", json={"character": "zzzz"})
+    unreadable = client.post("/deck-details", content=b"not json")
+
+    assets = "https://wiki.e7bot.top/api/assets/file/czn/data/"
+    spire, nothing = found.json()["cards"]
+    assert (spire["game_id"], spire["variant"], spire["cost"]) == ("c_1027_uni1_rsp5", "V", "0")
+    assert spire["image_url"] == f"{assets}card_illustration/art_c_1027_uni1_rsp5.webp"
+    assert nothing is None
+    (item,) = found.json()["equipment"]
+    assert (item["name"], item["slot"]) == ("Runic Hammer", "Weapon")
+    assert item["image_url"] == f"{assets}item/relics/relic_5084.webp"
+    assert item["background_url"] == f"{assets}rarity/bg_equipment_rarity_legend.webp"
+    assert unknown.status_code == 404
+    assert unreadable.status_code == 400
+
+
 def test_plan_gives_each_guide_decks_faint_memory_points(call, cost_cards):
     decks = top_field(plan_of(call), "guide_decks")
     # Three Strikes, one with a Divine: the third is a free Duplicate, the Divine costs 20.

@@ -80,10 +80,22 @@ MAY_BE_EMPTY = {"czn/rankings/list"}
 # Image files, by their path under ASSETS (the paths e7bot's own pages request).
 ASSETS = "https://wiki.e7bot.top/api/assets/file/czn/data/"
 GEAR_ICON = "item/{}.webp"
-# The backgrounds the game draws behind an equipment icon, one per rarity.
-RARITY_BACKGROUNDS = tuple(
-    f"rarity/bg_equipment_rarity_{rarity}.webp" for rarity in ("common", "rare", "unique", "legend")
-)
+# A card's art, by the card's sct_name.
+CARD_ART = "card_illustration/{}.webp"
+# The backgrounds the game draws behind an equipment icon, by the item's rarity code.
+RARITY_BACKGROUND = {
+    f"RARITY_{rarity.upper()}": f"rarity/bg_equipment_rarity_{rarity}.webp"
+    for rarity in ("common", "rare", "unique", "legend")
+}
+RARITY_BACKGROUNDS = tuple(RARITY_BACKGROUND.values())
+EQUIPMENT_RARITIES = {
+    "RARITY_COMMON": "Common",
+    "RARITY_RARE": "Rare",
+    "RARITY_UNIQUE": "Unique",
+    "RARITY_LEGEND": "Legendary",
+}
+# The rarity background of equipment, by the rarity name the merged tables store.
+GEAR_BACKGROUND = {EQUIPMENT_RARITIES[code]: path for code, path in RARITY_BACKGROUND.items()}
 GEAR_SLOTS = {"EQUIP_WEAPON": "Weapon", "EQUIP_ARMOR": "Armor", "EQUIP_ACC": "Trinket"}
 CHARACTER_DETAIL = "czn/characters/{}"
 ENCOUNTER_DETAIL = "czn/encounters/{}"

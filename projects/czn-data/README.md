@@ -433,6 +433,25 @@ body it cannot read and 404 when no character matches:
 Points follow the in-game Help topic "Save Rules for Faint Memories". Season 5's Memory cards
 are free: the Help names no rule for them, and the game's counter charged nothing for one.
 
+`POST /deck-details` gives what the companion app's deck view draws for each card and equipment
+name. The JSON body takes `character`, `cards` (card names; an Epiphany numeral such as
+"Blade of the Cycle III" names that version), and `equipment` (item names). Each list answers in
+the request's order, with `null` for a name nothing matches. Cards match the character's cards
+and cards with no character. Pictures are e7bot's: a card's art, an item's icon, and the
+background the game draws behind that item's rarity. It answers 400 for a body it cannot read
+and 404 when no character matches:
+
+```json
+{"character": "Rossweisse",
+ "cards": [{"game_id": "c_30134_uni3_rsp3", "name": "Blade of the Cycle III",
+   "base_name": "Blade of the Cycle", "variant": "III", "cost": "1",
+   "image_url": "https://wiki.e7bot.top/api/assets/file/czn/data/card_illustration/unique_30134_04.webp"}],
+ "equipment": [{"game_id": "eq_5084", "name": "Runic Hammer", "slot": "Weapon",
+   "rarity": "Legendary",
+   "image_url": "https://wiki.e7bot.top/api/assets/file/czn/data/item/relics/relic_5084.webp",
+   "background_url": "https://wiki.e7bot.top/api/assets/file/czn/data/rarity/bg_equipment_rarity_legend.webp"}]}
+```
+
 ## Naming characters on a screenshot
 
 `POST /identify` names the characters on a game screenshot, for the companion app. Send the

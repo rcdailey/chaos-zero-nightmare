@@ -689,6 +689,12 @@ object MessagesRequest {
         - Before recommending an Epiphany version outside the target, you MUST search whether
           a later Epiphany can still replace it with the target's version. When a result
           states it can and the player takes it, save that current card with fixable.
+        - When the run state lists a current card as not matching the target's Epiphany
+          version and the card is not fixable, you MUST search, in the same turn, whether a
+          later Epiphany can still give it the target's version, and save fixable when a
+          result states it can, before advising on that card.
+        - Quote the Faint Memory points of a saved deck's part only from the per-part costs
+          update_run_state returned; you MUST NOT price a saved part yourself.
         - After each pick, you MUST call update_run_state with what the pick changed in the
           current deck. When the screen shows a points counter, a deck, or worn gear that
           differs from the saved state, the screen wins: update the entries that differ.

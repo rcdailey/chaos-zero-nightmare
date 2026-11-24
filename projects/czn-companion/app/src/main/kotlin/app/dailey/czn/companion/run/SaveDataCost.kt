@@ -22,10 +22,22 @@ data class DeckCost(
     val character: String,
     /** Faint Memory points of the deck's cards and removals. */
     val total: Int,
+    /** What each card and removal adds to [total], and by which rules. */
+    val lines: List<CostLine> = emptyList(),
     /** Card names the server matched to no card; they add no points. */
     val unknown: List<String>? = null,
     /** Rules the deck breaks, such as more Duplicates than Save Data keeps. */
     val warnings: List<String>? = null,
+)
+
+/** One card (with its copies) or one removal in a [DeckCost]. */
+@Serializable
+data class CostLine(
+    val card: String? = null,
+    val removed: String? = null,
+    val copies: Int = 1,
+    val points: Int,
+    val rules: List<String> = emptyList(),
 )
 
 @Serializable
@@ -107,8 +119,16 @@ class SaveDataCost(
                     cost.unknown?.let { "no card matches ${it.joinToString(", ")}, not counted" },
                     cost.warnings?.joinToString("; "),
                 )
+            val parts =
+                cost.lines.joinToString("; ") { line ->
+                    val what =
+                        line.card?.let { it + if (line.copies > 1) " x${line.copies}" else "" }
+                            ?: "removed ${line.removed}"
+                    "$what ${line.points} (${line.rules.joinToString(", ")})"
+                }
             return "${cost.character}: ${cost.total} Faint Memory points" +
-                notes.joinToString("") { "; $it" }
+                notes.joinToString("") { "; $it" } +
+                parts.takeIf { it.isNotEmpty() }?.let { "\n  per part: $it" }.orEmpty()
         }
     }
 }

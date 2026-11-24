@@ -164,7 +164,19 @@ class RunDeckTest {
     }
 
     @Test
-    fun `the chat says what each update changed in either deck`() {
+    fun `a deck saved for the first time gets one summary line`() {
+        assertEquals(
+            listOf(
+                "Save Data limit: 120 points",
+                "Current deck saved: 4 cards, 1 equipment",
+                "Target saved: 2 cards, 1 removal, 1 equipment",
+            ),
+            DeckChanges.lines(null, start),
+        )
+    }
+
+    @Test
+    fun `the chat says what each update changed in either deck, one line per kind`() {
         val after =
             update(
                 start,
@@ -173,26 +185,26 @@ class RunDeckTest {
                  "current": {"cards": [{"card": "Radiant Sword Flow", "copies": 0},
                                        {"card": "Radiant Sword Flow", "version": "II"},
                                        {"card": "Sword Resonance", "divine": true},
-                                       {"card": "Aimed Fire"},
+                                       {"card": "Aimed Fire"}, {"card": "Ambush"},
                                        {"card": "Sword Slash", "copies": 1}],
-                             "removed": ["Standing Blade"], "gear": {"armor": "Mask of Emotions"}},
+                             "removed": ["Standing Blade", "Sword Slash", "Sword Slash"],
+                             "gear": {"armor": "Mask of Emotions"}},
                  "target": {"cards": [{"card": "Aimed Fire"}]}}
                 """,
             )
 
         assertEquals(
             listOf(
-                "Run character: Rossweisse",
                 "Save Data limit: 140 points",
-                "Took Sword Slash out of the deck",
+                "Took out Sword Slash",
                 "Epiphany: Radiant Sword Flow base to II",
                 "Divine Epiphany on Sword Resonance (Divine)",
-                "Added Aimed Fire",
-                "Removed Standing Blade",
+                "Added Aimed Fire, Ambush",
+                "Removed Standing Blade, Sword Slash x2",
                 "Equipped Mask of Emotions (armor)",
                 "Target: added Aimed Fire",
             ),
-            DeckChanges.lines(start, after, "Rossweisse"),
+            DeckChanges.lines(start, after),
         )
     }
 

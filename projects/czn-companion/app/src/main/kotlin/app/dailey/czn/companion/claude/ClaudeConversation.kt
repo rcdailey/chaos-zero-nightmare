@@ -568,9 +568,7 @@ class ClaudeConversation(
         changes: MutableList<String>,
     ): String {
         val character = update.character?.trim()
-        val previous = run.characterNow()
         character?.let { run.setCharacter(it) }
-        val newCharacter = character?.takeUnless { it.equals(previous, ignoreCase = true) }
         val (before, applied) = run.changeDeck { RunDecks.apply(it, update) }
         val owner = character ?: run.characterNow()
         val target = owner?.takeIf { update.target?.costed == true }
@@ -591,7 +589,7 @@ class ClaudeConversation(
                     gearInfo = deck.gearInfo + gearInfo,
                 )
             }
-        val lines = DeckChanges.lines(before, deck, newCharacter)
+        val lines = DeckChanges.lines(before, deck)
         if (lines.isNotEmpty()) {
             changes += lines
             emit(ReplyEvent.DeckChanged(lines))

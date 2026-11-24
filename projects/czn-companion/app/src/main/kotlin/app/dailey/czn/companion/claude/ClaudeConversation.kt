@@ -9,11 +9,11 @@ import app.dailey.czn.companion.ask.Question
 import app.dailey.czn.companion.auth.AnthropicAuth
 import app.dailey.czn.companion.auth.CznDataAuth
 import app.dailey.czn.companion.auth.SignInRequired
-import app.dailey.czn.companion.characters.ScreenCharacters
-import app.dailey.czn.companion.characters.ScreenGear
+import app.dailey.czn.companion.characters.ScreenIdentifier
 import app.dailey.czn.companion.run.CardInfo
 import app.dailey.czn.companion.run.DeckChanges
 import app.dailey.czn.companion.run.DeckDetails
+import app.dailey.czn.companion.run.OpenShot
 import app.dailey.czn.companion.run.OpenTurn
 import app.dailey.czn.companion.run.RequestUsageRow
 import app.dailey.czn.companion.run.RunDecks
@@ -38,6 +38,7 @@ import com.anthropic.models.beta.messages.BetaToolUseBlockParam
 import com.anthropic.models.beta.messages.MessageCreateParams
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.flow.Flow
@@ -94,7 +95,7 @@ interface PlayerInput {
 
 /**
  * One screenshot as JPEG twice: [claude] at the size Claude reads, [full] at the screen's
- * resolution for naming the characters on it ([ScreenCharacters]) and for [ScreenshotArchive].
+ * resolution for naming the characters on it ([ScreenIdentifier]) and for [ScreenshotArchive].
  */
 class Screenshot(
     val claude: ByteArray,
@@ -113,8 +114,7 @@ class ClaudeConversation(
     private val anthropic: AnthropicAuth,
     private val cznData: CznDataAuth,
     private val run: RunRepository,
-    private val screenCharacters: ScreenCharacters,
-    private val screenGear: ScreenGear,
+    private val screenIdentifier: ScreenIdentifier,
     private val saveDataCost: SaveDataCost,
     private val deckDetails: DeckDetails,
     private val archive: ScreenshotArchive,
@@ -132,9 +132,10 @@ class ClaudeConversation(
 
     suspend fun newRun() = run.newRun()
 
+    /** Asks [text] about [screenshots], in the order the player took them. */
     fun ask(
         text: String,
-        screenshot: Screenshot?,
+        screenshots: List<Screenshot>,
         player: PlayerInput,
     ): Flow<ReplyEvent> =
         flow {
@@ -146,14 +147,13 @@ class ClaudeConversation(
                 OpenTurn(
                     text,
                     "",
-                    screenshot?.claude,
-                    screenshot?.let { archive.save(it.full) }.orEmpty(),
+                    screenshots.map { OpenShot(it.claude, archive.save(it.full)) },
                     "",
                     emptyList(),
                     emptyList(),
                     encodeTurn(emptyList()),
                 )
-            run.saveOpenTurn(open)
+            run.startOpenTurn(open)
             continueTurn(open, anthropicToken, cznToken, player)
         }.flowOn(Dispatchers.IO)
 
@@ -208,8 +208,7 @@ class ClaudeConversation(
                 OpenTurn(
                     open.question,
                     screen,
-                    open.jpeg,
-                    open.screenshot,
+                    open.shots,
                     reply.toString(),
                     tools.toList(),
                     asks.toList(),
@@ -230,7 +229,7 @@ class ClaudeConversation(
                     turn +=
                         toolResults(uses) { use ->
                             if (use.name() == MessagesRequest.IDENTIFY_SCREEN) {
-                                identifyScreen(open.screenshot) { screen = it }
+                                identifyScreen(open.shots.map { it.screenshot }) { screen = it }
                             } else {
                                 runTool(use, player, reply, asks, changes)
                             }
@@ -241,7 +240,7 @@ class ClaudeConversation(
                     MessagesRequest.build(
                         history,
                         open.question,
-                        open.jpeg,
+                        open.shots.map { it.jpeg },
                         CznDataAuth.MCP_URL,
                         cznToken,
                         state,
@@ -276,7 +275,7 @@ class ClaudeConversation(
                             tools,
                             asks,
                             screen,
-                            open.screenshot,
+                            open.shots.map { it.screenshot },
                             encodeTurn(turn + message.toParam()),
                             changes,
                         )
@@ -456,39 +455,49 @@ class ClaudeConversation(
     }
 
     /**
-     * Names the characters and the gear in slots on the archived [screenshot] for Claude, asking
-     * the data server for both at once; [onLine] receives the characters line to save with the
-     * question. The server's full answers join the archive.
+     * Names the characters and the gear in slots on every archived screenshot of this request
+     * for Claude, in one data server call. The result has one section per screenshot, labeled as
+     * its image is in the request; [onScreen] receives the characters lines, labeled the same
+     * way, to save with the question. The server's answer for each screenshot joins the archive.
      */
     private suspend fun identifyScreen(
-        screenshot: String,
-        onLine: (String) -> Unit,
+        screenshots: List<String>,
+        onScreen: (String) -> Unit,
     ): Pair<String, Boolean> {
-        val jpeg =
-            screenshot.ifEmpty { null }?.let(archive::read)
-                ?: return "This request's screenshot is no longer kept; call the characters " +
-                    "unidentified and name no gear from its icons." to true
-        val (characters, gear) =
-            coroutineScope {
-                val characters = async { screenCharacters.identify(jpeg) }
-                val gear = async { screenGear.identify(jpeg) }
-                characters.await() to gear.await()
+        val jpegs = screenshots.associateWith { archive.read(it) }
+        val kept = jpegs.filterValues { it != null }.keys.toList()
+        if (kept.isEmpty()) {
+            return "This request's screenshots are no longer kept; call the characters " +
+                "unidentified and name no gear from their icons." to true
+        }
+        val found = screenIdentifier.identify(kept.map { jpegs.getValue(it)!! })
+        if (found == null) {
+            return "The data server did not answer; call the characters unidentified and name " +
+                "no gear from their icons." to true
+        }
+        val byName = kept.zip(found).toMap()
+        byName.forEach { (name, shot) -> archive.saveIdentify(name, shot.response) }
+        val labels = screenshots.indices.map(MessagesRequest::screenshotLabel)
+        val shots = screenshots.map(byName::get)
+        val characters =
+            shots.zip(labels).mapNotNull { (shot, label) ->
+                shot?.characters?.let { "$label: $it" }
             }
-        val charactersLine =
-            if (characters == null) {
-                "Characters: the data server did not answer; call them unidentified."
-            } else {
-                archive.saveIdentify(screenshot, characters.response)
-                characters.line?.also(onLine) ?: "No character figures found on this screenshot."
+        if (characters.isNotEmpty()) onScreen(characters.joinToString("\n"))
+        val sections =
+            shots.zip(labels).map { (shot, label) ->
+                val text =
+                    if (shot == null) {
+                        "This screenshot is no longer kept; call its characters unidentified " +
+                            "and name no gear from its icons."
+                    } else {
+                        (shot.characters ?: "No character figures found on this screenshot.") +
+                            "\n" +
+                            (shot.gear ?: "No gear slot on this screenshot shows a known icon.")
+                    }
+                "$label:\n$text"
             }
-        val gearLines =
-            if (gear == null) {
-                "Gear: the data server did not answer; name no gear from its icons."
-            } else {
-                archive.saveIdentify(screenshot, gear.response, kind = "gear")
-                gear.line ?: "No gear slot on this screenshot shows a known icon."
-            }
-        return "$charactersLine\n$gearLines" to false
+        return sections.joinToString("\n") to false
     }
 
     /**

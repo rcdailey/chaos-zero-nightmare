@@ -40,7 +40,7 @@ data class RunState(
  * - Everything before the newest user message is byte-identical across a run's requests, so
  *   each request reads the previous one's cache: tools and system never change, earlier turns
  *   replay their saved exchange the same way every time, and what changes per request (the
- *   screenshot, [RunState]) sits in the newest user message, after the history breakpoints.
+ *   screenshots, [RunState]) sits in the newest user message, after the history breakpoints.
  * - Breakpoints (4 at most): the app prompt; the end of the turn before last, which the previous
  *   turn's request wrote, so a turn of more than 20 blocks still finds it; the end of the last
  *   turn; and the end of the request, which this turn's next request reads.
@@ -57,8 +57,18 @@ object MessagesRequest {
     const val MODEL = "claude-opus-5-5"
     const val CZN_SERVER = "czn"
 
-    /** Sent for a screen read without typed text; the API rejects empty text blocks. */
+    /**
+     * Sent for a screen read without typed text; the API rejects empty text blocks. Earlier turns
+     * replay it, so a new wording would miss the cache of every run in progress once.
+     */
     const val SCREEN_ONLY = "Advise me on this screen."
+
+    /**
+     * The label of a request's screenshot at [index] (capture order), shown before its image and
+     * before its section of the identify_screen result.
+     */
+    fun screenshotLabel(index: Int) = "Screenshot ${index + 1}"
+
     val BETAS =
         listOf(
             "oauth-2025-04-20",
@@ -103,7 +113,7 @@ object MessagesRequest {
     fun build(
         history: List<RunEntry>,
         text: String,
-        jpeg: ByteArray?,
+        jpegs: List<ByteArray>,
         cznUrl: String,
         cznToken: String,
         run: RunState = RunState(),
@@ -113,11 +123,16 @@ object MessagesRequest {
         val turns = history.chunked(2).map(::replay).filter(List<BetaMessageParam>::isNotEmpty)
         val newest =
             BetaMessageParam.ofUserOfContentBlockParams(
-                listOfNotNull(
-                    jpeg?.let(::imageBlock),
-                    BetaContentBlockParam.ofText(textBlock(text.ifBlank { SCREEN_ONLY })),
-                    BetaContentBlockParam.ofText(textBlock(describe(run))),
-                ),
+                jpegs.flatMapIndexed { index, jpeg ->
+                    listOf(
+                        BetaContentBlockParam.ofText(textBlock("${screenshotLabel(index)}:")),
+                        imageBlock(jpeg),
+                    )
+                } +
+                    listOf(
+                        BetaContentBlockParam.ofText(textBlock(text.ifBlank { SCREEN_ONLY })),
+                        BetaContentBlockParam.ofText(textBlock(describe(run))),
+                    ),
             )
         val messages =
             buildList {
@@ -493,9 +508,11 @@ object MessagesRequest {
         tool(
             IDENTIFY_SCREEN,
             """
-            Names the characters and the equipment drawn on this request's screenshot, by
+            Names the characters and the equipment drawn on every screenshot of this request, by
             comparing each figure with every character's card art and each square slot with every
-            equipment icon. Returns two parts. Characters: a line "Characters on screen, top to
+            equipment icon. Returns one section per screenshot, headed by the label its image has
+            in the request ("Screenshot 1:"), so positions refer to that image. Each section has
+            two parts. Characters: a line "Characters on screen, top to
             bottom, left to right: ..."; "A or B" means one of the two, too close to choose;
             "unidentified" means no character matched, such as a monster. Card art counts as a
             figure, so a card screen returns its owner's name for each card. Gear: one line per
@@ -599,9 +616,11 @@ object MessagesRequest {
     private val APP_PROMPT =
         """
         You advise a player of the gacha deckbuilder Chaos Zero Nightmare (CZN) through a small
-        panel over the game on an Android tablet. Each new request includes a screenshot of the
-        game as the player sees it now; earlier messages are this run's history, with your
-        earlier tool calls and their results. Use a result already there instead of calling
+        panel over the game on an Android tablet. Each new request includes one or more
+        screenshots of the game as the player saw it, labeled "Screenshot 1", "Screenshot 2",
+        and so on in the order the player took them; several can show pages of one list or
+        different screens, and the player asks about all of them together. Earlier messages are
+        this run's history, with your earlier tool calls and their results. Use a result already there instead of calling
         the tool again; a result the API replaced with a cleared placeholder needs a new call.
 
         The key words MUST, MUST NOT, SHOULD, and MAY are to be read as in RFC 2119.
@@ -609,13 +628,13 @@ object MessagesRequest {
         - You MUST confirm every card, character, equipment, and partner name or text read
           from the screen with the czn tools before relying on it. Make all of a screen's
           lookups in one round of parallel calls: every name it shows in one lookup call, every
-          card text in one match_card_text call. Where the screen's values differ from the tools' base values, the screen
-          shows the player's actual values; prefer it. czn tool results leave out empty
+          card text in one match_card_text call. Where the screen's values differ from the
+          tools' base values, the screen shows the player's actual values; prefer it. czn tool results leave out empty
           fields, so a missing field means the data has no value for it.
         - Before you name a character the screen shows only as a picture, or equipment it
           shows only as an icon (such as what a character wears), you MUST call
           identify_screen; its answer is authoritative, and earlier player messages carry the
-          answer for their screenshot. Narrow "A or B" to one only when the screen shows a
+          answer for their screenshots. Narrow "A or B" to one only when the screen shows a
           name. You MUST NOT name a character from looks, element icons, or class icons, name
           equipped gear from looks, or assume a character wears the target's gear.
         - When you check a card's version (base, Epiphany I to V), you MUST state the version

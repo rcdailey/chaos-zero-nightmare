@@ -1,8 +1,11 @@
 package app.dailey.czn.companion.overlay
 
+import android.graphics.BitmapFactory
+import android.graphics.Color
 import android.graphics.Region
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
@@ -15,21 +18,27 @@ import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.ZeroCornerSize
 import androidx.compose.foundation.text.input.TextFieldState
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.AssistChipDefaults
+import androidx.compose.material3.Badge
+import androidx.compose.material3.BadgedBox
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilledIconButton
+import androidx.compose.material3.FilledTonalIconButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -47,7 +56,9 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.toAndroidRect
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.AwaitPointerEventScope
@@ -59,8 +70,11 @@ import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.semantics.CustomAccessibilityAction
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.customActions
 import androidx.compose.ui.semantics.onClick
 import androidx.compose.ui.semantics.onLongClick
 import androidx.compose.ui.semantics.role
@@ -73,12 +87,15 @@ import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.roundToIntRect
+import androidx.core.graphics.createBitmap
 import app.dailey.czn.companion.CompanionTheme
 import app.dailey.czn.companion.R
 import app.dailey.czn.companion.ask.Answer
 import app.dailey.czn.companion.ask.AnsweredAsk
 import app.dailey.czn.companion.ask.Option
 import app.dailey.czn.companion.ask.Question
+import app.dailey.czn.companion.claude.MessagesRequest
+import app.dailey.czn.companion.claude.Screenshot
 import app.dailey.czn.companion.run.EntryKind
 import app.dailey.czn.companion.run.RunEntry
 import com.mikepenz.markdown.m3.Markdown
@@ -98,6 +115,7 @@ fun SideOverlay(
     panelWidth: Dp,
     tabActions: SideTabActions,
     onTouchableArea: (Region) -> Unit,
+    shots: Int = 0,
     panel: @Composable () -> Unit,
 ) {
     val shift by animateDpAsState(
@@ -119,7 +137,7 @@ fun SideOverlay(
             Modifier
                 .offset { IntOffset(0, tabY) }
                 .onGloballyPositioned { tabBounds = it.boundsInWindow() },
-        ) { SideTab(tabActions) }
+        ) { SideTab(tabActions, shots) }
         Box(
             Modifier
                 .width(panelWidth)
@@ -139,6 +157,7 @@ val SideTabSize = DpSize(48.dp, 72.dp)
 class SideTabActions(
     val onTap: () -> Unit = {},
     val onHold: () -> Unit = {},
+    val onDoubleTap: () -> Unit = {},
     val onOpen: () -> Unit = {},
     val onClose: () -> Unit = {},
     val onMove: (Float) -> Unit = {},
@@ -146,13 +165,18 @@ class SideTabActions(
 
 /**
  * The tab on the screen's right edge, which rides on the panel's left edge while the panel is
- * open, so it never covers the panel. Tap toggles the panel. Hold, then let go without moving,
- * reads the screen. Dragging toward the middle of the screen opens the panel and dragging toward
- * the edge closes it; holding first keeps Android's back gesture from taking the drag. Dragging up
- * or down moves the tab.
+ * open, so it never covers the panel. Tap toggles the panel, after the wait for a second tap.
+ * Double tap saves a screenshot for the next send; a badge counts the [shots] saved. Hold, then
+ * let go without moving, sends: the saved screenshots, or the screen now when none is saved.
+ * Dragging toward the middle of the screen opens the panel and dragging toward the edge closes
+ * it; holding first keeps Android's back gesture from taking the drag. Dragging up or down moves
+ * the tab.
  */
 @Composable
-fun SideTab(actions: SideTabActions) {
+fun SideTab(
+    actions: SideTabActions,
+    shots: Int = 0,
+) {
     val haptics = LocalHapticFeedback.current
     Box(
         contentAlignment = Alignment.CenterEnd,
@@ -161,7 +185,8 @@ fun SideTab(actions: SideTabActions) {
                 .size(SideTabSize)
                 .semantics {
                     role = Role.Button
-                    contentDescription = "CZN Companion"
+                    contentDescription =
+                        if (shots == 0) "CZN Companion" else "CZN Companion, ${shotsText(shots)}"
                     onClick("Show or hide the panel") {
                         actions.onTap()
                         true
@@ -170,6 +195,13 @@ fun SideTab(actions: SideTabActions) {
                         actions.onHold()
                         true
                     }
+                    customActions =
+                        listOf(
+                            CustomAccessibilityAction("Add screenshot") {
+                                actions.onDoubleTap()
+                                true
+                            },
+                        )
                 }.pointerInput(actions) {
                     detectSideTabGestures(actions) {
                         haptics.performHapticFeedback(HapticFeedbackType.LongPress)
@@ -188,15 +220,31 @@ fun SideTab(actions: SideTabActions) {
             modifier = Modifier.size(width = 32.dp, height = SideTabSize.height),
         ) {
             Box(contentAlignment = Alignment.Center) {
-                Icon(
-                    painterResource(R.drawable.ic_auto_awesome),
-                    contentDescription = null,
-                    modifier = Modifier.size(20.dp),
-                )
+                BadgedBox(
+                    badge = {
+                        // The tab's semantics already say the count.
+                        if (shots > 0) Badge { Text("$shots", Modifier.clearAndSetSemantics {}) }
+                    },
+                ) {
+                    Icon(
+                        painterResource(R.drawable.ic_auto_awesome),
+                        contentDescription = null,
+                        modifier = Modifier.size(20.dp),
+                    )
+                }
             }
         }
     }
 }
+
+private fun shotsText(shots: Int) =
+    if (shots ==
+        1
+    ) {
+        "1 screenshot saved"
+    } else {
+        "$shots screenshots saved"
+    }
 
 private enum class Press { Tap, Drag, Hold }
 
@@ -207,7 +255,15 @@ private suspend fun PointerInputScope.detectSideTabGestures(
     val down = awaitFirstDown()
     when (withTimeoutOrNull(viewConfiguration.longPressTimeoutMillis) { awaitTapOrDrag(down) }) {
         Press.Tap -> {
-            actions.onTap()
+            val second =
+                withTimeoutOrNull(viewConfiguration.doubleTapTimeoutMillis) { awaitFirstDown() }
+            if (second == null) {
+                actions.onTap()
+            } else {
+                actions.onDoubleTap()
+                // The second press ends the gesture however it moves.
+                awaitTapOrDrag(second)
+            }
         }
 
         Press.Drag -> {
@@ -264,7 +320,10 @@ private suspend fun AwaitPointerEventScope.trackDrag(
 
 private val SWIPE_DISTANCE = 24.dp
 
-/** Panel callbacks; [onSend] reads the screen, with the typed text or an empty string. */
+/**
+ * Panel callbacks; [onSend] sends the typed text or an empty string, with the saved screenshots
+ * or the screen now; [onRemoveShot] takes the saved screenshot's index.
+ */
 class PanelActions(
     val onClose: () -> Unit = {},
     val onHideButton: () -> Unit = {},
@@ -272,6 +331,7 @@ class PanelActions(
     val onCompose: () -> Unit = {},
     val onSend: (String) -> Unit = {},
     val onStop: () -> Unit = {},
+    val onRemoveShot: (Int) -> Unit = {},
     val onChangeCharacter: () -> Unit = {},
     val onShowDeck: () -> Unit = {},
 )
@@ -378,7 +438,42 @@ private fun PanelBody(
     val typingAnswer = state.typing == Typing.Answer
     Conversation(state, askActions, short, Modifier.weight(1f))
     state.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+    if (!typingAnswer && state.shots.isNotEmpty()) SavedShots(state.shots, actions.onRemoveShot)
     if (!typingAnswer) AskRow(state, draft, actions)
+}
+
+/** The screenshots saved for the next send, in the order taken, each with a remove button. */
+@Composable
+private fun SavedShots(
+    shots: List<Screenshot>,
+    onRemove: (Int) -> Unit,
+) = LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+    itemsIndexed(shots) { index, shot ->
+        val image =
+            remember(shot) {
+                BitmapFactory.decodeByteArray(shot.claude, 0, shot.claude.size)?.asImageBitmap()
+            }
+        Box(contentAlignment = Alignment.TopEnd) {
+            image?.let {
+                Image(
+                    it,
+                    contentDescription = MessagesRequest.screenshotLabel(index),
+                    modifier = Modifier.height(72.dp).clip(MaterialTheme.shapes.small),
+                )
+            }
+            // Small to leave the shot visible; the button keeps its 48dp touch target.
+            FilledTonalIconButton(
+                onClick = { onRemove(index) },
+                modifier = Modifier.padding(4.dp).size(24.dp),
+            ) {
+                Icon(
+                    painterResource(R.drawable.ic_close),
+                    contentDescription = "Remove ${MessagesRequest.screenshotLabel(index)}",
+                    modifier = Modifier.size(16.dp),
+                )
+            }
+        }
+    }
 }
 
 @Composable
@@ -575,8 +670,9 @@ private fun Question(text: String) {
 }
 
 /**
- * The one way to ask: every send includes a new screenshot, with the typed text if any. The
- * panel window is not focusable until the text box is tapped, so a tap first goes to [onCompose].
+ * The one way to ask: every send includes the saved screenshots, or a new one when none is
+ * saved, with the typed text if any. The panel window is not focusable until the text box is
+ * tapped, so a tap first goes to [PanelActions.onCompose].
  */
 @Composable
 private fun AskRow(
@@ -592,21 +688,25 @@ private fun AskRow(
             onStartTyping = actions.onCompose,
             modifier = Modifier.weight(1f),
         )
-        AskButton(state.busy, draft, actions)
+        AskButton(state.busy, state.shots.isNotEmpty(), draft, actions)
     }
 }
 
-/** Stop while a reply runs; otherwise read the screen (no text) or send the typed question. */
+/**
+ * Stop while a reply runs; otherwise read the screen (no text, no saved screenshot) or send the
+ * typed question or saved screenshots.
+ */
 @Composable
 private fun AskButton(
     busy: Boolean,
+    hasShots: Boolean,
     draft: TextFieldState,
     actions: PanelActions,
 ) {
     val (icon, label) =
         when {
             busy -> R.drawable.ic_stop to "Stop"
-            draft.text.isBlank() -> R.drawable.ic_photo_camera to "Read screen"
+            draft.text.isBlank() && !hasShots -> R.drawable.ic_photo_camera to "Read screen"
             else -> R.drawable.ic_send to "Send"
         }
     FilledIconButton(
@@ -628,6 +728,35 @@ private fun PanelPreview() =
                 tabActions = SideTabActions(),
                 onTouchableArea = {},
             ) { PanelPreviewContent() }
+        }
+    }
+
+@PreviewLightDark
+@PreviewFontScale
+@Composable
+private fun SavedShotsPreview() =
+    CompanionTheme(dark = true) {
+        val shots =
+            listOf(Color.RED, Color.GREEN, Color.BLUE).map {
+                val jpeg = createBitmap(160, 90).apply { eraseColor(it) }.toJpeg()
+                Screenshot(jpeg, jpeg)
+            }
+        Box(Modifier.size(468.dp, 400.dp)) {
+            SideOverlay(
+                open = true,
+                tabY = 0,
+                panelWidth = 420.dp,
+                tabActions = SideTabActions(),
+                onTouchableArea = {},
+                shots = shots.size,
+            ) {
+                Panel(
+                    PanelState(character = "Rossweisse", shots = shots),
+                    TextFieldState(),
+                    PanelActions(),
+                    AskActions(),
+                )
+            }
         }
     }
 

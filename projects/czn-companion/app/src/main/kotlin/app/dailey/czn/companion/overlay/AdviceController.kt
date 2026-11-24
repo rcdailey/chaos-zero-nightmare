@@ -58,7 +58,12 @@ data class PanelState(
     val error: String? = null,
     /** Which text box has the keyboard; null while none does. */
     val typing: Typing? = null,
+    /** Screenshots saved for the next send, in the order taken; at most [MAX_SHOTS]. */
+    val shots: List<Screenshot> = emptyList(),
 )
+
+/** Screenshots one turn sends at most; each adds image tokens to the request. */
+const val MAX_SHOTS = 5
 
 /** A text box in the panel: the question for Claude, or a typed answer to Claude's question. */
 enum class Typing { Question, Answer }
@@ -92,7 +97,8 @@ fun RosterState.characters(names: List<String>): List<RosterCharacter> {
 }
 
 /**
- * Panel state holder: sends questions with a screenshot, streams replies, stops them, handles New
+ * Panel state holder: keeps the screenshots saved for the next send, sends questions with them
+ * (or with one taken at send time), streams replies, stops them, handles New
  * run, runs the character picker for Claude and the player, and walks the player through
  * Claude's questions. A request keeps running when the panel closes; its reply is saved to the
  * run when it completes.
@@ -170,24 +176,56 @@ class AdviceController(
      */
     val draft = TextFieldState()
 
-    /** Asks [question] about [screenshot]; ignored while a reply is in progress. */
+    /** The screenshots the reply in progress was asked about; they go back if it fails or stops. */
+    private var sentShots: List<Screenshot> = emptyList()
+
+    /**
+     * Saves [screenshot] for the next send; false when it failed (shown as the panel's error) or
+     * [MAX_SHOTS] are already saved.
+     */
+    fun addShot(screenshot: Result<Screenshot>): Boolean {
+        val shot = screenshot.getOrElse { failure -> return failed(failure) }
+        var added = false
+        local.update {
+            added = it.shots.size < MAX_SHOTS
+            if (added) it.copy(shots = it.shots + shot, error = null) else it
+        }
+        Log.d(TAG, "add shot, added=$added, ${local.value.shots.size} saved")
+        return added
+    }
+
+    fun removeShot(index: Int) =
+        local.update {
+            it.copy(
+                shots =
+                    it.shots.filterIndexed { i, _ ->
+                        i !=
+                            index
+                    },
+            )
+        }
+
+    /**
+     * Asks [question] about the saved screenshots, or about [fresh] when none is saved; ignored
+     * while a reply is in progress.
+     */
     fun ask(
         question: String,
-        screenshot: Result<Screenshot>,
+        fresh: Result<Screenshot>?,
     ) {
         if (local.value.busy) {
             Log.d(TAG, "ask ignored, reply in progress: $question")
             return
         }
-        val shot =
-            screenshot.getOrElse { failure ->
-                Log.w(TAG, "screenshot failed", failure)
-                local.update { it.copy(error = "Could not take a screenshot: ${failure.message}") }
-                return
-            }
+        val shots = local.value.shots.ifEmpty { listOfNotNull(fresh?.getOrNull()) }
+        if (shots.isEmpty()) {
+            failed(fresh?.exceptionOrNull() ?: IllegalStateException("none taken"))
+            return
+        }
         entryCountAtAsk = state.value.entries.size
-        Log.d(TAG, "ask '$question', ${shot.claude.size} B jpeg, $entryCountAtAsk saved entries")
+        Log.d(TAG, "ask '$question', ${shots.size} shots, $entryCountAtAsk saved entries")
         if (question.isNotEmpty()) draft.clearText()
+        sentShots = shots
         local.update {
             it.withoutPending().copy(
                 pendingQuestion = question,
@@ -195,9 +233,29 @@ class AdviceController(
                 error = null,
                 typing = null,
                 deckOpen = false,
+                shots = emptyList(),
             )
         }
-        follow(question) { conversation.ask(question, shot, playerInput) }
+        follow(question) { conversation.ask(question, shots, playerInput) }
+    }
+
+    /** Whether a send needs a screenshot taken now: true while none is saved. */
+    val needsFreshShot get() = local.value.shots.isEmpty()
+
+    private fun failed(failure: Throwable): Boolean {
+        Log.w(TAG, "screenshot failed", failure)
+        local.update { it.copy(error = "Could not take a screenshot: ${failure.message}") }
+        return false
+    }
+
+    /**
+     * Puts the screenshots of a failed or stopped reply back in front of any saved since, so the
+     * player can send them again.
+     */
+    private fun PanelState.withSentShots(): PanelState {
+        val shots = (sentShots + shots).take(MAX_SHOTS)
+        sentShots = emptyList()
+        return copy(shots = shots)
     }
 
     init {
@@ -265,12 +323,13 @@ class AdviceController(
 
                             ReplyEvent.Done -> {
                                 Log.d(TAG, "reply done, ${state.streaming.length} chars")
+                                sentShots = emptyList()
                                 state.copy(busy = false)
                             }
 
                             is ReplyEvent.Failed -> {
                                 Log.w(TAG, "reply failed: ${event.kind} ${event.message}")
-                                state.finished().copy(error = describe(event))
+                                state.finished().withSentShots().copy(error = describe(event))
                             }
                         }
                     }
@@ -280,7 +339,7 @@ class AdviceController(
 
     /**
      * Stops the reply in progress, including one waiting for the picker, which closes. Nothing is
-     * saved, and a typed question goes back into the text box.
+     * saved; a typed question goes back into the text box and the screenshots into the saved ones.
      */
     fun stop() {
         val question = local.value.pendingQuestion ?: return
@@ -291,7 +350,7 @@ class AdviceController(
         if (question.isNotEmpty() && draft.text.isEmpty()) {
             draft.setTextAndPlaceCursorAtEnd(question)
         }
-        local.update { it.finished().copy(picker = null) }
+        local.update { it.finished().withSentShots().copy(picker = null) }
     }
 
     /** Opens the picker for the player to set or change the run's character. */
@@ -369,6 +428,7 @@ class AdviceController(
         // A reply still running would save its exchange, or its open turn, to the new run.
         reply?.cancel()
         reply = null
+        sentShots = emptyList()
         local.update { it.copy(error = null).finished() }
         scope.launch { conversation.newRun() }
     }

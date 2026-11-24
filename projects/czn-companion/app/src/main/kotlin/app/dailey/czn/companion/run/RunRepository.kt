@@ -19,7 +19,7 @@ data class RunEntry(
     val tools: List<String> = emptyList(),
     /** Questions Claude asked the player during an assistant reply, with the answers. */
     val asks: List<AnsweredAsk> = emptyList(),
-    /** What the app found on a user message's screenshot (see [RunEntryRow.screen]). */
+    /** What the app found on a user message's screenshots (see [RunEntryRow.screen]). */
     val screen: String = "",
     /** An assistant reply's whole exchange as JSON (see [RunEntryRow.exchange]). */
     val exchange: String = "",
@@ -27,13 +27,20 @@ data class RunEntry(
     val changes: List<String> = emptyList(),
 )
 
+/** One screenshot of the exchange in progress; see [OpenTurnShotRow]. */
+class OpenShot(
+    /** The copy Claude reads. */
+    val jpeg: ByteArray,
+    /** The full-size copy's file name in [ScreenshotArchive]. */
+    val screenshot: String,
+)
+
 /** The exchange in progress in the active run; see [OpenTurnRow]. */
 class OpenTurn(
     val question: String,
     val screen: String,
-    val jpeg: ByteArray?,
-    /** The full-size screenshot's file name in [ScreenshotArchive]; empty without one. */
-    val screenshot: String,
+    /** In the order the player took them; empty for a turn without screenshots. */
+    val shots: List<OpenShot>,
     val reply: String,
     val tools: List<String>,
     val asks: List<AnsweredAsk>,
@@ -112,8 +119,7 @@ class RunRepository(
             OpenTurn(
                 row.question,
                 row.screen,
-                row.jpeg,
-                row.screenshot,
+                dao.openTurnShots(row.runId).map { OpenShot(it.jpeg, it.screenshot) },
                 row.reply,
                 splitTools(row.tools),
                 PlayerAsks.decode(row.asks),
@@ -122,26 +128,43 @@ class RunRepository(
             )
         }
 
-    /** Replaces the active run's open exchange with [turn]. */
-    suspend fun saveOpenTurn(turn: OpenTurn) =
+    /** Replaces the active run's open exchange with [turn], with its screenshots. */
+    suspend fun startOpenTurn(turn: OpenTurn) =
         db.useWriterConnection { connection ->
             connection.immediateTransaction {
-                dao.saveOpenTurn(
-                    OpenTurnRow(
-                        runId = activeRunId(),
-                        question = turn.question,
-                        screen = turn.screen,
-                        jpeg = turn.jpeg,
-                        screenshot = turn.screenshot,
-                        reply = turn.reply,
-                        tools = joinTools(turn.tools),
-                        asks = PlayerAsks.encode(turn.asks),
-                        changes = joinTools(turn.changes),
-                        turn = turn.turn,
-                    ),
+                val runId = activeRunId()
+                dao.saveOpenTurn(openTurnRow(runId, turn))
+                dao.deleteOpenTurnShots(runId)
+                dao.insertOpenTurnShots(
+                    turn.shots.mapIndexed { position, shot ->
+                        OpenTurnShotRow(runId, position, shot.jpeg, shot.screenshot)
+                    },
                 )
             }
         }
+
+    /**
+     * Saves the progress of the open exchange [startOpenTurn] began; its screenshots never
+     * change, so [turn]'s are not written again.
+     */
+    suspend fun saveOpenTurn(turn: OpenTurn) =
+        db.useWriterConnection { connection ->
+            connection.immediateTransaction { dao.saveOpenTurn(openTurnRow(activeRunId(), turn)) }
+        }
+
+    private fun openTurnRow(
+        runId: Long,
+        turn: OpenTurn,
+    ) = OpenTurnRow(
+        runId = runId,
+        question = turn.question,
+        screen = turn.screen,
+        reply = turn.reply,
+        tools = joinTools(turn.tools),
+        asks = PlayerAsks.encode(turn.asks),
+        changes = joinTools(turn.changes),
+        turn = turn.turn,
+    )
 
     suspend fun discardOpenTurn() =
         db.useWriterConnection { connection ->
@@ -150,7 +173,8 @@ class RunRepository(
 
     /**
      * Saves one completed exchange and closes the open one; both messages are written or neither
-     * is. [screenshot] and [exchange] are kept for debugging (see [RunEntryRow]).
+     * is. [screenshots] (archive file names in the order taken) and [exchange] are kept for
+     * debugging (see [RunEntryRow]).
      */
     suspend fun appendExchange(
         user: String,
@@ -158,7 +182,7 @@ class RunRepository(
         tools: List<String>,
         asks: List<AnsweredAsk> = emptyList(),
         screen: String = "",
-        screenshot: String = "",
+        screenshots: List<String> = emptyList(),
         exchange: String = "",
         changes: List<String> = emptyList(),
     ) = db.useWriterConnection { connection ->
@@ -175,7 +199,7 @@ class RunRepository(
                         text = user,
                         createdAt = time,
                         screen = screen,
-                        screenshot = screenshot,
+                        screenshot = screenshots.joinToString("\n"),
                     ),
                     RunEntryRow(
                         runId = runId,
@@ -197,7 +221,7 @@ class RunRepository(
     suspend fun newRun() =
         db.useWriterConnection { connection ->
             connection.immediateTransaction {
-                // A closed run cannot resume its open exchange; drop it with its screenshot.
+                // A closed run cannot resume its open exchange; drop it with its screenshots.
                 dao.activeRun()?.let { dao.deleteOpenTurn(it.id) }
                 dao.closeActiveRun()
                 dao.insertRun(RunRow(startedAt = now(), active = true))

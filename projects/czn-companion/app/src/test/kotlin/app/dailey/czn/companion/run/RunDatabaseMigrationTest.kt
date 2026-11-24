@@ -1,7 +1,6 @@
 package app.dailey.czn.companion.run
 
 import android.content.Context
-import androidx.room3.Room
 import androidx.sqlite.driver.AndroidSQLiteDriver
 import androidx.sqlite.execSQL
 import androidx.test.core.app.ApplicationProvider
@@ -75,11 +74,7 @@ class RunDatabaseMigrationTest {
             )
 
             // Opened as the app opens it, so every migration since version 9 runs.
-            val db =
-                Room
-                    .databaseBuilder<RunDatabase>(context, path)
-                    .setDriver(AndroidSQLiteDriver())
-                    .build()
+            val db = RunDatabase.open(context, path)
             val run = RunRepository(db)
 
             assertEquals("Rossweisse", run.characterNow())
@@ -100,16 +95,51 @@ class RunDatabaseMigrationTest {
                     " VALUES (1, 0, 'user', 'Which card?', 0)",
             )
 
-            val db =
-                Room
-                    .databaseBuilder<RunDatabase>(context, path)
-                    .setDriver(AndroidSQLiteDriver())
-                    .build()
+            val db = RunDatabase.open(context, path)
             val run = RunRepository(db)
 
             assertEquals("Rossweisse", run.characterNow())
             assertEquals(listOf("Which card?"), run.entriesNow().map { it.text })
             assertNull(run.deckNow())
+            db.close()
+        }
+
+    @Test
+    fun aVersion12ReplyInProgressKeepsItsScreenshot() =
+        runTest {
+            createAt(
+                12,
+                "INSERT INTO run (id, startedAt, active) VALUES (1, 0, 1)",
+                "INSERT INTO open_turn (runId, question, screen, jpeg, screenshot, reply, tools," +
+                    " asks, changes, turn) VALUES (1, 'Which card?', '', x'0102', '1000.jpg'," +
+                    " 'Take', '', '[]', '', '[]')",
+            )
+
+            val db = RunDatabase.open(context, path)
+            val open = RunRepository(db).openTurn()!!
+
+            assertEquals("Which card?", open.question)
+            assertEquals("Take", open.reply)
+            assertEquals(listOf("1000.jpg"), open.shots.map { it.screenshot })
+            assertEquals(listOf(listOf<Byte>(1, 2)), open.shots.map { it.jpeg.toList() })
+            db.close()
+        }
+
+    @Test
+    fun aReplyInProgressKeepsItsScreenshotsInOrderUntilItIsSaved() =
+        runTest {
+            val db = RunDatabase.open(context, path)
+            val run = RunRepository(db)
+            val shots = listOf(OpenShot(byteArrayOf(1), "1.jpg"), OpenShot(byteArrayOf(2), "2.jpg"))
+            run.startOpenTurn(OpenTurn("Which?", "", shots, "", emptyList(), emptyList(), "[]"))
+            run.saveOpenTurn(OpenTurn("Which?", "", shots, "Take", emptyList(), emptyList(), "[]"))
+
+            val open = run.openTurn()!!
+            assertEquals("Take", open.reply)
+            assertEquals(listOf("1.jpg", "2.jpg"), open.shots.map { it.screenshot })
+
+            run.appendExchange("Which?", "Take B.", emptyList(), screenshots = listOf("1.jpg"))
+            assertNull(run.openTurn())
             db.close()
         }
 }

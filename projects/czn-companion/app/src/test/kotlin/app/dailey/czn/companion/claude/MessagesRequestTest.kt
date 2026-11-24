@@ -37,7 +37,7 @@ class MessagesRequestTest {
         )
 
     private fun build(
-        jpeg: ByteArray? = byteArrayOf(1, 2, 3),
+        jpegs: List<ByteArray> = listOf(byteArrayOf(1, 2, 3)),
         text: String = "Why B?",
         run: RunState = RunState(),
         turn: List<BetaMessageParam> = emptyList(),
@@ -47,7 +47,7 @@ class MessagesRequestTest {
         MessagesRequest.build(
             history,
             text,
-            jpeg,
+            jpegs,
             "https://czn.example/mcp",
             "czn-token",
             run,
@@ -237,7 +237,7 @@ class MessagesRequestTest {
     fun `tool exchanges of this turn follow the newest message`() {
         val (toolUse, result) = toolExchange()
         val messages =
-            build(jpeg = null, turn = listOf(toolUse, result))["messages"]!!
+            build(jpegs = emptyList(), turn = listOf(toolUse, result))["messages"]!!
                 .jsonArray
                 .map { it.jsonObject }
         assertEquals(
@@ -255,11 +255,21 @@ class MessagesRequestTest {
     }
 
     @Test
-    fun `history keeps order and only the newest message has an image`() {
-        val messages = build().messages()
+    fun `history has no images and the newest message labels each screenshot in order`() {
+        val messages = build(jpegs = listOf(byteArrayOf(1), byteArrayOf(2))).messages()
         assertEquals(listOf("user", "assistant", "user"), messages.map { it.string("role") })
         val imageCounts = messages.map { m -> m.content().count { it.string("type") == "image" } }
-        assertEquals(listOf(0, 0, 1), imageCounts)
+        assertEquals(listOf(0, 0, 2), imageCounts)
+        val newest = messages.last().content()
+        assertEquals(
+            listOf("Screenshot 1:", "image", "Screenshot 2:", "image"),
+            newest.take(4).map { it.text() ?: it.string("type") },
+        )
+        val images = newest.filter { it.string("type") == "image" }
+        assertEquals(
+            listOf("AQ==", "Ag=="),
+            images.map { it["source"]!!.jsonObject.string("data") },
+        )
         assertEquals("Why B?", messages.last().question())
     }
 
@@ -361,7 +371,7 @@ class MessagesRequestTest {
                     ),
                 ),
                 "Why?",
-                null,
+                emptyList(),
                 "https://czn.example/mcp",
                 "czn-token",
             )
@@ -388,7 +398,7 @@ class MessagesRequestTest {
 
     @Test
     fun `czn server is attached with its token`() {
-        val body = build(jpeg = null)
+        val body = build(jpegs = emptyList())
         val server = body["mcp_servers"]!!.jsonArray[0].jsonObject
         assertEquals("czn-token", server.string("authorization_token"))
         assertEquals(

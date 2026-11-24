@@ -9,6 +9,7 @@ import android.content.res.Configuration
 import android.graphics.PixelFormat
 import android.util.Log
 import android.view.Gravity
+import android.view.HapticFeedbackConstants
 import android.view.MotionEvent
 import android.view.View
 import android.view.WindowInsets
@@ -201,13 +202,25 @@ class OverlayService : AccessibilityService() {
         onSend("")
     }
 
+    /** Sends [question] with the saved screenshots, or with one taken now when none is saved. */
     private fun onSend(question: String) {
         scope.launch {
             hideKeyboard()
             setPanelFocusable(false)
-            val screenshot = captureGame()
+            val screenshot = if (advice.needsFreshShot) captureGame() else null
             openPanel()
             advice.ask(question, screenshot)
+        }
+    }
+
+    /** Saves a screenshot for the next send without opening the panel. */
+    private fun onTabDoubleTap() {
+        scope.launch {
+            val added = advice.addShot(captureGame())
+            Log.d(TAG, "tab double tap, added=$added")
+            overlay?.performHapticFeedback(
+                if (added) HapticFeedbackConstants.CONFIRM else HapticFeedbackConstants.REJECT,
+            )
         }
     }
 
@@ -293,6 +306,7 @@ class OverlayService : AccessibilityService() {
                     panelWidth = with(LocalDensity.current) { panelWidth.toDp() },
                     tabActions = tabActions,
                     onTouchableArea = { window.rootSurfaceControl?.setTouchableRegion(it) },
+                    shots = state.shots.size,
                 ) {
                     if (state.deckOpen) {
                         RunDeckPanel(
@@ -360,6 +374,7 @@ class OverlayService : AccessibilityService() {
         SideTabActions(
             onTap = ::onTabTap,
             onHold = ::onTabHold,
+            onDoubleTap = ::onTabDoubleTap,
             onOpen = ::openPanel,
             onClose = ::closePanel,
             onMove = ::moveTab,
@@ -374,6 +389,7 @@ class OverlayService : AccessibilityService() {
             onCompose = { startTyping(Typing.Question) },
             onSend = ::onSend,
             onStop = advice::stop,
+            onRemoveShot = advice::removeShot,
             onChangeCharacter = advice::openCharacterPicker,
             onShowDeck = advice::showDeck,
         )

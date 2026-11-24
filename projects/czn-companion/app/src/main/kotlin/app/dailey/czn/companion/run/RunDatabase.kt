@@ -1,5 +1,6 @@
 package app.dailey.czn.companion.run
 
+import android.content.Context
 import androidx.room3.AutoMigration
 import androidx.room3.ColumnInfo
 import androidx.room3.Dao
@@ -11,10 +12,13 @@ import androidx.room3.Index
 import androidx.room3.Insert
 import androidx.room3.PrimaryKey
 import androidx.room3.Query
+import androidx.room3.Room
 import androidx.room3.RoomDatabase
 import androidx.room3.Upsert
 import androidx.room3.migration.AutoMigrationSpec
+import androidx.room3.migration.Migration
 import androidx.sqlite.SQLiteConnection
+import androidx.sqlite.driver.AndroidSQLiteDriver
 import androidx.sqlite.execSQL
 import kotlinx.coroutines.flow.Flow
 
@@ -92,12 +96,8 @@ class OpenTurnRow(
     @PrimaryKey val runId: Long,
     /** The player's typed text, empty for a screen read. */
     val question: String,
-    /** What the app found on the screenshot; see [RunEntryRow.screen]. */
+    /** What the app found on the screenshots; see [RunEntryRow.screen]. */
     val screen: String,
-    /** The screenshot Claude reads, kept only while this exchange is open. */
-    val jpeg: ByteArray?,
-    /** As in [RunEntryRow.screenshot]; the app names characters from this full-size copy. */
-    @ColumnInfo(defaultValue = "") val screenshot: String,
     /** Reply text so far. */
     val reply: String,
     /** As in [RunEntryRow.tools] and [RunEntryRow.asks]. */
@@ -114,8 +114,28 @@ class OpenTurnRow(
 )
 
 /**
- * One message in a run's conversation, in order. A screenshot is sent only while its exchange
- * is open ([OpenTurnRow]); later requests carry the message without it.
+ * One screenshot of an open exchange ([OpenTurnRow]), at [position] in the order the player took
+ * them; deleted with its exchange.
+ */
+@Entity(
+    tableName = "open_turn_shot",
+    primaryKeys = ["runId", "position"],
+    foreignKeys = [
+        ForeignKey(OpenTurnRow::class, ["runId"], ["runId"], onDelete = ForeignKey.CASCADE),
+    ],
+)
+class OpenTurnShotRow(
+    val runId: Long,
+    val position: Int,
+    /** The screenshot Claude reads, kept only while this exchange is open. */
+    val jpeg: ByteArray,
+    /** Its full-size copy's file name in the archive, as in [RunEntryRow.screenshot]. */
+    val screenshot: String,
+)
+
+/**
+ * One message in a run's conversation, in order. Screenshots are sent only while their exchange
+ * is open ([OpenTurnShotRow]); later requests carry the message without them.
  */
 @Entity(
     tableName = "run_entry",
@@ -134,13 +154,16 @@ data class RunEntryRow(
     /** Questions Claude asked the player during an assistant reply, as `PlayerAsks.encode` JSON. */
     @ColumnInfo(defaultValue = "") val asks: String = "",
     /**
-     * What the app found on a user message's screenshot, such as the characters the data server
-     * named; sent to Claude with the message and shown in the reply's details.
+     * What the app found on a user message's screenshots, such as the characters the data server
+     * named, one "Screenshot n:" section per screenshot (one unlabeled line in messages saved
+     * before a turn could hold several); sent to Claude with the message and shown in the reply's
+     * details.
      */
     @ColumnInfo(defaultValue = "") val screen: String = "",
     /**
-     * A user message's screenshot in [app.dailey.czn.companion.run.ScreenshotArchive], by file
-     * name; empty without one. The archive keeps only the newest, so the file may be gone.
+     * A user message's screenshots in [app.dailey.czn.companion.run.ScreenshotArchive], by file
+     * name, one per line in the order taken; empty without one. The archive keeps only the
+     * newest, so a file may be gone.
      */
     @ColumnInfo(defaultValue = "") val screenshot: String = "",
     /**
@@ -215,11 +238,26 @@ interface RunDao {
 
     @Query("DELETE FROM open_turn WHERE runId = :runId")
     suspend fun deleteOpenTurn(runId: Long)
+
+    @Query("SELECT * FROM open_turn_shot WHERE runId = :runId ORDER BY position")
+    suspend fun openTurnShots(runId: Long): List<OpenTurnShotRow>
+
+    @Query("DELETE FROM open_turn_shot WHERE runId = :runId")
+    suspend fun deleteOpenTurnShots(runId: Long)
+
+    @Insert
+    suspend fun insertOpenTurnShots(shots: List<OpenTurnShotRow>)
 }
 
 @Database(
-    entities = [RunRow::class, RunEntryRow::class, OpenTurnRow::class, RequestUsageRow::class],
-    version = 12,
+    entities = [
+        RunRow::class,
+        RunEntryRow::class,
+        OpenTurnRow::class,
+        OpenTurnShotRow::class,
+        RequestUsageRow::class,
+    ],
+    version = 13,
     autoMigrations = [
         AutoMigration(from = 1, to = 2),
         AutoMigration(from = 2, to = 3),
@@ -236,6 +274,57 @@ interface RunDao {
 )
 abstract class RunDatabase : RoomDatabase() {
     abstract fun runDao(): RunDao
+
+    companion object {
+        /** The app's database at [path], with every migration a schema change needs. */
+        fun open(
+            context: Context,
+            path: String,
+        ): RunDatabase =
+            Room
+                .databaseBuilder<RunDatabase>(context, path)
+                .setDriver(AndroidSQLiteDriver())
+                .addMigrations(MoveShotsToTable)
+                .build()
+    }
+}
+
+/**
+ * An open exchange's one screenshot moved from its [OpenTurnRow] to [OpenTurnShotRow], so a turn
+ * can hold several. Manual because an auto-migration cannot read a column it deletes.
+ */
+private object MoveShotsToTable : Migration(12, 13) {
+    override suspend fun migrate(connection: SQLiteConnection) {
+        connection.execSQL("ALTER TABLE open_turn RENAME TO open_turn_old")
+        connection.execSQL(OPEN_TURN_SQL)
+        connection.execSQL(
+            """
+            INSERT INTO open_turn (runId, question, screen, reply, tools, asks, changes, turn)
+            SELECT runId, question, screen, reply, tools, asks, changes, turn FROM open_turn_old
+            """.trimIndent(),
+        )
+        connection.execSQL(OPEN_TURN_SHOT_SQL)
+        connection.execSQL(
+            """
+            INSERT INTO open_turn_shot (runId, position, jpeg, screenshot)
+            SELECT runId, 0, jpeg, screenshot FROM open_turn_old WHERE jpeg IS NOT NULL
+            """.trimIndent(),
+        )
+        connection.execSQL("DROP TABLE open_turn_old")
+    }
+
+    // As in schemas/13.json.
+    private const val OPEN_TURN_SQL =
+        "CREATE TABLE IF NOT EXISTS `open_turn` (`runId` INTEGER NOT NULL, " +
+            "`question` TEXT NOT NULL, `screen` TEXT NOT NULL, `reply` TEXT NOT NULL, " +
+            "`tools` TEXT NOT NULL, `asks` TEXT NOT NULL, `changes` TEXT NOT NULL DEFAULT '', " +
+            "`turn` TEXT NOT NULL, PRIMARY KEY(`runId`), FOREIGN KEY(`runId`) REFERENCES " +
+            "`run`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE )"
+    private const val OPEN_TURN_SHOT_SQL =
+        "CREATE TABLE IF NOT EXISTS `open_turn_shot` (`runId` INTEGER NOT NULL, " +
+            "`position` INTEGER NOT NULL, `jpeg` BLOB NOT NULL, `screenshot` TEXT NOT NULL, " +
+            "PRIMARY KEY(`runId`, `position`), FOREIGN KEY(`runId`) REFERENCES " +
+            "`open_turn`(`runId`) ON UPDATE NO ACTION ON DELETE CASCADE )"
 }
 
 /**

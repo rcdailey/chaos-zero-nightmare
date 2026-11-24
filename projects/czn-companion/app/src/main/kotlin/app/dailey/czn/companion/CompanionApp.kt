@@ -1,14 +1,11 @@
 package app.dailey.czn.companion
 
 import android.app.Application
-import androidx.room3.Room
-import androidx.sqlite.driver.AndroidSQLiteDriver
 import app.dailey.czn.companion.auth.AnthropicAuth
 import app.dailey.czn.companion.auth.CznDataAuth
 import app.dailey.czn.companion.auth.TokenStore
 import app.dailey.czn.companion.characters.CharacterRoster
-import app.dailey.czn.companion.characters.ScreenCharacters
-import app.dailey.czn.companion.characters.ScreenGear
+import app.dailey.czn.companion.characters.ScreenIdentifier
 import app.dailey.czn.companion.claude.ClaudeConversation
 import app.dailey.czn.companion.overlay.OverlaySettings
 import app.dailey.czn.companion.overlay.OverlayStatus
@@ -48,10 +45,7 @@ class CompanionApp : Application() {
     val overlaySettings by lazy { OverlaySettings(getSharedPreferences("overlay", MODE_PRIVATE)) }
     val overlayStatus = OverlayStatus()
     private val runDatabase by lazy {
-        Room
-            .databaseBuilder<RunDatabase>(this, getDatabasePath("runs.db").absolutePath)
-            .setDriver(AndroidSQLiteDriver())
-            .build()
+        RunDatabase.open(this, getDatabasePath("runs.db").absolutePath)
     }
     val characterRoster by lazy { CharacterRoster(http, cznDataAuth) }
     val conversation by lazy {
@@ -59,8 +53,7 @@ class CompanionApp : Application() {
             anthropicAuth,
             cznDataAuth,
             RunRepository(runDatabase),
-            ScreenCharacters(http, cznDataAuth),
-            ScreenGear(http, cznDataAuth),
+            ScreenIdentifier(http, cznDataAuth),
             SaveDataCost(http, cznDataAuth),
             DeckDetails(http, cznDataAuth),
             ScreenshotArchive(File(filesDir, "screenshots")),

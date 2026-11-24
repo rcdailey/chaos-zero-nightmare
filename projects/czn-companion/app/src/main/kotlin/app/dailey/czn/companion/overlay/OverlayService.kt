@@ -293,7 +293,18 @@ class OverlayService : AccessibilityService() {
                     panelWidth = with(LocalDensity.current) { panelWidth.toDp() },
                     tabActions = tabActions,
                     onTouchableArea = { window.rootSurfaceControl?.setTouchableRegion(it) },
-                ) { Panel(state, advice.draft, panelActions, askActions) }
+                ) {
+                    if (state.deckOpen) {
+                        RunDeckPanel(
+                            state.deck,
+                            state.deckTab,
+                            advice::selectDeckTab,
+                            advice::hideDeck,
+                        )
+                    } else {
+                        Panel(state, advice.draft, panelActions, askActions)
+                    }
+                }
             }
         closeOnOutsideTouch(view)
         windowManager.addView(view, params)
@@ -364,6 +375,7 @@ class OverlayService : AccessibilityService() {
             onSend = ::onSend,
             onStop = advice::stop,
             onChangeCharacter = advice::openCharacterPicker,
+            onShowDeck = advice::showDeck,
         )
     }
 

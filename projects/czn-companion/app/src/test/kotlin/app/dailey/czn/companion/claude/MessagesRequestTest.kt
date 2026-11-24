@@ -5,8 +5,8 @@ import app.dailey.czn.companion.ask.AnsweredAsk
 import app.dailey.czn.companion.ask.Option
 import app.dailey.czn.companion.ask.Question
 import app.dailey.czn.companion.run.DeckCard
-import app.dailey.czn.companion.run.DeckCharacter
 import app.dailey.czn.companion.run.DeckGear
+import app.dailey.czn.companion.run.DeckParts
 import app.dailey.czn.companion.run.EntryKind
 import app.dailey.czn.companion.run.RunDeck
 import app.dailey.czn.companion.run.RunEntry
@@ -147,18 +147,15 @@ class MessagesRequestTest {
     }
 
     @Test
-    fun `the run's character and saved plan reach Claude with every request`() {
-        fun state(run: RunState) =
-            build(run = run)
+    fun `without saved deck state Claude reads that the run's state is not known yet`() {
+        val unknown =
+            build(run = RunState())
                 .messages()
                 .last()
                 .content()
                 .last()
                 .text()
                 .orEmpty()
-        val known = state(RunState("Rossweisse", "Sword Resonance II x4 (3 Duplicates)"))
-        assertTrue("Rossweisse" in known && "Sword Resonance II x4 (3 Duplicates)" in known)
-        val unknown = state(RunState())
         assertTrue("not known" in unknown && "none" in unknown)
     }
 
@@ -166,21 +163,24 @@ class MessagesRequestTest {
     fun `the saved deck state is the newest message's last block and nowhere earlier`() {
         val deck =
             RunDeck(
-                plan = "Radiant Sword Flow II x3 (Divine)",
                 limit = 120,
-                characters =
-                    listOf(
-                        DeckCharacter(
-                            "Rossweisse",
-                            points = 40,
-                            cards = listOf(DeckCard("Radiant Sword Flow", "III", divine = true)),
-                            removed = listOf("Sword Slash"),
-                            gear = DeckGear(weapon = "Criticism of Discord"),
-                        ),
+                points = 40,
+                target =
+                    DeckParts(
+                        cards =
+                            listOf(
+                                DeckCard("Radiant Sword Flow", "II", divine = true, copies = 3),
+                            ),
+                    ),
+                current =
+                    DeckParts(
+                        cards = listOf(DeckCard("Radiant Sword Flow", "III", divine = true)),
+                        removed = listOf("Sword Slash"),
+                        gear = DeckGear(weapon = "Criticism of Discord"),
                     ),
                 dropFirst = listOf("Sword Resonance V Divine"),
             )
-        val messages = build(run = RunState("Rossweisse", "old plan text", deck)).messages()
+        val messages = build(run = RunState("Rossweisse", deck)).messages()
         val state =
             messages
                 .last()
@@ -189,16 +189,17 @@ class MessagesRequestTest {
                 .text()
                 .orEmpty()
         for (part in listOf(
+            "Rossweisse",
             "40/120 points",
             "Radiant Sword Flow III (Divine)",
             "Sword Slash",
             "weapon Criticism of Discord",
-            "Radiant Sword Flow II x3 (Divine)",
+            "Radiant Sword Flow II (Divine) x3",
             "Sword Resonance V Divine",
+            "does not match: Radiant Sword Flow III (Divine) (target Epiphany II, Divine)",
         )) {
             assertTrue(part in state, part)
         }
-        assertTrue("old plan text" !in state)
         val earlier = messages.dropLast(1).flatMap { it.content() }.mapNotNull { it.text() }
         assertTrue(earlier.none { "40/120" in it })
     }

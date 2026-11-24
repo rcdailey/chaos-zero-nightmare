@@ -4,6 +4,7 @@ import androidx.room3.AutoMigration
 import androidx.room3.ColumnInfo
 import androidx.room3.Dao
 import androidx.room3.Database
+import androidx.room3.DeleteColumn
 import androidx.room3.Entity
 import androidx.room3.ForeignKey
 import androidx.room3.Index
@@ -25,11 +26,6 @@ data class RunRow(
     val active: Boolean,
     /** The character whose deck this run builds, as the CZN data server names it. */
     val character: String? = null,
-    /**
-     * The target deck Claude saved with the retired set_run_plan tool; runs saved before [deck]
-     * existed still send it.
-     */
-    val plan: String? = null,
     /** The run's deck state Claude saved (update_run_state), as [RunDecks.encode] JSON. */
     val deck: String? = null,
 )
@@ -107,6 +103,8 @@ class OpenTurnRow(
     /** As in [RunEntryRow.tools] and [RunEntryRow.asks]. */
     val tools: String,
     val asks: String,
+    /** As in [RunEntryRow.changes]. */
+    @ColumnInfo(defaultValue = "") val changes: String = "",
     /**
      * Messages Claude and the app exchanged after the question, as a JSON array of the Anthropic
      * SDK's message params. When the last is Claude's and calls app tools, those tools still
@@ -152,6 +150,11 @@ data class RunEntryRow(
      * for replies saved before it existed, which are sent as [text].
      */
     @ColumnInfo(defaultValue = "") val exchange: String = "",
+    /**
+     * What Claude's run state updates during an assistant reply changed ([DeckChanges]), one
+     * line each; shown, never sent.
+     */
+    @ColumnInfo(defaultValue = "") val changes: String = "",
 )
 
 @Dao
@@ -164,6 +167,9 @@ interface RunDao {
 
     @Query("SELECT character FROM run WHERE active = 1 LIMIT 1")
     fun activeCharacter(): Flow<String?>
+
+    @Query("SELECT deck FROM run WHERE active = 1 LIMIT 1")
+    fun activeDeck(): Flow<String?>
 
     @Query("UPDATE run SET character = :character WHERE id = :runId")
     suspend fun setCharacter(
@@ -213,7 +219,7 @@ interface RunDao {
 
 @Database(
     entities = [RunRow::class, RunEntryRow::class, OpenTurnRow::class, RequestUsageRow::class],
-    version = 11,
+    version = 12,
     autoMigrations = [
         AutoMigration(from = 1, to = 2),
         AutoMigration(from = 2, to = 3),
@@ -225,10 +231,23 @@ interface RunDao {
         AutoMigration(from = 8, to = 9),
         AutoMigration(from = 9, to = 10),
         AutoMigration(from = 10, to = 11),
+        AutoMigration(from = 11, to = 12, spec = TargetAndCurrentDecks::class),
     ],
 )
 abstract class RunDatabase : RoomDatabase() {
     abstract fun runDao(): RunDao
+}
+
+/**
+ * Deck state became one character's target and current deck. Older runs' deck state (a text
+ * plan and decks per team member) is dropped rather than converted, by the player's choice;
+ * their conversations stay.
+ */
+@DeleteColumn(tableName = "run", columnName = "plan")
+class TargetAndCurrentDecks : AutoMigrationSpec {
+    override suspend fun onPostMigrate(connection: SQLiteConnection) {
+        connection.execSQL("UPDATE run SET deck = NULL")
+    }
 }
 
 /**

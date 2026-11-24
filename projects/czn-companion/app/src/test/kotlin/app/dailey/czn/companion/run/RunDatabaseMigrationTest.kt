@@ -64,12 +64,14 @@ class RunDatabaseMigrationTest {
     }
 
     @Test
-    fun aVersion9RunKeepsItsCharacterAndPlanAndHasNoDeckState() =
+    fun aVersion9RunKeepsItsCharacterAndConversationButStartsWithoutDeckState() =
         runTest {
             createAt(
                 9,
                 "INSERT INTO run (id, startedAt, active, character, plan)" +
                     " VALUES (1, 0, 1, 'Rossweisse', 'Radiant Sword Flow II x3')",
+                "INSERT INTO run_entry (runId, position, kind, text, createdAt)" +
+                    " VALUES (1, 0, 'user', 'Which card?', 0)",
             )
 
             // Opened as the app opens it, so every migration since version 9 runs.
@@ -81,7 +83,32 @@ class RunDatabaseMigrationTest {
             val run = RunRepository(db)
 
             assertEquals("Rossweisse", run.characterNow())
-            assertEquals("Radiant Sword Flow II x3", run.planNow())
+            assertEquals(listOf("Which card?"), run.entriesNow().map { it.text })
+            assertNull(run.deckNow())
+            db.close()
+        }
+
+    @Test
+    fun aVersion11RunDropsItsOldDeckStateAndKeepsItsConversation() =
+        runTest {
+            createAt(
+                11,
+                "INSERT INTO run (id, startedAt, active, character, plan, deck)" +
+                    " VALUES (1, 0, 1, 'Rossweisse', 'old plan'," +
+                    " '{\"plan\": \"old\", \"characters\": [{\"name\": \"Rossweisse\"}]}')",
+                "INSERT INTO run_entry (runId, position, kind, text, createdAt)" +
+                    " VALUES (1, 0, 'user', 'Which card?', 0)",
+            )
+
+            val db =
+                Room
+                    .databaseBuilder<RunDatabase>(context, path)
+                    .setDriver(AndroidSQLiteDriver())
+                    .build()
+            val run = RunRepository(db)
+
+            assertEquals("Rossweisse", run.characterNow())
+            assertEquals(listOf("Which card?"), run.entriesNow().map { it.text })
             assertNull(run.deckNow())
             db.close()
         }

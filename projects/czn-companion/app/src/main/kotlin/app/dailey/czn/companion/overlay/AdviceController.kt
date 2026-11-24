@@ -45,6 +45,13 @@ data class PanelState(
     val pendingTools: List<String> = emptyList(),
     /** Questions Claude asked so far for [pendingQuestion], with the answers. */
     val pendingAsks: List<AnsweredAsk> = emptyList(),
+    /** What Claude's run state updates changed so far for [pendingQuestion]. */
+    val pendingChanges: List<String> = emptyList(),
+    /** The run's target and current deck, for the deck view. */
+    val deck: RunDeckState = RunDeckState(),
+    /** The deck view replaces the conversation while open, on [deckTab]. */
+    val deckOpen: Boolean = false,
+    val deckTab: RunDeckTab = RunDeckTab.Target,
     /** Questions Claude asked that wait for the player, shown in the conversation. */
     val ask: AskProgress? = null,
     val busy: Boolean = false,
@@ -139,20 +146,20 @@ class AdviceController(
     // A completed reply stays shown as pending until the saved run includes it, so the list never
     // briefly drops both items and jumps.
     val state: StateFlow<PanelState> =
-        combine(conversation.entries, conversation.character, local) { entries, character, panel ->
+        combine(
+            conversation.entries,
+            conversation.character,
+            conversation.deck,
+            local,
+        ) { entries, character, deck, panel ->
             val saved = !panel.busy && entries.size > entryCountAtAsk
-            if (panel.pendingQuestion != null && saved) {
+            val shown =
                 panel.copy(
                     entries = entries,
                     character = character,
-                    pendingQuestion = null,
-                    streaming = "",
-                    pendingTools = emptyList(),
-                    pendingAsks = emptyList(),
+                    deck = runDeckState(character, deck),
                 )
-            } else {
-                panel.copy(entries = entries, character = character)
-            }
+            if (panel.pendingQuestion != null && saved) shown.withoutPending() else shown
         }.stateIn(scope, SharingStarted.Eagerly, PanelState())
 
     val busy get() = local.value.busy
@@ -182,14 +189,12 @@ class AdviceController(
         Log.d(TAG, "ask '$question', ${shot.claude.size} B jpeg, $entryCountAtAsk saved entries")
         if (question.isNotEmpty()) draft.clearText()
         local.update {
-            it.copy(
+            it.withoutPending().copy(
                 pendingQuestion = question,
-                streaming = "",
-                pendingTools = emptyList(),
-                pendingAsks = emptyList(),
                 busy = true,
                 error = null,
                 typing = null,
+                deckOpen = false,
             )
         }
         follow(question) { conversation.ask(question, shot, playerInput) }
@@ -214,6 +219,7 @@ class AdviceController(
                     streaming = open.reply,
                     pendingTools = open.tools,
                     pendingAsks = open.asks,
+                    pendingChanges = open.changes,
                     busy = true,
                 )
             }
@@ -245,6 +251,11 @@ class AdviceController(
                             is ReplyEvent.ToolCall -> {
                                 Log.d(TAG, "tool call ${event.label}")
                                 state.copy(pendingTools = state.pendingTools + event.label)
+                            }
+
+                            is ReplyEvent.DeckChanged -> {
+                                Log.d(TAG, "deck changed: ${event.lines}")
+                                state.copy(pendingChanges = state.pendingChanges + event.lines)
                             }
 
                             is ReplyEvent.Asked -> {
@@ -362,13 +373,21 @@ class AdviceController(
         scope.launch { conversation.newRun() }
     }
 
-    private fun PanelState.finished() =
+    fun showDeck() = local.update { it.copy(deckOpen = true) }
+
+    fun hideDeck() = local.update { it.copy(deckOpen = false) }
+
+    fun selectDeckTab(tab: RunDeckTab) = local.update { it.copy(deckTab = tab) }
+
+    private fun PanelState.finished() = withoutPending().copy(busy = false)
+
+    private fun PanelState.withoutPending() =
         copy(
             pendingQuestion = null,
             streaming = "",
             pendingTools = emptyList(),
             pendingAsks = emptyList(),
-            busy = false,
+            pendingChanges = emptyList(),
         )
 
     private fun describe(failure: ReplyEvent.Failed) =

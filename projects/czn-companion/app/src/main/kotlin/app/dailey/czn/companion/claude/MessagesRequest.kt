@@ -30,8 +30,6 @@ import kotlin.io.encoding.Base64
 data class RunState(
     /** The run's character, or null while unknown. */
     val character: String? = null,
-    /** Plan text of a run saved before deck state existed; ignored once [deck] is set. */
-    val plan: String? = null,
     /** The deck state Claude built with update_run_state, or null before its first update. */
     val deck: RunDeck? = null,
 )
@@ -178,21 +176,12 @@ object MessagesRequest {
 
     /** The run state block at the end of the newest message. */
     private fun describe(run: RunState): String {
-        val head = "Run state. Character: ${run.character ?: "not known yet"}."
-        return when {
-            run.deck != null -> {
-                "Current run state, newer than any earlier one in this conversation. " +
-                    "Character: ${run.character ?: "not known yet"}.\n" +
-                    RunDecks.describe(run.deck)
-            }
-
-            run.plan != null -> {
-                "$head Saved plan: \n${run.plan}"
-            }
-
-            else -> {
-                "$head Saved state: none yet."
-            }
+        val character = "Character: ${run.character ?: "not known yet"}."
+        return if (run.deck != null) {
+            "Current run state, newer than any earlier one in this conversation. $character\n" +
+                RunDecks.describe(run.deck)
+        } else {
+            "Run state. $character Saved state: none yet."
         }
     }
 
@@ -392,23 +381,29 @@ object MessagesRequest {
                             "description" to
                                 "Copies of this version the deck now holds; 0 deletes the entry",
                         ),
+                    "seen" to
+                        mapOf(
+                            "type" to "boolean",
+                            "description" to
+                                "Current deck only: false when you assumed the entry (such as a " +
+                                "starting card) without seeing it on a screen",
+                        ),
+                    "fixable" to
+                        mapOf(
+                            "type" to "boolean",
+                            "description" to
+                                "Current deck only: a czn tool result states that a later " +
+                                "Epiphany can still turn this version into the target's",
+                        ),
                 ),
             "required" to listOf("card"),
         )
 
-    private val DECK_CHARACTER_SCHEMA =
+    private val DECK_PARTS_SCHEMA =
         mapOf(
             "type" to "object",
             "properties" to
                 mapOf(
-                    "name" to mapOf("type" to "string"),
-                    "points" to
-                        mapOf(
-                            "type" to "integer",
-                            "description" to
-                                "Faint Memory points the Save Data holds now, when a counter on " +
-                                "screen shows them; otherwise omit it",
-                        ),
                     "cards" to
                         mapOf(
                             "type" to "array",
@@ -426,27 +421,27 @@ object MessagesRequest {
                     "gear" to
                         mapOf(
                             "type" to "object",
-                            "description" to "Worn equipment; a given slot replaces that slot",
+                            "description" to "Equipment; a given slot replaces that slot",
                             "properties" to
                                 listOf("weapon", "armor", "trinket").associateWith {
                                     mapOf("type" to "string")
                                 },
                         ),
                 ),
-            "required" to listOf("name"),
         )
 
     private val UPDATE_RUN_STATE_TOOL =
         tool(
             UPDATE_RUN_STATE,
             """
-            Changes the run state the app saves and sends at the end of every request. Send only
-            what changed, as many changes at once as needed; every field or entry left out stays
-            as saved. Characters are matched by name, and a new name adds one. A character's
-            cards are the whole deck, starting cards included, in the form save_data_cost takes.
-            Returns the whole state after the change, and for each character whose cards or
-            removals changed, the Faint Memory points of the whole deck under the game's rules;
-            those points are saved as the character's points unless the update gives points.
+            Changes the run state the app saves, sends at the end of every request, and shows the
+            player: the run character's target deck (what the run farms for) and current deck
+            (what its Save Data holds now). Send only what changed, as many changes at once as
+            needed; every field or entry left out stays as saved. Each deck's cards are the whole
+            deck, starting cards included, in the form save_data_cost takes. Returns the whole
+            state after the change, with the app's comparison of the current deck against the
+            target. The app costs each deck whose cards or removals changed under the game's
+            rules and saves those points, unless the update gives points.
             """,
             mapOf(
                 "character" to
@@ -457,13 +452,23 @@ object MessagesRequest {
                             "it, when the screen shows it beyond doubt; otherwise ask with " +
                             "ask_player. The player sees it and can change it",
                     ),
-                "plan" to
+                "target" to
                     mapOf(
-                        "type" to "string",
                         "description" to
-                            "The target deck as short lines: each card with its Epiphany " +
-                            "version and copies, where Duplicates go, removals, the equipment " +
-                            "to take, and its Faint Memory cost from save_data_cost",
+                            "Changes to the target deck: the cards with their Epiphany versions " +
+                            "and copies, the removals, and the equipment to take",
+                    ) + DECK_PARTS_SCHEMA,
+                "current" to
+                    mapOf(
+                        "description" to
+                            "Changes to the current deck, as the screens show it",
+                    ) + DECK_PARTS_SCHEMA,
+                "points" to
+                    mapOf(
+                        "type" to "integer",
+                        "description" to
+                            "Faint Memory points the current Save Data holds, when a counter on " +
+                            "screen shows them; otherwise omit it",
                     ),
                 "limit" to
                     mapOf(
@@ -472,20 +477,13 @@ object MessagesRequest {
                             "The Save Data Storage Limit in points as shown on screen; omit " +
                             "while unknown",
                     ),
-                "characters" to
-                    mapOf(
-                        "type" to "array",
-                        "description" to
-                            "Changed team members; each has their own Save Data",
-                        "items" to DECK_CHARACTER_SCHEMA,
-                    ),
                 "drop_first" to
                     mapOf(
                         "type" to "array",
                         "items" to mapOf("type" to "string"),
                         "description" to
-                            "Parts of the plan to give up first, in order, when it costs more " +
-                            "than the limit",
+                            "Parts of the target to give up first, in order, when it costs " +
+                            "more than the limit",
                     ),
             ),
             emptyList(),
@@ -619,9 +617,9 @@ object MessagesRequest {
           identify_screen; its answer is authoritative, and earlier player messages carry the
           answer for their screenshot. Narrow "A or B" to one only when the screen shows a
           name. You MUST NOT name a character from looks, element icons, or class icons, name
-          equipped gear from looks, or assume a character wears the plan's gear.
+          equipped gear from looks, or assume a character wears the target's gear.
         - When you check a card's version (base, Epiphany I to V), you MUST state the version
-          the czn tools matched, then how it differs from what the plan or the player wants. A
+          the czn tools matched, then how it differs from what the target or the player wants. A
           version name on screen, often in parentheses after the card's name, decides the
           version: match it to alias.
         - The icon under a card's cost decides whether it carries a Divine Epiphany: a tall
@@ -629,7 +627,7 @@ object MessagesRequest {
           lavender, light blue, or purple), marks one; a round yellow star marks only an
           Epiphany. You MUST NOT infer a Divine Epiphany from the card's text.
         - You MUST NOT advise a step the screen shows is already done, or call the player's
-          state a match for a plan before you have checked each part of it; name the parts
+          state a match for the target before you have checked each part of it; name the parts
           still unchecked.
         - You MUST state only player facts the screen or this run's history shows, never
           invented progress, clears, ownership, or past purchases. When comparing two screens,
@@ -674,27 +672,30 @@ object MessagesRequest {
           is not known, you MUST settle it with update_run_state's character or an ask_player
           characters question before advising on the run. You MUST NOT guess it, or ask again once it is known unless the
           screen contradicts it.
-        - Once the character is known and no plan is saved, you MUST settle the run's target
-          deck from character_guide's plan and the player's deck, cost it with save_data_cost,
-          and save it and the deck as the screens show it with update_run_state before
-          advising a pick. When the plan costs more than the Save Data limit, say so and
-          record what to drop first. When the limit is not known, ask
+        - Once the character is known and no target is saved, you MUST settle the run's
+          target deck from character_guide's plan and the player's deck, and save it as the
+          target and the deck as the screens show it as the current deck with
+          update_run_state before advising a pick. When the target costs more than the Save
+          Data limit, say so and record what to drop first. When the limit is not known, ask
           for it with ask_player.
         - On every pick screen (card reward, Epiphany, Divine Epiphany, Duplicate, removal,
-          Memory, pact, shop), you MUST check each option against the saved plan, name the
-          part of the plan the pick serves, and state the pick's cost from save_data_cost and
-          the points left after it, counting from the screen's points counter when this run
-          has shown one; your own costed total is only for when it has not. When a pick is
-          outside the plan and costs points, you SHOULD recommend Skip. Use a free reroll before settling for a card outside the plan.
-        - Before recommending an Epiphany version outside the plan, you MUST search whether a
-          later Epiphany can still replace it with the plan's version.
-        - After each pick, you MUST call update_run_state with what the pick changed. When the
-          screen shows a points counter, a deck, or worn gear that differs from the saved state,
-          the screen wins: update the entries that differ.
+          Memory, pact, shop), you MUST check each option against the saved target, name the
+          part of the target the pick serves, and state the pick's cost from save_data_cost
+          and the points left after it, counting from the screen's points counter when this
+          run has shown one; the saved costed points are only for when it has not. When a
+          pick is outside the target and costs points,
+          you SHOULD recommend Skip. Use a free reroll before settling for a card outside the
+          target.
+        - Before recommending an Epiphany version outside the target, you MUST search whether
+          a later Epiphany can still replace it with the target's version. When a result
+          states it can and the player takes it, save that current card with fixable.
+        - After each pick, you MUST call update_run_state with what the pick changed in the
+          current deck. When the screen shows a points counter, a deck, or worn gear that
+          differs from the saved state, the screen wins: update the entries that differ.
+        - The run state tracks only the run character's decks; picks for teammates are not
+          saved.
         - Decide a choice yourself when the tools can settle it, such as which teammate gains
           more from a card; ask the player only for what they alone know.
-        - Once per run, you MUST ask with ask_player whether the teammates' Save Data matters.
-          If it does not, say that picks for them only help this run.
         - On a Chaos event screen, you MUST weigh each choice by everything it can lead to:
           for a choice that opens another screen, the best rewards that screen can offer and
           what they cost or risk. Recommend a choice only after comparing it with the others

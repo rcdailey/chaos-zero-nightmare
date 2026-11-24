@@ -12,6 +12,7 @@ import app.dailey.czn.companion.characters.ScreenGear
 import app.dailey.czn.companion.claude.ClaudeConversation
 import app.dailey.czn.companion.overlay.OverlaySettings
 import app.dailey.czn.companion.overlay.OverlayStatus
+import app.dailey.czn.companion.run.DeckDetails
 import app.dailey.czn.companion.run.RunDatabase
 import app.dailey.czn.companion.run.RunRepository
 import app.dailey.czn.companion.run.SaveDataCost
@@ -61,6 +62,7 @@ class CompanionApp : Application() {
             ScreenCharacters(http, cznDataAuth),
             ScreenGear(http, cznDataAuth),
             SaveDataCost(http, cznDataAuth),
+            DeckDetails(http, cznDataAuth),
             ScreenshotArchive(File(filesDir, "screenshots")),
         )
     }

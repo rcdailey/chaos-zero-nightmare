@@ -273,6 +273,7 @@ class PanelActions(
     val onSend: (String) -> Unit = {},
     val onStop: () -> Unit = {},
     val onChangeCharacter: () -> Unit = {},
+    val onShowDeck: () -> Unit = {},
 )
 
 /** Below this height the top bar would leave the conversation almost no room. */
@@ -316,6 +317,9 @@ private fun PanelTopBar(
 ) = TopAppBar(
     title = { RunCharacterChip(state.character, actions.onChangeCharacter) },
     actions = {
+        IconButton(onClick = actions.onShowDeck) {
+            Icon(painterResource(R.drawable.ic_style), contentDescription = "Run deck")
+        }
         IconButton(onClick = actions.onNewRun, enabled = !state.busy) {
             Icon(painterResource(R.drawable.ic_add), contentDescription = "New run")
         }
@@ -415,6 +419,7 @@ private fun Conversation(
                 Reply(
                     state.streaming,
                     state.pendingTools,
+                    state.pendingChanges,
                     state.pendingAsks,
                     // The spinner would claim Claude is working while it waits for the player.
                     working = ask == null,
@@ -431,6 +436,7 @@ private fun Conversation(
                 Reply(
                     entry.text,
                     entry.tools,
+                    entry.changes,
                     entry.asks,
                     working = false,
                     screen = entries.getOrNull(index - 1)?.screen.orEmpty(),
@@ -441,14 +447,16 @@ private fun Conversation(
 }
 
 /**
- * A reply: the CZN data lookups behind it, its collapsed details (what the app found on the
- * screenshot, [screen]), then the advice with each set of questions Claude asked where it asked
- * them; a spinner while Claude is [working] and no advice follows the last question yet.
+ * A reply: the CZN data lookups behind it, what it changed in the run's decks, its collapsed
+ * details (what the app found on the screenshot, [screen]), then the advice with each set of
+ * questions Claude asked where it asked them; a spinner while Claude is [working] and no advice
+ * follows the last question yet.
  */
 @Composable
 private fun Reply(
     text: String,
     tools: List<String>,
+    changes: List<String>,
     asks: List<AnsweredAsk>,
     working: Boolean,
     screen: String = "",
@@ -456,6 +464,7 @@ private fun Reply(
     val parts = ReplyParts.parse(text, asks.map { it.offset })
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         if (tools.isNotEmpty()) ToolCalls(tools)
+        if (changes.isNotEmpty()) DeckChangeLines(changes)
         if (screen.isNotBlank()) DetailsBlock(screen)
         parts.advice.forEachIndexed { index, advice ->
             if (advice.isNotEmpty()) SteadyMarkdown(advice)
@@ -485,6 +494,30 @@ private fun ToolCalls(tools: List<String>) =
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
+        }
+    }
+
+/** One line per deck change, each after the deck icon, in the accent color of highlights. */
+@Composable
+private fun DeckChangeLines(changes: List<String>) =
+    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        changes.forEach { change ->
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(
+                    painterResource(R.drawable.ic_style),
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(16.dp),
+                )
+                Text(
+                    change,
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+            }
         }
     }
 
@@ -612,6 +645,8 @@ private fun PanelPreviewContent() =
                 ),
             pendingQuestion = "Why not Radiant Sword Flow?",
             pendingTools = listOf("lookup: Radiant Sword Flow", "character_guide: Rossweisse"),
+            pendingChanges =
+                listOf("Epiphany: Blade of the Cycle base to III", "Target: added Aimed Fire"),
             streaming = "Radiant Sword Flow needs more Justice",
             busy = true,
             character = "Rossweisse",

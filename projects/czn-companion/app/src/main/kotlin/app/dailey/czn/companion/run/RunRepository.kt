@@ -23,6 +23,8 @@ data class RunEntry(
     val screen: String = "",
     /** An assistant reply's whole exchange as JSON (see [RunEntryRow.exchange]). */
     val exchange: String = "",
+    /** What the reply's run state updates changed (see [RunEntryRow.changes]). */
+    val changes: List<String> = emptyList(),
 )
 
 /** The exchange in progress in the active run; see [OpenTurnRow]. */
@@ -37,6 +39,7 @@ class OpenTurn(
     val asks: List<AnsweredAsk>,
     /** JSON array of SDK message params; see [OpenTurnRow.turn]. */
     val turn: String,
+    val changes: List<String> = emptyList(),
 )
 
 /** The active run's conversation, with any exchange in progress. Survives restarts until [newRun]. */
@@ -68,19 +71,23 @@ class RunRepository(
             connection.immediateTransaction { dao.setCharacter(activeRunId(), name) }
         }
 
-    /** The active run's plan text saved before deck state existed; null for newer runs. */
-    suspend fun planNow(): String? = dao.activeRun()?.plan
+    /** The active run's deck state; null until Claude saves one, and again after [newRun]. */
+    val deck: Flow<RunDeck?> = dao.activeDeck().map { it?.let(RunDecks::decode) }
 
-    /** The active run's deck state; null until Claude saves one, and after [newRun]. */
     suspend fun deckNow(): RunDeck? = dao.activeRun()?.deck?.let(RunDecks::decode)
 
-    /** Applies [update] to the active run's deck state in one transaction; the state after it. */
-    suspend fun updateDeck(update: RunUpdate): RunDeck =
+    /**
+     * Saves [change] of the active run's deck state (null while none is saved) in one
+     * transaction; the states before and after it.
+     */
+    suspend fun changeDeck(change: (RunDeck?) -> RunDeck): Pair<RunDeck?, RunDeck> =
         db.useWriterConnection { connection ->
             connection.immediateTransaction {
                 val runId = activeRunId()
                 val saved = dao.activeRun()?.deck?.let(RunDecks::decode)
-                RunDecks.apply(saved, update).also { dao.setDeck(runId, RunDecks.encode(it)) }
+                val changed = change(saved)
+                dao.setDeck(runId, RunDecks.encode(changed))
+                saved to changed
             }
         }
 
@@ -111,6 +118,7 @@ class RunRepository(
                 splitTools(row.tools),
                 PlayerAsks.decode(row.asks),
                 row.turn,
+                splitTools(row.changes),
             )
         }
 
@@ -128,6 +136,7 @@ class RunRepository(
                         reply = turn.reply,
                         tools = joinTools(turn.tools),
                         asks = PlayerAsks.encode(turn.asks),
+                        changes = joinTools(turn.changes),
                         turn = turn.turn,
                     ),
                 )
@@ -151,6 +160,7 @@ class RunRepository(
         screen: String = "",
         screenshot: String = "",
         exchange: String = "",
+        changes: List<String> = emptyList(),
     ) = db.useWriterConnection { connection ->
         connection.immediateTransaction {
             val runId = activeRunId()
@@ -176,6 +186,7 @@ class RunRepository(
                         tools = joinTools(tools),
                         asks = PlayerAsks.encode(asks),
                         exchange = exchange,
+                        changes = joinTools(changes),
                     ),
                 ),
             )
@@ -205,6 +216,7 @@ class RunRepository(
             PlayerAsks.decode(row.asks),
             row.screen,
             row.exchange,
+            splitTools(row.changes),
         )
 
     private fun joinTools(tools: List<String>) = tools.joinToString("\n") { it.replace('\n', ' ') }

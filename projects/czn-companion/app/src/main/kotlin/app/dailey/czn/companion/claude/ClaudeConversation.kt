@@ -11,7 +11,9 @@ import app.dailey.czn.companion.auth.CznDataAuth
 import app.dailey.czn.companion.auth.SignInRequired
 import app.dailey.czn.companion.characters.ScreenCharacters
 import app.dailey.czn.companion.characters.ScreenGear
-import app.dailey.czn.companion.run.CharacterUpdate
+import app.dailey.czn.companion.run.CardInfo
+import app.dailey.czn.companion.run.DeckChanges
+import app.dailey.czn.companion.run.DeckDetails
 import app.dailey.czn.companion.run.OpenTurn
 import app.dailey.czn.companion.run.RequestUsageRow
 import app.dailey.czn.companion.run.RunDecks
@@ -53,6 +55,11 @@ sealed interface ReplyEvent {
     /** Claude called a CZN data tool; [label] is the tool name and its main argument. */
     data class ToolCall(
         val label: String,
+    ) : ReplyEvent
+
+    /** A run state update changed the decks; [lines] say what changed ([DeckChanges]). */
+    data class DeckChanged(
+        val lines: List<String>,
     ) : ReplyEvent
 
     /** The player answered or skipped questions Claude asked; the reply continues. */
@@ -109,8 +116,12 @@ class ClaudeConversation(
     private val screenCharacters: ScreenCharacters,
     private val screenGear: ScreenGear,
     private val saveDataCost: SaveDataCost,
+    private val deckDetails: DeckDetails,
     private val archive: ScreenshotArchive,
 ) {
+    /** The active run's deck state, for the deck view. */
+    val deck get() = run.deck
+
     val entries get() = run.entries
 
     suspend fun entriesNow() = run.entriesNow()
@@ -181,12 +192,13 @@ class ClaudeConversation(
     ) {
         val history = run.entriesNow()
         // Read once, so the newest message stays identical, and cached, across this turn.
-        val state = RunState(run.characterNow(), run.planNow(), run.deckNow())
+        val state = RunState(run.characterNow(), run.deckNow())
         var previousMessageId = run.lastMessageId()
         var round = 0
         val reply = StringBuilder(open.reply)
         val tools = open.tools.toMutableList()
         val asks = open.asks.toMutableList()
+        val changes = open.changes.toMutableList()
         val turn = decodeTurn(open.turn).toMutableList()
         // Set when Claude asks for the characters' names; saved with the question.
         var screen = open.screen
@@ -202,6 +214,7 @@ class ClaudeConversation(
                     tools.toList(),
                     asks.toList(),
                     encodeTurn(turn),
+                    changes.toList(),
                 ),
             )
 
@@ -219,7 +232,7 @@ class ClaudeConversation(
                             if (use.name() == MessagesRequest.IDENTIFY_SCREEN) {
                                 identifyScreen(open.screenshot) { screen = it }
                             } else {
-                                runTool(use, player, reply, asks)
+                                runTool(use, player, reply, asks, changes)
                             }
                         }
                     save()
@@ -265,6 +278,7 @@ class ClaudeConversation(
                             screen,
                             open.screenshot,
                             encodeTurn(turn + message.toParam()),
+                            changes,
                         )
                         emit(ReplyEvent.Done)
                         return
@@ -486,6 +500,7 @@ class ClaudeConversation(
         player: PlayerInput,
         reply: StringBuilder,
         asks: MutableList<AnsweredAsk>,
+        changes: MutableList<String>,
     ): Pair<String, Boolean> {
         val inputJson = JSON.writeValueAsString(use._input())
         return when (use.name()) {
@@ -498,7 +513,7 @@ class ClaudeConversation(
 
             MessagesRequest.UPDATE_RUN_STATE -> {
                 RunDecks.parse(inputJson).fold(
-                    onSuccess = { update -> updateRunState(update) to false },
+                    onSuccess = { update -> updateRunState(update, changes) to false },
                     onFailure = { it.message.orEmpty() to true },
                 )
             }
@@ -543,32 +558,52 @@ class ClaudeConversation(
     }
 
     /**
-     * Applies Claude's run state [update], then costs each character whose cards or removals it
-     * changed with the data server's Faint Memory rules. A character the update gives no points
-     * for takes that cost as its points.
+     * Applies Claude's run state [update]; [changes] receives what it changed for the chat. Then
+     * costs each deck whose cards or removals changed with the data server's Faint Memory rules
+     * (the current deck's cost is its points unless the update gives points), and asks the data
+     * server for every new card and item name's game data and pictures.
      */
-    private suspend fun updateRunState(update: RunUpdate): String {
-        update.character?.trim()?.let { run.setCharacter(it) }
-        var deck = run.updateDeck(update)
-        val costed =
-            update.characters
-                .filter { it.cards.isNotEmpty() || it.removed != null }
-                .mapNotNull { change ->
-                    deck.characters.firstOrNull { it.name.equals(change.name.trim(), true) }?.let {
-                        Triple(it, change.points, saveDataCost.cost(it))
-                    }
-                }
-        val points =
-            costed.mapNotNull { (character, given, cost) ->
-                cost?.takeIf { given == null }?.let { CharacterUpdate(character.name, it.total) }
+    private suspend fun FlowCollector<ReplyEvent>.updateRunState(
+        update: RunUpdate,
+        changes: MutableList<String>,
+    ): String {
+        val character = update.character?.trim()
+        val previous = run.characterNow()
+        character?.let { run.setCharacter(it) }
+        val newCharacter = character?.takeUnless { it.equals(previous, ignoreCase = true) }
+        val (before, applied) = run.changeDeck { RunDecks.apply(it, update) }
+        val owner = character ?: run.characterNow()
+        val target = owner?.takeIf { update.target?.costed == true }
+        val current = owner?.takeIf { update.current?.costed == true }
+        val targetCost = target?.let { saveDataCost.cost(it, applied.target) }
+        val currentCost = current?.let { saveDataCost.cost(it, applied.current) }
+        val (cards, gear) = RunDecks.missingInfo(applied)
+        val (cardInfo, gearInfo) =
+            owner?.let { deckDetails.find(it, cards, gear) }
+                ?: (emptyMap<String, CardInfo>() to emptyMap())
+        val (_, deck) =
+            run.changeDeck { saved ->
+                val deck = saved ?: applied
+                deck.copy(
+                    targetPoints = targetCost?.total ?: deck.targetPoints,
+                    points = currentCost?.takeIf { update.points == null }?.total ?: deck.points,
+                    cardInfo = deck.cardInfo + cardInfo,
+                    gearInfo = deck.gearInfo + gearInfo,
+                )
             }
-        if (points.isNotEmpty()) deck = run.updateDeck(RunUpdate(characters = points))
+        val lines = DeckChanges.lines(before, deck, newCharacter)
+        if (lines.isNotEmpty()) {
+            changes += lines
+            emit(ReplyEvent.DeckChanged(lines))
+        }
         return buildList {
             add("Saved. The run state now:")
-            update.character?.let { add("Character: ${it.trim()}") }
+            character?.let { add("Character: $it") }
             add(RunDecks.describe(deck))
-            costed.forEach { (character, _, cost) ->
-                add(SaveDataCost.describe(character.name, cost))
+            if (target != null) add("Target: " + SaveDataCost.describe(target, targetCost))
+            if (current != null) add("Current: " + SaveDataCost.describe(current, currentCost))
+            if (owner == null && (update.target != null || update.current != null)) {
+                add("The run's character is not known yet, so the decks are not costed.")
             }
         }.joinToString("\n")
     }

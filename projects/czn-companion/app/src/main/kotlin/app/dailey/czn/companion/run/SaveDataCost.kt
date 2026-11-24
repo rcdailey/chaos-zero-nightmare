@@ -29,9 +29,17 @@ data class DeckCost(
 )
 
 @Serializable
+private data class CostCard(
+    val card: String,
+    val version: String?,
+    val divine: Boolean,
+    val copies: Int,
+)
+
+@Serializable
 private data class CostRequest(
     val character: String,
-    val cards: List<DeckCard>,
+    val cards: List<CostCard>,
     val removed: List<String>,
 )
 
@@ -49,18 +57,18 @@ class SaveDataCost(
             encodeDefaults = true
         }
 
-    /** The cost of [character]'s deck, or null when the server did not answer; logged. */
-    suspend fun cost(character: DeckCharacter): DeckCost? =
+    /** The cost of [character]'s [deck], or null when the server did not answer; logged. */
+    suspend fun cost(
+        character: String,
+        deck: DeckParts,
+    ): DeckCost? =
         try {
+            val cards = deck.cards.map { CostCard(it.card, it.version, it.divine, it.copies) }
             val response =
                 http.post(SAVE_DATA_COST_URL) {
                     bearerAuth(cznData.accessToken())
                     contentType(ContentType.Application.Json)
-                    setBody(
-                        json.encodeToString(
-                            CostRequest(character.name, character.cards, character.removed),
-                        ),
-                    )
+                    setBody(json.encodeToString(CostRequest(character, cards, deck.removed)))
                     timeout { requestTimeoutMillis = TIMEOUT_MILLIS }
                 }
             val body = response.bodyAsText()
